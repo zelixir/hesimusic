@@ -1,32 +1,61 @@
-HesiMusic
+# HesiMusic(海瑟音乐)
 
-This repository contains two main parts:
+海瑟音乐是一个安卓本地音乐播放器
 
-- `ui`: A Vue 3 + Vite + Tailwind web UI that runs inside the Android WebView. Run the dev server with:
+## 项目目标
+1. 替换早已停止更新且不再支持新版android系统的`天天动听`
+2. 验证纯AI开发的能力
 
-  ```bash
-  cd ui
-  npm install
-  npm run dev
-  ```
+## 项目设计
+见 [design.md](design.md)
 
-  The UI uses a development mock `src/services/musicBridge.ts` during development. In Android the WebView exposes a `HesiMusicBridge` object; the mock should be replaced by a small adapter that calls the native bridge.
 
-- `app`: Android (Kotlin) app scaffold. Import `e:/code/hesimusic/app` into Android Studio. The WebView in `MainActivity` currently loads `http://10.0.2.2:5173` which points to the host machine dev server.
+## 开发记录
+本项目以AI开发为主, 人工测试并进行少量修改, 使用`copilot`+`GPT-5 mini`来开发
 
-Embedding built frontend into the Android app
+AI开发记录在[chat-log.md](chat-log.md)中
 
-If you want to package the production frontend into the Android APK so the app can run without a dev server, use the bundle script in `ui`:
 
-```bash
-cd ui
-npm install
-npm run bundle
-```
+## 功能清单
 
-This will create `app/app/src/main/assets/frontend.zip`. The Android app will extract and serve this frontend from a virtual domain `https://app.frontend/` inside the WebView.
+- [ ] 扫描本地音乐
+  - [ ] 支持常见的音乐格式
+  - [ ] 支持cue文件
+  - [ ] 支持常见的标签格式(id3等)
+  - [ ] 支持自动识别非UTF8的中文和日文字符编码
+  - [ ] 支持屏蔽文件夹
+  - [ ] 支持以下开关
+    - [ ] 不扫描60秒以下歌曲
+    - [ ] 不扫描amr, mid格式歌曲
+    - [ ] 不扫描隐藏文件夹
+- [ ] 播放列表
+  - [ ] 全部歌曲视图
+  - [ ] 歌手列表视图
+  - [ ] 专辑列表视图
+  - [ ] 文件夹视图
+  - [ ] 支持首字母索引
+    - [ ] 首字母索引支持日文假名
+    - [ ] 首字母索引支持日文中的汉字(优先以中文拼音识别)
+    - [ ] 首字母索引可以自动识别并排除歌曲标题中的序号
+  - [ ] 支持搜索
+- [ ] 播放
+  - [ ] 支持基本的播放功能(上一曲下一曲, 进度条控制, 随机播放等)
+  - [ ] 支持睡眠模式
+  - [ ] 支持均衡器
+  - [ ] 耳机断连自动暂停
+  - [ ] 正在播放页
+    - [ ] 显示歌曲信息
+  - [ ] 支持播放队列(fb2k中的ctrl+d)
 
-Next steps and notes:
-- Implement scanning and metadata extraction in the Android app. Save metadata using Room (a scaffold is present at `app/src/main/java/com/hesimusic/data`).
-- Implement ExoPlayer playback in `player/MusicPlayer.kt` and hook it to `MusicService`.
-- Implement a robust JS bridge with typed RPC (use requestId/response promise pattern as described in `design.md`).
+
+## 暂不考虑支持的功能
+
+* 歌词
+* 自定义歌单
+* 删除歌曲(从列表删除或直接删除文件)
+* 收藏
+* UI主题
+* 启动时自动播放
+* 启动时从中断处继续播放
+* 播放统计
+
