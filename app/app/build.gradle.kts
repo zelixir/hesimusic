@@ -41,9 +41,9 @@ dependencies {
     implementation(libs.androidx.appcompat)
     implementation(libs.zxing.android.embedded)
     implementation(libs.core)
-    implementation("androidx.media3:media3-exoplayer:1.8.0")
-    implementation("androidx.media3:media3-exoplayer-dash:1.8.0")
-    implementation("androidx.media3:media3-ui:1.8.0")
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.exoplayer.dash)
+    implementation(libs.androidx.media3.ui)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
@@ -55,6 +55,6 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     annotationProcessor(libs.androidx.room.compiler)
     // Metadata parsing libraries required by MetadataExtractor
-    implementation("org.jaudiotagger:jaudiotagger:2.2.6")
-    implementation("com.github.albfernandez:juniversalchardet:2.4.0")
+    implementation(libs.jaudiotagger)
+    implementation(libs.juniversalchardet)
 }
