@@ -27,6 +27,7 @@
        - doWork(): Result
        - serializeCursor(): ByteArray
        - deserializeCursor(blob: ByteArray)
+   - 状态: 已完成
 
 2. 文件系统扫描器 (FileScanner)
    - 功能点：并发遍历存储根路径，产生候选文件路径流，支持排除规则与隐藏目录忽略
@@ -37,6 +38,7 @@
        - pauseScan()
        - resumeScan(cursor: ScanCursor)
        - buildExclusionMatcher(options: ScanOptions): (File) -> Boolean
+   - 状态: 已完成
 
 3. 元数据提取器 (MetadataExtractor)
    - 功能点：提取时长、标签、比特率、采样率、通道数等；尝试多种后备解析器；对标签文本进行编码检测与转换
@@ -46,6 +48,7 @@
        - extract(file: File): MetadataResult
        - extractLight(file: File): LightMetadata // 仅 size/duration/format
        - decodeTagText(raw: ByteArray): String
+   - 状态: 已完成
 
 4. CUE 解析器 (CueParser)
    - 功能点：解析 `.cue` 文本，检测编码，生成 TrackEntry 列表并关联媒体文件路径
@@ -54,6 +57,7 @@
      - `app/src/main/java/zelixir/hesimusic/scan/CueParser.kt`
        - parse(cueFile: File): CueParseResult
        - resolveReferencedMedia(cueResult: CueParseResult, baseDirs: List<File>): List<TrackEntry>
+  - 状态: 已完成
 
 5. 去重与指纹 (Deduplicator)
    - 功能点：提供快速去重（path+size+modified）和可选的音频指纹化接口（异步、低优先级）
@@ -62,6 +66,7 @@
      - `app/src/main/java/zelixir/hesimusic/scan/Deduplicator.kt`
        - isDuplicate(candidate: SongEntry): DuplicateCheckResult
        - computeFingerprintAsync(file: File): Deferred<String?>
+   - 状态: 已完成
 
 6. 数据库与持久化 (ScanRepository)
    - 功能点：定义 Room Entities 与 DAO，批量写入 songs、更新 scan_state，支持事务与游标存储
@@ -75,6 +80,7 @@
      - `app/src/main/java/zelixir/hesimusic/scan/ScanRepository.kt`
        - saveBatch(songs: List<SongEntry>)
        - updateScanState(cursor: ByteArray, stats: ScanStats)
+  - 状态: 已完成
 
 7. 扫描 Worker 与恢复逻辑
    - 功能点：实现 WorkManager 的 Worker，支持中断保存游标与恢复，定期推送进度
@@ -83,6 +89,7 @@
      - `app/src/main/java/zelixir/hesimusic/scan/ScanWorker.kt`
        - doWork(): Result
        - checkpoint(cursor: ScanCursor)
+   - 状态: 已完成
 
 8. 后端 - WebView JS Bridge (ScanWebBridge)
    - 功能点：把扫描控制接口与进度事件暴露给前端，接收前端暂停/取消/配置命令
@@ -92,6 +99,7 @@
        - startScanFromJs(optionsJson: String): String
        - stopScanFromJs(scanId: String): Boolean
        - onProgressUpdate(scanId: String, progress: ScanProgress)
+   - 状态: 已完成
 
 9. 权限处理与 SAF 支持
    - 功能点：在权限不足或需 SAF 授权时上报给前端并暂停，支持从前端回传 SAF Uri 权限
@@ -100,6 +108,7 @@
      - `app/src/main/java/zelixir/hesimusic/scan/PermissionHelper.kt`
        - ensureStoragePermissions(activity: Activity): PermissionResult
        - requestSafAccess(uri: Uri): Boolean
+   - 状态: 已完成
 
 10. 日志、错误上报与监控
     - 功能点：扫描过程中收集错误、失败解析样本并上报给前端；保留本地日志供调试
@@ -108,6 +117,7 @@
       - `app/src/main/java/zelixir/hesimusic/scan/ScanLogger.kt`
         - logInfo(msg: String)
         - logError(e: Throwable, context: String)
+  - 状态: 已完成
 
 
 ---
@@ -123,6 +133,7 @@
      - `ui/src/components/ScanPage.vue`
        - setup() 中使用 `useScanStore()`
        - methods: onStartScan(), onStopScan(), onAddPath(), onRemovePath()
+  - 状态: 已完成
 
 2. 扫描设置表单与验证
    - 功能点：允许用户配置最小时长、忽略扩展、是否扫描隐藏目录、路径白名单/黑名单
@@ -131,6 +142,7 @@
      - `ui/src/services/scanApi.ts`
        - saveSettings(settings: ScanSettings): Promise<void>
        - loadSettings(): Promise<ScanSettings>
+  - 状态: 已完成
 
 3. 动态进度条与日志视图
    - 功能点：实时显示已扫描数量、发现歌曲数、当前文件路径、错误/警告日志，支持暂停/取消/跳转到详情
@@ -139,6 +151,7 @@
      - `ui/src/components/ScanProgress.vue`
        - props: scanId
        - methods: handleProgressEvent(ev), handlePauseClick(), handleCancelClick()
+  - 状态: 已完成
 
 4. 结果展示与差异处理
    - 功能点：扫描完成后显示新增、更新、冲突候选（重复）的歌曲条目，支持查看单项详情（跳转到歌曲详情页）
@@ -146,6 +159,7 @@
    - 代码文件及方法：
      - `ui/src/components/ScanResultList.vue`
        - methods: fetchScanResults(scanId), applyMerge(id, action)
+  - 状态: 已完成
 
 5. SAF 权限交互与说明弹窗
    - 功能点：当后端请求 SAF 或权限时，展示指引弹窗并触发系统权限流程（通过 bridge）
@@ -153,6 +167,7 @@
    - 代码文件及方法：
      - `ui/src/components/PermissionModal.vue`
        - methods: onGrantClick(), onCancelClick()
+  - 状态: 已完成
 
 6. 小工具与调试视图（开发期可选）
    - 功能点：显示最近解析失败的文件样本、手动触发元数据解析重试、下载 CUE/元数据文本
@@ -160,6 +175,7 @@
    - 代码文件及方法：
      - `ui/src/components/ScanDebugPanel.vue`
        - methods: retryMetadata(filePath), downloadCue(cueId)
+  - 状态: 已完成
 
 
 ---

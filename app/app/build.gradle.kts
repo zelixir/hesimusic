@@ -54,4 +54,7 @@ dependencies {
 
     implementation(libs.androidx.room.runtime)
     annotationProcessor(libs.androidx.room.compiler)
+    // Metadata parsing libraries required by MetadataExtractor
+    implementation("org.jaudiotagger:jaudiotagger:2.2.6")
+    implementation("com.github.albfernandez:juniversalchardet:2.4.0")
 }
