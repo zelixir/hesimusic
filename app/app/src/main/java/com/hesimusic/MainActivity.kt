@@ -4,6 +4,12 @@ import android.os.Bundle
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
+import java.io.File
+import java.io.FileOutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 
 class MainActivity : ComponentActivity() {
     private lateinit var webView: WebView
@@ -14,7 +20,61 @@ class MainActivity : ComponentActivity() {
         setContentView(webView)
 
         webView.settings.javaScriptEnabled = true
-        webView.webViewClient = WebViewClient()
+        // Prepare local frontend files by extracting bundled zip (if present)
+        val frontendDir = File(filesDir, "frontend")
+        if (!frontendDir.exists()) {
+            frontendDir.mkdirs()
+            try {
+                assets.open("frontend.zip").use { inputStream ->
+                    ZipInputStream(inputStream).use { zipIn ->
+                        var entry: ZipEntry? = zipIn.nextEntry
+                        while (entry != null) {
+                            val outFile = File(frontendDir, entry.name)
+                            if (entry.isDirectory) {
+                                outFile.mkdirs()
+                            } else {
+                                outFile.parentFile?.mkdirs()
+                                FileOutputStream(outFile).use { out ->
+                                    zipIn.copyTo(out)
+                                }
+                            }
+                            zipIn.closeEntry()
+                            entry = zipIn.nextEntry
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("HesiMusic", "Failed to extract frontend.zip: ${e.message}")
+            }
+        }
+
+        // Intercept requests to the virtual domain and serve files from internal storage
+        webView.webViewClient = object : WebViewClient() {
+            override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                val uri = request?.url ?: return super.shouldInterceptRequest(view, request)
+                if (uri.host == "app.frontend") {
+                    var relPath = uri.path?.removePrefix("/") ?: ""
+                    if (relPath.isEmpty() || relPath == "/") relPath = "index.html"
+                    val outFile = File(frontendDir, relPath)
+                    if (outFile.exists() && outFile.isFile) {
+                        val mime = when (outFile.extension.lowercase()) {
+                            "html" -> "text/html"
+                            "js" -> "application/javascript"
+                            "css" -> "text/css"
+                            "json" -> "application/json"
+                            "png" -> "image/png"
+                            "jpg", "jpeg" -> "image/jpeg"
+                            "svg" -> "image/svg+xml"
+                            "woff" -> "font/woff"
+                            "woff2" -> "font/woff2"
+                            else -> "application/octet-stream"
+                        }
+                        return WebResourceResponse(mime, "UTF-8", outFile.inputStream())
+                    }
+                }
+                return super.shouldInterceptRequest(view, request)
+            }
+        }
 
         // Expose a simple JS bridge for development. In the real app implement secure, typed APIs.
         webView.addJavascriptInterface(object {
@@ -36,7 +96,7 @@ class MainActivity : ComponentActivity() {
             }
         }, "HesiMusicBridge")
 
-        // Load local UI (for development, load remote dev server)
-        webView.loadUrl("http://10.0.2.2:5173")
+        // Load the frontend index from the virtual domain
+        webView.loadUrl("https://app.frontend/")
     }
 }
