@@ -1,91 +1,85 @@
 <template>
-  <div class="p-6">
-    <h2 class="text-2xl font-semibold mb-4">扫描音乐</h2>
+  <div>
+    <h2 class="text-lg font-semibold mb-4">扫描音乐</h2>
+
+    <div class="mb-4 bg-white p-4 rounded shadow">
+      <label class="flex items-center space-x-2"><input type="checkbox" v-model="skipShort" /> <span>不扫描60秒以下歌曲</span></label>
+      <label class="flex items-center space-x-2 mt-2"><input type="checkbox" v-model="skipAmrMid" /> <span>不扫描 amr/mid</span></label>
+      <label class="flex items-center space-x-2 mt-2"><input type="checkbox" v-model="skipHidden" /> <span>不扫描隐藏文件夹</span></label>
+    </div>
 
     <div class="mb-4">
-      <label class="block text-sm font-medium mb-1">扫描路径（多行，每行一个路径）</label>
-      <textarea v-model="pathsText" class="w-full border rounded p-2" rows="4"></textarea>
-    </div>
-
-    <div class="flex items-center gap-3 mb-4">
-      <button @click="onStartScan" class="bg-blue-600 text-white px-4 py-2 rounded">开始扫描</button>
-      <button @click="onStopScan" class="bg-gray-300 px-4 py-2 rounded">停止扫描</button>
-      <div v-if="scanId" class="ml-4 text-sm text-gray-600">scanId: {{ scanId }}</div>
-    </div>
-
-    <div class="border-t pt-4">
-      <h3 class="text-lg font-medium mb-2">进度</h3>
-      <div v-if="progress" class="text-sm text-gray-700">
-        已扫描: {{ progress.scannedCount }}，发现歌曲: {{ progress.foundSongs }}，当前: {{ progress.currentPath }}
+      <h3 class="font-medium">要扫描的文件夹</h3>
+      <ul>
+        <li v-for="(f, idx) in folders" :key="f" class="flex justify-between items-center p-2 bg-white rounded mb-2">
+          <div>{{ f }}</div>
+          <div>
+            <button class="px-2 py-1 bg-red-100 rounded" @click="removeFolder(idx)">删除</button>
+          </div>
+        </li>
+      </ul>
+      <div class="mt-2">
+        <folder-picker @picked="onPicked" />
       </div>
-      <div v-else class="text-sm text-gray-500">尚未开始扫描或无进度数据。</div>
+    </div>
+
+    <div class="mb-4">
+      <button class="px-4 py-2 bg-blue-500 text-white rounded" @click="startScan">开始扫描</button>
+      <button class="px-4 py-2 ml-2 bg-gray-200 rounded" @click="$emit('navigate','library')">返回</button>
+    </div>
+
+    <div v-if="scanning" class="mt-4 bg-white p-4 rounded shadow">
+      <div>已扫描：{{ scannedCount }}</div>
+      <div>当前文件：{{ currentFile }}</div>
     </div>
   </div>
 </template>
 
-<script setup lang="ts">
+<script lang="ts" setup>
 import { ref } from 'vue'
+import ScanApi from '../services/scanApi'
+import FolderPicker from './FolderPicker.vue'
 
-type Progress = { scannedCount: number; foundSongs: number; currentPath?: string | null }
+const skipShort = ref(true)
+const skipAmrMid = ref(true)
+const skipHidden = ref(true)
 
-const pathsText = ref('/sdcard/Music')
-const scanId = ref<string | null>(null)
-const progress = ref<Progress | null>(null)
+const folders = ref<string[]>([])
 
-function callBridgeStart(opts: any): string | null {
-  // Prefer window.ScanBridge if available (native addJavascriptInterface)
-  try {
-    if ((window as any).ScanBridge && (window as any).ScanBridge.startScanFromJs) {
-      const res = (window as any).ScanBridge.startScanFromJs(JSON.stringify(opts))
-      const obj = typeof res === 'string' ? JSON.parse(res) : res
-      return obj?.scanId || null
-    }
-    // fallback to musicBridge if exists
-    if ((window as any).musicBridge && (window as any).musicBridge.call) {
-      const r = (window as any).musicBridge.call('startScan', opts)
-      return r?.scanId || null
-    }
-  } catch (e) {
-    console.warn('start bridge failed', e)
-  }
-  return null
-}
+const scanning = ref(false)
+const scannedCount = ref(0)
+const currentFile = ref('')
 
-function callBridgeStop(id: string) {
-  try {
-    if ((window as any).ScanBridge && (window as any).ScanBridge.stopScanFromJs) {
-      return (window as any).ScanBridge.stopScanFromJs(id)
-    }
-    if ((window as any).musicBridge && (window as any).musicBridge.call) {
-      return (window as any).musicBridge.call('stopScan', { scanId: id })
-    }
-  } catch (e) {
-    console.warn('stop bridge failed', e)
+async function pickFolder() {
+  const res = await ScanApi.pickFolder()
+  const r: any = res
+  if (r && r.path) {
+    folders.value.push(String(r.path))
   }
 }
 
-function onStartScan() {
-  const paths = pathsText.value.split('\n').map(s => s.trim()).filter(Boolean)
-  const opts = { paths, settings: { minDurationMs: 0 }, excluded: [] }
-  const id = callBridgeStart(opts)
-  if (id) scanId.value = id
+function onPicked(paths: string[]) {
+  for (const p of paths) {
+    if (!folders.value.includes(p)) folders.value.push(p)
+  }
 }
 
-function onStopScan() {
-  if (!scanId.value) return
-  callBridgeStop(scanId.value)
-  scanId.value = null
-  progress.value = null
+function removeFolder(idx: number) {
+  folders.value.splice(idx, 1)
 }
 
-// Hook for window callbacks: window.__music_api_on_scan_progress__ will be called by native
-;(window as any).__music_api_on_scan_progress__ = (id: string, p: any) => {
-  if (scanId.value !== id) return
-  progress.value = { scannedCount: p.scannedCount || 0, foundSongs: p.foundSongs || 0, currentPath: p.currentPath }
-}
+async function startScan() {
+  scanning.value = true
+  scannedCount.value = 0
+  currentFile.value = ''
+  const onProgress = (p: any) => {
+    scannedCount.value = p.count || scannedCount.value
+    currentFile.value = p.current || currentFile.value
+    if (p.finished) {
+      scanning.value = false
+    }
+  }
 
+  await ScanApi.startScan({ folders: folders.value, skipShort: skipShort.value, skipAmrMid: skipAmrMid.value, skipHidden: skipHidden.value }, onProgress)
+}
 </script>
-
-<style scoped>
-/* minimal styles - use Tailwind in project */
-</style>

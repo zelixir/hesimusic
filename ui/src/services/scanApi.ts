@@ -1,3 +1,41 @@
+import MusicBridge from './musicBridge'
+
+export type FolderNode = {
+  path: string
+  name?: string
+  count?: number
+  children?: FolderNode[]
+}
+
+type ScanProgressCb = (p: { count?: number; current?: string; finished?: boolean }) => void
+
+const ScanApi = {
+  async pickFolder() {
+    // native should return { path: string }
+    return await MusicBridge.call('pickFolder', {})
+  },
+
+  async listFolders(opts?: { parent?: string }): Promise<FolderNode[]> {
+    // native should return a list of FolderNode for the given parent
+    const res = await MusicBridge.call('listFolders', opts || {})
+    return (res as any) || []
+  },
+
+  async startScan(options: any, onProgress?: ScanProgressCb) {
+    // options: { folders: string[], skipShort, skipAmrMid, skipHidden }
+    // For native, we'll call 'startScan' and then expect native to push progress events via MusicBridge.on('scanProgress')
+    const res = await MusicBridge.call('startScan', { options })
+    if (onProgress) {
+      const off = MusicBridge.on('scanProgress', (p: any) => {
+        onProgress(p)
+        if (p.finished) off()
+      })
+    }
+    return res
+  }
+}
+
+export default ScanApi
 export type ScanSettings = {
   minDurationMs?: number
   excluded?: string[]

@@ -14,7 +14,7 @@
             <div class="text-sm text-gray-500">{{ t.artist }}</div>
           </div>
           <div>
-            <button class="px-2 py-1 bg-gray-200 rounded" @click="play(t.id)">Play</button>
+            <button class="px-2 py-1 bg-gray-200 rounded" @click="$emit('play', t.id)">Play</button>
           </div>
         </div>
       </li>
@@ -22,30 +22,19 @@
   </div>
 </template>
 
-<script lang="ts">
-import { ref, computed, onMounted } from 'vue'
-import MusicApi from '../services/musicApi'
+<script lang="ts" setup>
+import { ref, computed, defineProps } from 'vue'
 
-export default {
-  name: 'TrackList',
-  setup() {
-    const tracks = ref<Array<any>>([])
-    const query = ref('')
+type Track = { id: string; title: string; artist: string }
 
-    const filtered = computed(() => {
-      if (!query.value) return tracks.value
-      return tracks.value.filter(t => (t.title + ' ' + t.artist).toLowerCase().includes(query.value.toLowerCase()))
-    })
+const props = defineProps<{ tracks: Track[] }>()
 
-    onMounted(async () => {
-      tracks.value = await MusicApi.getAllTracks()
-    })
+const query = ref('')
 
-    const play = async (id: string) => {
-      await MusicApi.play(id)
-    }
+const tracks = computed(() => props.tracks || [])
 
-    return { tracks, query, filtered, play }
-  }
-}
+const filtered = computed(() => {
+  if (!query.value) return tracks.value
+  return tracks.value.filter(t => (t.title + ' ' + t.artist).toLowerCase().includes(query.value.toLowerCase()))
+})
 </script>

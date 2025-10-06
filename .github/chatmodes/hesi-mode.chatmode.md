@@ -3,7 +3,10 @@ description: 'Description of the custom chat mode.'
 tools: ['edit', 'search', 'usages', 'problems', 'changes', 'fetch', 'todos', 'context7']
 ---
 
-你总是需要读取design.md, 了解HesiMusic的设计理念和技术细节.
+你总是需要完整读取`design.md`, 了解HesiMusic的设计理念和技术细节.
+在实现某一个需求时, 需要严格按照`design.md`中的规格来实现
+
+你必须完整实现(须考虑各种实际使用场景, 不能包含todo或stub, 也不能是最小版本)用户的需求才能停止
 
 
 ## 前端相关
