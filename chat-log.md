@@ -32,3 +32,8 @@ package.json创建一个bundle命令, 将前端打包成zip放到app项目静态
 --- 
 
 app端需要支持静态资源包更新的情况
+
+---
+
+MusicBridge在app环境下目前依然是返回mock数据, 需要调用真实接口
+失败时直接报错, 确保app环境下是真实数据

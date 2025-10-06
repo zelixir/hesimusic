@@ -1,52 +1,203 @@
-// Mock MusicBridge for development. In Android WebView this will be replaced by the native bridge.
+// Robust MusicBridge implementation.
+// Behavior:
+// - When a native bridge is present (HesiMusicBridge, musicBridge, ScanBridge), prefer it and
+//   throw on failure (to ensure app environment returns real data).
+// - Supports requestId async responses via window.__music_api_return__(requestId, result).
+// - Provides on(name, cb) for native -> web events. Also exposes compatibility globals
+//   used by native code (e.g. __music_api_on_<name>__ and __music_api_emit__).
+// - Falls back to a local mock for web development when no native bridge is available.
 
 type Track = { id: string; title: string; artist: string }
 
-const tracks: Track[] = [
+declare global {
+  interface Window {
+    HesiMusicBridge?: { call(name: string, argsJson?: string): string }
+    musicBridge?: { call?: (name: string, payload?: any) => any; on?: (name: string, cb: Function) => Function }
+    ScanBridge?: { startScanFromJs?: (json: string) => string; stopScanFromJs?: (scanId: string) => string }
+    __music_api_return__?: (requestId: string, result: any) => void
+    __music_api_emit__?: (name: string, payload: any) => void
+    // compatibility shorthand for per-event callbacks
+    [key: `__music_api_on_${string}__`]: any
+  }
+}
+
+const DEFAULT_TIMEOUT = 10000
+
+function genId(prefix = 'r'): string {
+  return prefix + Math.random().toString(36).slice(2, 9)
+}
+
+type Pending = {
+  resolve: (v: any) => void
+  reject: (e: any) => void
+  timer?: number
+}
+
+const pending = new Map<string, Pending>()
+
+// event listeners for on(name, cb)
+const listeners = new Map<string, Set<Function>>()
+
+// --- compatibility: implement the global return handler used by native side ---
+const originalReturn = window.__music_api_return__
+window.__music_api_return__ = function (requestId: string, result: any) {
+  try {
+    if (originalReturn) {
+      // allow previous handler to run too
+      try { originalReturn(requestId, result) } catch (_) {}
+    }
+    const p = pending.get(requestId)
+    if (p) {
+      pending.delete(requestId)
+      if (p.timer) clearTimeout(p.timer)
+      p.resolve(result)
+      return
+    }
+    // If no pending request, ignore.
+  } catch (e) {
+    console.error('__music_api_return__ error', e)
+  }
+}
+
+// global emit used by native to push events: window.__music_api_emit__(name, payload)
+window.__music_api_emit__ = function (name: string, payload: any) {
+  const set = listeners.get(name)
+  if (set) {
+    for (const cb of Array.from(set)) {
+      try { cb(payload) } catch (e) { console.error('event handler error', e) }
+    }
+  }
+  // also support per-event global handler: __music_api_on_<name>__
+  try {
+    const key = `__music_api_on_${name}__`
+    const fn = (window as any)[key]
+    if (typeof fn === 'function') {
+      try { fn(payload) } catch (e) { console.error('per-event global handler error', e) }
+    }
+  } catch (e) {
+    console.error('emit compatibility error', e)
+  }
+}
+
+function isNativePresent(): boolean {
+  return !!(window.HesiMusicBridge || (window.musicBridge && window.musicBridge.call) || window.ScanBridge)
+}
+
+async function callNativeBridge(name: string, args: unknown, timeout = DEFAULT_TIMEOUT): Promise<any> {
+  // Priority: HesiMusicBridge.call (synchronous string return or null + async callback)
+  // then window.musicBridge.call (may return Promise or value), then ScanBridge special-case.
+
+  const requestId = genId('req_')
+
+  // helper to create pending promise
+  const createPending = (): Promise<any> => {
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        pending.delete(requestId)
+        reject(new Error(`MusicBridge call timeout: ${name}`))
+      }, timeout)
+      pending.set(requestId, { resolve, reject, timer })
+    })
+  }
+
+  try {
+    if (window.HesiMusicBridge && typeof window.HesiMusicBridge.call === 'function') {
+      // send args wrapped with requestId so native can callback
+      const payload = JSON.stringify({ requestId, args })
+      try {
+        const res = window.HesiMusicBridge.call(name, payload)
+        if (res === null || res === 'null' || typeof res === 'undefined') {
+          // no immediate result; wait for async callback
+          return await createPending()
+        }
+        // parse sync result
+        try {
+          return JSON.parse(res)
+        } catch (e) {
+          // if native returned a plain string, return it
+          return res
+        }
+      } catch (e) {
+        throw e
+      }
+    }
+
+    if (window.musicBridge && typeof window.musicBridge.call === 'function') {
+      const r = window.musicBridge.call(name, args)
+      // may be a Promise or sync value
+      if (r && typeof (r as Promise<any>).then === 'function') {
+        return await (r as Promise<any>)
+      }
+      if (typeof r === 'undefined' || r === null) {
+        // musicBridge.call returned null/undefined: consider this a failure in native environment
+        throw new Error(`musicBridge.call returned ${String(r)} for ${name}`)
+      }
+      return r
+    }
+
+    // special ScanBridge functions (some implementations provide dedicated methods)
+    if (window.ScanBridge) {
+      if (name === 'startScan' && typeof window.ScanBridge.startScanFromJs === 'function') {
+        const payload = JSON.stringify(args)
+        const res = window.ScanBridge.startScanFromJs(payload)
+        try { return JSON.parse(res) } catch { return res }
+      }
+      if (name === 'stopScan' && typeof window.ScanBridge.stopScanFromJs === 'function') {
+        const res = window.ScanBridge.stopScanFromJs((args as any)?.scanId)
+        try { return JSON.parse(res) } catch { return res }
+      }
+    }
+
+    // no native bridge
+    throw new Error('no native bridge available')
+  } finally {
+    // nothing
+  }
+}
+
+// --- Mock fallback (preserve original mock behavior) ---
+const mockTracks: Track[] = [
   { id: '1', title: 'Song A', artist: 'Artist 1' },
   { id: '2', title: 'Song B', artist: 'Artist 2' },
   { id: '3', title: 'Long Song C', artist: 'Artist 3' }
 ]
+let mockQueue: string[] = []
+let mockScanListeners: Array<Function> = []
 
-let queue: string[] = []
-let scanListeners: Array<Function> = []
+const MusicBridge = {
+  async call(name: string, args: unknown) {
+    // If a native bridge is present, strictly use it and throw on failure to ensure app uses real data
+    if (isNativePresent()) {
+      return callNativeBridge(name, args)
+    }
 
-export default {
-  async call(name: string, args: any) {
+    // fallback to mock behavior in non-native (web) environment
     switch (name) {
       case 'getAllTracks':
-        return tracks.map(t => ({ id: t.id, title: t.title, artist: t.artist }))
+        return mockTracks.map(t => ({ id: t.id, title: t.title, artist: t.artist }))
       case 'getTrackDetails':
-        return tracks.find(t => t.id === args.id) || null
+        return mockTracks.find(t => t.id === (args as any)?.id) || null
       case 'play':
-        console.log('[musicBridge] play', args)
-        if (args.id) {
-          queue = [args.id]
-        }
+        console.log('[musicBridge:mock] play', args)
+        if ((args as any)?.id) mockQueue = [(args as any).id]
         return { ok: true }
       case 'addToQueue':
-        if (args.id) queue.push(args.id)
-        return { ok: true, queue }
+        if ((args as any)?.id) mockQueue.push((args as any).id)
+        return { ok: true, queue: mockQueue }
       case 'getQueue':
-        return queue
+        return mockQueue
       case 'pickFolder':
-        // Simulate a folder picker
         return { path: '/storage/emulated/0/Music' }
       case 'listFolders':
-        // support optional parent argument for lazy loading
-        if (args && args.parent) {
-          if (args.parent === '/storage/emulated/0') {
+        if ((args as any) && (args as any).parent) {
+          if ((args as any).parent === '/storage/emulated/0') {
             return [
-              {
-                path: '/storage/emulated/0/Music',
-                name: 'Music',
-                count: 120
-              },
+              { path: '/storage/emulated/0/Music', name: 'Music', count: 120 },
               { path: '/storage/emulated/0/Download', name: 'Download', count: 12 },
               { path: '/storage/emulated/0/Podcasts', name: 'Podcasts', count: 5 }
             ]
           }
-          if (args.parent === '/storage/emulated/0/Music') {
+          if ((args as any).parent === '/storage/emulated/0/Music') {
             return [
               { path: '/storage/emulated/0/Music/Album1', name: 'Album1', count: 20 },
               { path: '/storage/emulated/0/Music/Album2', name: 'Album2', count: 50 },
@@ -55,39 +206,57 @@ export default {
           }
           return []
         }
-        return [
-          { path: '/storage/emulated/0', name: '根目录' }
-        ]
+        return [{ path: '/storage/emulated/0', name: '根目录' }]
       case 'startScan':
-        // start a fake scan that emits progress events
         (async () => {
           let count = 0
           const files = ['a.mp3', 'b.mp3', 'c.flac', 'd.mp3']
           for (const f of files) {
             await new Promise(r => setTimeout(r, 300))
             count += 1
-            for (const l of scanListeners) l({ count, current: f, finished: false })
+            for (const l of mockScanListeners) l({ count, current: f, finished: false })
           }
-          for (const l of scanListeners) l({ count, current: '', finished: true })
+          for (const l of mockScanListeners) l({ count, current: '', finished: true })
         })()
         return { ok: true }
       default:
-        console.warn('[musicBridge] unknown call', name)
+        console.warn('[musicBridge:mock] unknown call', name)
         return null
     }
   },
+
   on(name: string, cb: Function) {
-    // Simple mock: return unsubscribe function
-    console.log('[musicBridge] on', name)
-    if (name === 'scanProgress') {
-      scanListeners.push(cb)
-      return () => {
-        const idx = scanListeners.indexOf(cb)
-        if (idx >= 0) scanListeners.splice(idx, 1)
+    // If native supports on(), delegate
+    try {
+      if (window.musicBridge && typeof window.musicBridge.on === 'function') {
+        return window.musicBridge.on(name, cb)
       }
+    } catch (e) {
+      console.warn('delegate on to native failed', e)
     }
+
+    // Register in local listeners
+    if (!listeners.has(name)) listeners.set(name, new Set())
+    listeners.get(name)!.add(cb)
+
+    // also add for mock scan compatibility
+    if (name === 'scanProgress') {
+      mockScanListeners.push(cb)
+    }
+
+    // provide unsubscribe
     return () => {
-      console.log('[musicBridge] off', name)
+      const set = listeners.get(name)
+      if (set) {
+        set.delete(cb)
+        if (set.size === 0) listeners.delete(name)
+      }
+      if (name === 'scanProgress') {
+        const idx = mockScanListeners.indexOf(cb)
+        if (idx >= 0) mockScanListeners.splice(idx, 1)
+      }
     }
   }
 }
+
+export default MusicBridge
