@@ -52,7 +52,7 @@
 
 UI使用web技术实现(vue+tailwind), 运行在系统内置webview中
 通过jsinterop实现web层与原生层通信(app在前台时, 每0.1秒向前端推送一次播放状态)
-音乐播放功能使用ExoPlayer实现
+音乐播放功能使用ExoPlayer(androidx.media3:media3-exoplayer)实现
 使用sqlite储存播放列表
 
 

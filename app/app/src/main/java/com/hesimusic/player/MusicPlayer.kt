@@ -1,7 +1,8 @@
 package com.hesimusic.player
 
 import android.content.Context
-import com.google.android.exoplayer2.ExoPlayer
+import androidx.media3.exoplayer.ExoPlayer
+
 
 class MusicPlayer(context: Context) {
     private val player = ExoPlayer.Builder(context).build()
