@@ -3,11 +3,7 @@ package zelixir.hesimusic.scan
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
 import zelixir.hesimusic.scan.db.SongEntity
-import zelixir.hesimusic.scan.ScanRepository
-import java.util.ArrayList
 import java.io.File
 
 /**
@@ -30,13 +26,14 @@ class ScanWorker(appContext: Context, workerParams: WorkerParameters) : Coroutin
                     roots.add(File(arr.getString(i)))
                 }
             }
-        } catch (t: Throwable) {
+        } catch (_: Throwable) {
         }
 
-    val scanner = FileScanner(coroutineScope = this.coroutineScope)
-    val repository = ScanRepository(applicationContext)
+        val scanner = FileScanner(coroutineScope = this)
 
-    val batch = ArrayList<SongEntity>()
+        val repository = ScanRepository(applicationContext)
+
+        val batch = ArrayList<SongEntity>()
 
         // load cursor if exists
         val cursor = readCursorIfExists(scanId)
@@ -84,7 +81,7 @@ class ScanWorker(appContext: Context, workerParams: WorkerParameters) : Coroutin
                     // checkpoint (write last processed path)
                     checkpoint(scanId, file.absolutePath, scanned)
                 }
-            }, cursor = cursor, onProgress = { processed, path ->
+            }, cursor = cursor, onProgress = { _, _ ->
                 // heartbeat
             })
 
@@ -111,7 +108,8 @@ class ScanWorker(appContext: Context, workerParams: WorkerParameters) : Coroutin
             return Result.success()
         } catch (e: Exception) {
             // on failure, persist failure status and cursor
-            checkpoint(scanId, scanner)
+            val progress = ScanManager.getProgress(scanId)
+            checkpoint(scanId, progress?.currentPath, progress?.scannedCount ?: 0)
             val dir = File(applicationContext.filesDir, "scan_states")
             val f = File(dir, "$scanId.json")
             val js = if (f.exists()) org.json.JSONObject(f.readText()) else org.json.JSONObject()
@@ -146,7 +144,7 @@ class ScanWorker(appContext: Context, workerParams: WorkerParameters) : Coroutin
         return try {
             val bytes = f.readBytes()
             FileScanner.deserializeCursor(bytes)
-        } catch (t: Throwable) {
+        } catch (_: Throwable) {
             null
         }
     }

@@ -11,7 +11,7 @@ import java.util.concurrent.Semaphore
  * Lightweight FileScanner implementation based on BFS + coroutine worker pool.
  * Produces candidate files via callback and supports pause/resume with a serializable cursor.
  */
-class FileScanner(private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.IO)) {
+class FileScanner(private val coroutineScope: ScanWorker) {
     private val _mutex = Mutex()
     private var paused = false
     private val pauseLock = Mutex(locked = false)
@@ -81,17 +81,6 @@ class FileScanner(private val coroutineScope: CoroutineScope = CoroutineScope(Di
 
             ScanCursor(pendingPaths = emptyList(), processedCount = processedCount[0])
         }
-    }
-
-    fun pauseScan() {
-        paused = true
-        // lock pauseLock so coroutines block on withLock
-        if (!pauseLock.isLocked) pauseLock.lock()
-    }
-
-    fun resumeScan() {
-        paused = false
-        if (pauseLock.isLocked) pauseLock.unlock()
     }
 
     fun buildExclusionMatcher(options: ScanOptions): (File) -> Boolean {

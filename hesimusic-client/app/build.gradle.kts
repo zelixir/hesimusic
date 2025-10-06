@@ -57,4 +57,6 @@ dependencies {
     // Metadata parsing libraries required by MetadataExtractor
     implementation(libs.jaudiotagger)
     implementation(libs.juniversalchardet)
+
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
 }

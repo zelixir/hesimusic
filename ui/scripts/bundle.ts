@@ -10,7 +10,7 @@ async function run(): Promise<void> {
         process.exit(1);
     }
 
-    const targetDir: string = path.resolve(root, '..', 'app', 'app', 'src', 'main', 'assets');
+    const targetDir: string = path.resolve(root, '..', 'hesimusic-client', 'app', 'src', 'main', 'assets');
     if (!fs.existsSync(targetDir)) {
         fs.mkdirSync(targetDir, { recursive: true });
     }
