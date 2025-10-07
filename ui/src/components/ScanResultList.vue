@@ -23,6 +23,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { startScan, stopScan } from '../services/scanApi'
+import { reportError } from '../services/errorService'
 
 const props = defineProps<{ scanId: string | null }>()
 const results = ref<any[]>([])
@@ -40,6 +41,7 @@ async function fetchScanResults(id: string) {
     }
   } catch (e) {
     console.warn(e)
+    try { reportError(e) } catch {}
     results.value = []
   } finally {
     loading.value = false

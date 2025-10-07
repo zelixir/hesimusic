@@ -75,7 +75,8 @@ class FileScanner(private val coroutineScope: ScanWorker) {
                         onProgress?.invoke(processedCount[0], currentPath)
                     }
                 } catch (t: Throwable) {
-                    // swallow per-file errors but continue scanning
+                    // report per-file errors to ScanManager for aggregation
+                    try { ScanManager.reportError(null, t.message ?: t.toString()) } catch (_: Throwable) {}
                 }
             }
 

@@ -29,6 +29,7 @@ object MetadataExtractor {
             val mime = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)
             return LightMetadata(sizeBytes = file.length(), durationMs = dur, format = mime)
         } catch (t: Throwable) {
+            try { ScanManager.reportError(null, "read light metadata failed for ${file.absolutePath}: ${t.message}") } catch (_: Throwable) {}
             return LightMetadata(sizeBytes = file.length(), durationMs = 0L, format = null)
         } finally {
             try { mmr.release() } catch (_: Throwable) {}
@@ -57,7 +58,8 @@ object MetadataExtractor {
                     jaArtist = tag.getFirst(org.jaudiotagger.tag.FieldKey.ARTIST)
                     jaAlbum = tag.getFirst(org.jaudiotagger.tag.FieldKey.ALBUM)
                 }
-            } catch (_: Throwable) {
+            } catch (e: Throwable) {
+                try { ScanManager.reportError(null, "jaudiotagger read failed for ${file.absolutePath}: ${e.message}") } catch (_: Throwable) {}
             }
 
             val finalTitle = title ?: jaTitle ?: file.nameWithoutExtension
@@ -77,9 +79,10 @@ object MetadataExtractor {
                 success = true
             )
         } catch (t: Throwable) {
+            try { ScanManager.reportError(null, "extract metadata failed for ${file.absolutePath}: ${t.message}") } catch (_: Throwable) {}
             return MetadataResult(0L, null, null, null, null, null, null, null, file.length(), false)
         } finally {
-            try { mmr.release() } catch (_: Throwable) {}
+            try { mmr.release() } catch (e: Throwable) { try { ScanManager.reportError(null, "mmr.release failed: ${e.message}") } catch (_: Throwable) {} }
         }
     }
 

@@ -19,6 +19,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var bundleManager: StaticBundleManager
     private lateinit var safLauncher: ActivityResultLauncher<android.net.Uri?>
     private var pendingJsRequestIdForPick: String? = null
+    private var pendingJsRequestMethod: String? = null
     private lateinit var prefs: SharedPreferences
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -27,8 +28,10 @@ class MainActivity : ComponentActivity() {
         setContentView(webView)
 
         webView.settings.javaScriptEnabled = true
-        // Prepare StaticBundleManager to manage frontend bundle extraction and updates
-        bundleManager = StaticBundleManager(this)
+    // Prepare StaticBundleManager to manage frontend bundle extraction and updates
+    bundleManager = StaticBundleManager(this)
+    // Initialize UiHelper for global toast usage
+    UiHelper.init(this)
         // Ensure bundle exists at least once (synchronous on startup)
         bundleManager.ensureBundleUpToDate()
 
@@ -62,14 +65,16 @@ class MainActivity : ComponentActivity() {
 
         // Expose a JS bridge implementation that supports the scan/folder APIs used by the web UI.
         // Implemented as a dedicated object so it's easier to extend and test.
-        webView.addJavascriptInterface(HesiMusicBridgeImpl(this, webView) { reqId ->
-            // store pending request id and launch SAF picker
+        webView.addJavascriptInterface(HesiMusicBridgeImpl(this, webView) { reqId, method ->
+            // store pending request id and method, then launch SAF picker
             pendingJsRequestIdForPick = reqId
-            try {
-                safLauncher.launch(null)
-            } catch (_: Throwable) {
-                // ignore
-            }
+            pendingJsRequestMethod = method
+          try {
+              android.util.Log.d("HesiMusicBridge", "onPickRequested: reqId=$reqId, method=$method")
+              safLauncher.launch(null)
+          } catch (e: Throwable) {
+              zelixir.hesimusic.scan.ScanManager.reportError(null, "无法启动选择目录: ${e.message}")
+          }
         }, "HesiMusicBridge")
 
         // Register ScanWebBridge so the frontend can call startScan/stopScan via ScanBridge special-case
@@ -86,30 +91,74 @@ class MainActivity : ComponentActivity() {
 
                     // If there was a pending JS request, return result via global callback
                     val req = pendingJsRequestIdForPick
+                    val method = pendingJsRequestMethod
                     if (req != null) {
-                        val obj = org.json.JSONObject()
-                        obj.put("path", uri.toString())
-                        webView.post {
-                            webView.evaluateJavascript("window.__music_api_return__('$req', ${obj.toString()})", null)
+                        if (method == "requestFolderPermissions") {
+                            // build { granted: true, folders: [ { uri, displayName } ] }
+                            val jo = org.json.JSONObject()
+                            jo.put("granted", true)
+                            val arr = org.json.JSONArray()
+                            val item = org.json.JSONObject()
+                            item.put("uri", uri.toString())
+                            item.put("displayName", uri.lastPathSegment ?: uri.toString())
+                            arr.put(item)
+                            jo.put("folders", arr)
+                            android.util.Log.d("HesiMusicBridge", "returning requestFolderPermissions result for req=$req, method=$method, uri=$uri")
+                            webView.post {
+                                webView.evaluateJavascript("window.__music_api_return__('$req', ${jo.toString()})", null)
+                            }
+                        } else {
+                            val obj = org.json.JSONObject()
+                            obj.put("path", uri.toString())
+                            android.util.Log.d("HesiMusicBridge", "returning pick result to JS: req=$req, path=${uri}")
+                            webView.post {
+                                webView.evaluateJavascript("window.__music_api_return__('$req', ${obj.toString()})", null)
+                            }
                         }
                     }
                 } else {
-                    // user cancelled: reply with null to pending request
+                    // user cancelled: reply with appropriate structure to pending request
                     val req = pendingJsRequestIdForPick
+                    val method = pendingJsRequestMethod
                     if (req != null) {
-                        webView.post {
-                            webView.evaluateJavascript("window.__music_api_return__('$req', null)", null)
+                        if (method == "requestFolderPermissions") {
+                            val jo = org.json.JSONObject()
+                            jo.put("granted", false)
+                            jo.put("folders", org.json.JSONArray())
+                            android.util.Log.d("HesiMusicBridge", "user cancelled pick for requestFolderPermissions, returning granted=false for req=$req")
+                            webView.post {
+                                webView.evaluateJavascript("window.__music_api_return__('$req', ${jo.toString()})", null)
+                            }
+                        } else {
+                            android.util.Log.d("HesiMusicBridge", "user cancelled pick, returning null for req=$req")
+                            webView.post {
+                                webView.evaluateJavascript("window.__music_api_return__('$req', null)", null)
+                            }
                         }
                     }
                 }
-            } catch (_: Throwable) {
+            } catch (e: Throwable) {
+                zelixir.hesimusic.scan.ScanManager.reportError(null, "选择目录失败: ${e.message}")
             } finally {
                 pendingJsRequestIdForPick = null
+                pendingJsRequestMethod = null
             }
         }
 
         // Load the frontend index from the virtual domain
         webView.loadUrl("https://app.frontend/")
+        // Register aggregated scan error callback to show toast and forward to web UI
+        zelixir.hesimusic.scan.ScanManager.setErrorCallback { scanId, summaryJson ->
+            try {
+                val count = try { org.json.JSONObject(summaryJson).optInt("count", 0) } catch (_: Throwable) { 0 }
+                UiHelper.showToast("扫描出错: $count 次，点击查看日志")
+            } catch (e: Throwable) { zelixir.hesimusic.scan.ScanManager.reportError(null, "Error showing error toast: ${e.message}") }
+            try {
+                // forward to webview via evaluateJavascript -> __music_api_emit__('scanError', payload)
+                val js = "window.__music_api_emit__('scanError', { scanId: '${scanId}', summary: ${summaryJson} })"
+                webView.post { webView.evaluateJavascript(js, null) }
+            } catch (e: Throwable) { zelixir.hesimusic.scan.ScanManager.reportError(null, "Error forwarding scanError to webview: ${e.message}") }
+        }
     }
 
     override fun onResume() {
@@ -133,13 +182,15 @@ class MainActivity : ComponentActivity() {
 class HesiMusicBridgeImpl(
     private val activity: ComponentActivity,
     private val webView: WebView,
-    private val onPickRequested: ((String) -> Unit)? = null
+    // callback(requestId, method)
+    private val onPickRequested: ((String, String?) -> Unit)? = null
 ) {
     private val tag = "HesiMusicBridge"
 
     @android.webkit.JavascriptInterface
     fun call(name: String, argsJson: String?): String {
         try {
+            android.util.Log.d(tag, "JS -> native call: name=$name, argsJson=$argsJson")
             when (name) {
                 "getAllTracks" -> {
                     return "[{\"id\":\"1\",\"title\":\"Song A\",\"artist\":\"Artist 1\"}]"
@@ -151,28 +202,56 @@ class HesiMusicBridgeImpl(
                 "listFolders" -> {
                     // argsJson may contain { requestId, args:{ parent: string } }
                     val parent = try {
-                        if (argsJson == null) null else org.json.JSONObject(argsJson).optJSONObject("args")?.optString("parent", null)
-                    } catch (_: Throwable) { null }
+                        if (argsJson == null) null else org.json.JSONObject(argsJson).optJSONObject("args")?.optString("parent")?.takeIf { it.isNotEmpty() }
+                    } catch (e: Throwable) {
+                        zelixir.hesimusic.scan.ScanManager.reportError(null, "listFolders parent parse failed: ${e.message}")
+                        android.util.Log.w(tag, "listFolders parent parse failed: ${e.message}")
+                        null
+                    }
                     val list = listFoldersSync(parent)
+                    android.util.Log.d(tag, "listFolders returning for parent=$parent; items=${list.length()}")
                     return list.toString()
+                }
+                "requestFolderPermissions" -> {
+                    // Support async flow: if JS provided a requestId, we'll trigger SAF via callback
+                    if (argsJson != null) {
+                        val jo = org.json.JSONObject(argsJson)
+                        val req = jo.optString("requestId").takeIf { it.isNotEmpty() }
+                        if (!req.isNullOrEmpty() && onPickRequested != null) {
+                            android.util.Log.d(tag, "requestFolderPermissions called with requestId=$req; invoking onPickRequested(method=requestFolderPermissions)")
+                            onPickRequested.invoke(req, "requestFolderPermissions")
+                            return "null"
+                        }
+                    }
+
+                    // synchronous fallback: return granted true with a likely folder
+                    val jo = org.json.JSONObject()
+                    jo.put("granted", true)
+                    val arr = org.json.JSONArray()
+                    val item = org.json.JSONObject()
+                    item.put("uri", "/storage/emulated/0/Music")
+                    item.put("displayName", "Music")
+                    arr.put(item)
+                    jo.put("folders", arr)
+                    return jo.toString()
                 }
                 "pickFolder" -> {
                     // Support async pick flow: if the JS provided a requestId we will launch SAF via the
                     // onPickRequested callback and return null so the JS side waits for window.__music_api_return__.
-                    try {
-                        if (argsJson != null) {
-                            val jo = org.json.JSONObject(argsJson)
-                            val req = jo.optString("requestId", null)
-                            if (!req.isNullOrEmpty() && onPickRequested != null) {
-                                onPickRequested.invoke(req)
-                                return "null"
-                            }
+                    if (argsJson != null) {
+                        val jo = org.json.JSONObject(argsJson)
+                        val req = jo.optString("requestId").takeIf { it.isNotEmpty() }
+                        if (!req.isNullOrEmpty() && onPickRequested != null) {
+                            android.util.Log.d(tag, "pickFolder requested with requestId=$req; invoking onPickRequested(method=pickFolder)")
+                            onPickRequested.invoke(req, "pickFolder")
+                            return "null"
                         }
-                    } catch (_: Throwable) { }
+                    }
 
                     // Best-effort synchronous fallback: return a likely root path for the UI.
                     val res = org.json.JSONObject()
                     res.put("path", "/storage/emulated/0/Music")
+                    android.util.Log.d(tag, "pickFolder returning fallback path: ${res}")
                     return res.toString()
                 }
             }
@@ -184,36 +263,32 @@ class HesiMusicBridgeImpl(
 
     private fun listFoldersSync(parent: String?): org.json.JSONArray {
         val result = org.json.JSONArray()
-        try {
-            // If parent is null, return top-level roots
-            if (parent == null || parent.isEmpty()) {
-                // common root for many devices
-                val root = org.json.JSONObject()
-                root.put("path", "/storage/emulated/0")
-                root.put("name", "根目录")
-                root.put("count", 0)
-                result.put(root)
-                return result
-            }
+        // If parent is null, return top-level roots
+        if (parent == null || parent.isEmpty()) {
+            // common root for many devices
+            val root = org.json.JSONObject()
+            root.put("path", "/storage/emulated/0")
+            root.put("name", "根目录")
+            root.put("count", 0)
+            result.put(root)
+            return result
+        }
 
-            // Try using java.io.File as a fallback. This will work on older Androids or for accessible dirs.
-            val f = java.io.File(parent)
-            val children = f.listFiles()
-            if (children != null) {
+        // Try using java.io.File as a fallback. This will work on older Androids or for accessible dirs.
+        val f = java.io.File(parent)
+        val children = f.listFiles()
+        if (children != null) {
                 for (c in children) {
-                    try {
-                        if (c.isDirectory && c.canRead()) {
-                            val o = org.json.JSONObject()
-                            o.put("path", c.absolutePath)
-                            o.put("name", c.name)
-                            o.put("count", 0)
-                            result.put(o)
-                        }
-                    } catch (_: Throwable) { /* ignore problematic entry */ }
-                }
+                try {
+                    if (c.isDirectory && c.canRead()) {
+                        val o = org.json.JSONObject()
+                        o.put("path", c.absolutePath)
+                        o.put("name", c.name)
+                        o.put("count", 0)
+                        result.put(o)
+                    }
+                } catch (e: Throwable) { zelixir.hesimusic.scan.ScanManager.reportError(null, "listFolders child iteration failed for ${c?.absolutePath ?: "<unknown>"}: ${e.message}") }
             }
-        } catch (_: Throwable) {
-            // ignore
         }
         return result
     }

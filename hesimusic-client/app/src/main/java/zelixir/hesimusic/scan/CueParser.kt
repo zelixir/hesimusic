@@ -97,7 +97,8 @@ object CueParser {
             val ff = parts.getOrNull(2)?.toLongOrNull() ?: 0L
             val ms = mm * 60_000 + ss * 1000 + (ff * 1000L / 75L)
             ms
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            try { ScanManager.reportError(null, "cue time parse failed: ${e.message}") } catch (_: Throwable) {}
             0L
         }
     }

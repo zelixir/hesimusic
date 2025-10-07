@@ -19,6 +19,7 @@ tools: ['edit', 'search', 'usages', 'problems', 'changes', 'fetch', 'todos', 'co
 * 使用ts的类型系统, 避免使用any
 * 不要滥用try catch, 只在必要时使用
 
-
+### kotlin规范
+* 不要滥用try catch, 只在必要时使用
 
 

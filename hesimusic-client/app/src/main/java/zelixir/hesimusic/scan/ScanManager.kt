@@ -22,9 +22,88 @@ object ScanManager {
 
     private val statusMap = ConcurrentHashMap<String, ScanStatus>()
     private val progressMap = ConcurrentHashMap<String, ScanProgress>()
+    // Aggregated error summaries per scanId
+    private val errorSummaryMap = ConcurrentHashMap<String, ErrorSummary>()
+    private var errorCallback: ((scanId: String, summaryJson: String) -> Unit)? = null
+    private val debounceTasks = ConcurrentHashMap<String, java.util.TimerTask?>()
+    private val timer = java.util.Timer(true)
+    private val DEBOUNCE_MS = 2000L
+
+    data class ErrorSummary(var count: Int = 0, val samples: MutableList<String> = mutableListOf(), var lastUpdated: Long = System.currentTimeMillis()) {
+        fun toJson(): String {
+            val jo = JSONObject()
+            jo.put("count", count)
+            val arr = org.json.JSONArray()
+            for (s in samples) arr.put(s)
+            jo.put("samples", arr)
+            jo.put("lastUpdated", lastUpdated)
+            return jo.toString()
+        }
+    }
 
     fun init(context: Context) {
         appContext = context.applicationContext
+        try {
+            // also init UiHelper if available
+            com.hesimusic.UiHelper.init(context)
+        } catch (_: Throwable) {}
+    }
+
+    fun setErrorCallback(cb: ((scanId: String, summaryJson: String) -> Unit)?) {
+        errorCallback = cb
+    }
+
+    fun reportError(scanId: String?, message: String?) {
+        try {
+            try { android.util.Log.d("ScanManager", "reportError called: scanId=${scanId}, message=${message}") } catch (_: Throwable) {}
+            val key = scanId ?: "_global"
+            val msg = message ?: ""
+            val sum = errorSummaryMap.computeIfAbsent(key) { ErrorSummary() }
+            sum.count += 1
+            if (sum.samples.size < 5) sum.samples.add(msg)
+            sum.lastUpdated = System.currentTimeMillis()
+
+            // persist a lightweight error summary for scans or global errors
+            try {
+                if (key == "_global") {
+                    val dir = File(appContext.filesDir, "scan_states")
+                    if (!dir.exists()) dir.mkdirs()
+                    val f = File(dir, "global_errors.json")
+                    val js = if (f.exists()) org.json.JSONObject(f.readText()) else org.json.JSONObject()
+                    js.put("lastErrorSummary", JSONObject(sum.toJson()))
+                    f.writeText(js.toString())
+                } else {
+                    val dir = File(appContext.filesDir, "scan_states")
+                    if (!dir.exists()) dir.mkdirs()
+                    val f = File(dir, "$key.json")
+                    val js = if (f.exists()) org.json.JSONObject(f.readText()) else org.json.JSONObject()
+                    js.put("lastErrorSummary", JSONObject(sum.toJson()))
+                    f.writeText(js.toString())
+                }
+            } catch (e: Throwable) {
+                // If persistence fails, attempt to notify via callback but avoid recursive reporting
+                try { errorCallback?.invoke(key, JSONObject().put("count", sum.count).put("samples", org.json.JSONArray(sum.samples)).toString()) } catch (_: Throwable) {}
+            }
+
+            // schedule debounce emit: reset previous timer and schedule a new one
+            try {
+                val prev = debounceTasks.remove(key)
+                prev?.cancel()
+            } catch (_: Throwable) {
+                // ignore
+            }
+            try {
+                val task = object : java.util.TimerTask() {
+                    override fun run() {
+                        try { errorCallback?.invoke(key, sum.toJson()) } catch (_: Throwable) {}
+                    }
+                }
+                debounceTasks[key] = task
+                timer.schedule(task, DEBOUNCE_MS)
+            } catch (e: Throwable) {
+                try { errorCallback?.invoke(key, sum.toJson()) } catch (_: Throwable) {}
+            }
+        } catch (_: Throwable) {}
     }
 
     /**
@@ -142,7 +221,7 @@ object ScanManager {
             ScanProgress(
                 scannedCount = obj.optInt("scannedCount", 0),
                 foundSongs = obj.optInt("foundSongs", 0),
-                currentPath = obj.optString("currentPath", null),
+                currentPath = if (obj.has("currentPath")) obj.optString("currentPath") else null,
                 lastUpdated = obj.optLong("lastUpdated", System.currentTimeMillis())
             )
         } catch (t: Throwable) {

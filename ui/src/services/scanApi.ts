@@ -1,4 +1,5 @@
 import MusicBridge from './musicBridge'
+import { reportError } from './errorService'
 
 export type FolderNode = {
   path: string
@@ -15,20 +16,40 @@ const ScanApi = {
     return await MusicBridge.call('pickFolder', {})
   },
 
+  async requestFolderPermissions(): Promise<{ granted: boolean; folders?: Array<{ uri: string; displayName?: string }> } | null> {
+    try {
+      console.debug('[scanApi] requestFolderPermissions -> calling MusicBridge')
+      const res = await MusicBridge.call('requestFolderPermissions', {})
+      console.debug('[scanApi] requestFolderPermissions <- returned', { res })
+      return res
+    } catch (e) {
+      console.error('requestFolderPermissions failed', e)
+      try { reportError(e) } catch {}
+      throw e
+    }
+  },
+
   async listFolders(opts?: { parent?: string }): Promise<FolderNode[]> {
     // native should return a list of FolderNode for the given parent
     const res = await MusicBridge.call('listFolders', opts || {})
     return (res as any) || []
   },
 
-  async startScan(options: any, onProgress?: ScanProgressCb) {
+  async startScan(options: any, onProgress?: ScanProgressCb, onError?: (e: any) => void) {
     // options: { folders: string[], skipShort, skipAmrMid, skipHidden }
     // For native, we'll call 'startScan' and then expect native to push progress events via MusicBridge.on('scanProgress')
+    console.debug('[scanApi] startScan -> calling MusicBridge', { options })
     const res = await MusicBridge.call('startScan', { options })
+    console.debug('[scanApi] startScan <- returned', { res })
     if (onProgress) {
       const off = MusicBridge.on('scanProgress', (p: any) => {
         onProgress(p)
         if (p.finished) off()
+      })
+    }
+    if (onError) {
+      const offErr = MusicBridge.on('scanError', (e: any) => {
+        onError(e)
       })
     }
     return res
@@ -63,6 +84,7 @@ function callNative(method: string, payload: any): Promise<any> {
       }
     } catch (e) {
       console.warn('native bridge call failed', e)
+      try { reportError(e) } catch {}
     }
     resolve(null)
   })

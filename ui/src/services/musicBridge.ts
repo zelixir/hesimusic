@@ -21,6 +21,8 @@ declare global {
   }
 }
 
+import { reportError } from './errorService'
+
 const DEFAULT_TIMEOUT = 10000
 
 function genId(prefix = 'r'): string {
@@ -42,9 +44,10 @@ const listeners = new Map<string, Set<Function>>()
 const originalReturn = window.__music_api_return__
 window.__music_api_return__ = function (requestId: string, result: any) {
   try {
+    console.debug('[musicBridge] __music_api_return__ called', { requestId, result })
     if (originalReturn) {
       // allow previous handler to run too
-      try { originalReturn(requestId, result) } catch (_) {}
+  try { originalReturn(requestId, result) } catch (err) { try { reportError(err) } catch {} }
     }
     const p = pending.get(requestId)
     if (p) {
@@ -56,15 +59,17 @@ window.__music_api_return__ = function (requestId: string, result: any) {
     // If no pending request, ignore.
   } catch (e) {
     console.error('__music_api_return__ error', e)
+    try { reportError(e) } catch {}
   }
 }
 
 // global emit used by native to push events: window.__music_api_emit__(name, payload)
 window.__music_api_emit__ = function (name: string, payload: any) {
+  console.debug('[musicBridge] __music_api_emit__', { name, payload })
   const set = listeners.get(name)
   if (set) {
     for (const cb of Array.from(set)) {
-      try { cb(payload) } catch (e) { console.error('event handler error', e) }
+      try { cb(payload) } catch (e) { console.error('event handler error', e); try { reportError(e) } catch {} }
     }
   }
   // also support per-event global handler: __music_api_on_<name>__
@@ -72,10 +77,11 @@ window.__music_api_emit__ = function (name: string, payload: any) {
     const key = `__music_api_on_${name}__`
     const fn = (window as any)[key]
     if (typeof fn === 'function') {
-      try { fn(payload) } catch (e) { console.error('per-event global handler error', e) }
+      try { fn(payload) } catch (e) { console.error('per-event global handler error', e); try { reportError(e) } catch {} }
     }
   } catch (e) {
     console.error('emit compatibility error', e)
+    try { reportError(e) } catch {}
   }
 }
 
@@ -88,6 +94,7 @@ async function callNativeBridge(name: string, args: unknown, timeout = DEFAULT_T
   // then window.musicBridge.call (may return Promise or value), then ScanBridge special-case.
 
   const requestId = genId('req_')
+  console.debug('[musicBridge] callNativeBridge start', { name, args, requestId, timeout })
 
   // helper to create pending promise
   const createPending = (): Promise<any> => {
@@ -105,16 +112,40 @@ async function callNativeBridge(name: string, args: unknown, timeout = DEFAULT_T
       // send args wrapped with requestId so native can callback
       const payload = JSON.stringify({ requestId, args })
       try {
+        console.debug('[musicBridge] calling HesiMusicBridge.call with payload (requestId wrapped) ', { name, payload })
         const res = window.HesiMusicBridge.call(name, payload)
+        console.debug('[musicBridge] HesiMusicBridge.call returned (wrapped)', { name, res })
         if (res === null || res === 'null' || typeof res === 'undefined') {
+          // Some native implementations don't use the requestId callback pattern
+          // and instead expect plain args (or return synchronously). Try a
+          // compatibility call with only the args serialized. If that still
+          // yields no result, fall back to waiting for an async callback as
+          // before.
+          try {
+            const altPayload = JSON.stringify(args)
+            console.debug('[musicBridge] trying HesiMusicBridge.call with altPayload (args only)', { name, altPayload })
+            const res2 = window.HesiMusicBridge.call(name, altPayload)
+            console.debug('[musicBridge] HesiMusicBridge.call returned (alt)', { name, res2 })
+            if (!(res2 === null || res2 === 'null' || typeof res2 === 'undefined')) {
+              try { return JSON.parse(res2) } catch (e) { try { reportError(e) } catch {}; return res2 }
+            }
+          } catch (err) {
+            // ignore and continue to wait for async callback
+            try { reportError(err) } catch {}
+          }
+
           // no immediate result; wait for async callback
           return await createPending()
         }
         // parse sync result
         try {
-          return JSON.parse(res)
+          const parsed = JSON.parse(res)
+          console.debug('[musicBridge] parsed HesiMusicBridge response', { name, parsed })
+          return parsed
         } catch (e) {
+          try { reportError(e) } catch {}
           // if native returned a plain string, return it
+          console.debug('[musicBridge] HesiMusicBridge returned non-json', { name, res })
           return res
         }
       } catch (e) {
@@ -123,7 +154,9 @@ async function callNativeBridge(name: string, args: unknown, timeout = DEFAULT_T
     }
 
     if (window.musicBridge && typeof window.musicBridge.call === 'function') {
+      console.debug('[musicBridge] calling window.musicBridge.call', { name, args })
       const r = window.musicBridge.call(name, args)
+      console.debug('[musicBridge] window.musicBridge.call returned', { name, r })
       // may be a Promise or sync value
       if (r && typeof (r as Promise<any>).then === 'function') {
         return await (r as Promise<any>)
@@ -139,12 +172,14 @@ async function callNativeBridge(name: string, args: unknown, timeout = DEFAULT_T
     if (window.ScanBridge) {
       if (name === 'startScan' && typeof window.ScanBridge.startScanFromJs === 'function') {
         const payload = JSON.stringify(args)
+        console.debug('[musicBridge] calling ScanBridge.startScanFromJs', { payload })
         const res = window.ScanBridge.startScanFromJs(payload)
-        try { return JSON.parse(res) } catch { return res }
+  try { const parsed = JSON.parse(res); console.debug('[musicBridge] ScanBridge.startScanFromJs returned', { parsed }); return parsed } catch (e) { try { reportError(e) } catch {}; console.debug('[musicBridge] ScanBridge.startScanFromJs returned non-json', { res }); return res }
       }
       if (name === 'stopScan' && typeof window.ScanBridge.stopScanFromJs === 'function') {
+        console.debug('[musicBridge] calling ScanBridge.stopScanFromJs', { scanId: (args as any)?.scanId })
         const res = window.ScanBridge.stopScanFromJs((args as any)?.scanId)
-        try { return JSON.parse(res) } catch { return res }
+  try { const parsed = JSON.parse(res); console.debug('[musicBridge] ScanBridge.stopScanFromJs returned', { parsed }); return parsed } catch (e) { try { reportError(e) } catch {}; console.debug('[musicBridge] ScanBridge.stopScanFromJs returned non-json', { res }); return res }
       }
     }
 
@@ -188,6 +223,12 @@ const MusicBridge = {
         return mockQueue
       case 'pickFolder':
         return { path: '/storage/emulated/0/Music' }
+      case 'requestFolderPermissions':
+        // simulate user granting permissions and selecting multiple folders
+        return { granted: true, folders: [
+          { uri: 'content://com.android.externalstorage.documents/tree/primary%3AMusic', displayName: 'Music' },
+          { uri: 'content://com.android.externalstorage.documents/tree/primary%3ADownload', displayName: 'Download' }
+        ] }
       case 'listFolders':
         if ((args as any) && (args as any).parent) {
           if ((args as any).parent === '/storage/emulated/0') {
@@ -215,6 +256,15 @@ const MusicBridge = {
             await new Promise(r => setTimeout(r, 300))
             count += 1
             for (const l of mockScanListeners) l({ count, current: f, finished: false })
+            // simulate an intermittent error on second file
+            if (count === 2) {
+              // emit error via global emit listeners as well
+              const set = listeners.get('scanError')
+              if (set) for (const cb of Array.from(set)) { try { cb({ message: '模拟权限错误: 访问被拒绝' }) } catch (err) { try { reportError(err) } catch {} } }
+              for (const l of mockScanListeners) {
+                try { l({ count, current: f, finished: false, error: { message: '模拟权限错误: 访问被拒绝' } }) } catch (err) { try { reportError(err) } catch {} }
+              }
+            }
           }
           for (const l of mockScanListeners) l({ count, current: '', finished: true })
         })()

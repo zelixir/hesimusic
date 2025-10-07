@@ -15,7 +15,7 @@ object PermissionHelper {
         val requiresSaf = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
 
         // For older Android versions check READ_EXTERNAL_STORAGE runtime permission
-        var granted = true
+    var granted: Boolean
         try {
             if (!requiresSaf) {
                 val perm = android.Manifest.permission.READ_EXTERNAL_STORAGE
@@ -28,7 +28,8 @@ object PermissionHelper {
                 // can detect and proceed differently.
                 granted = false
             }
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            try { ScanManager.reportError(null, "permission check failed: ${e.message}") } catch (_: Throwable) {}
             granted = false
         }
 
@@ -39,7 +40,8 @@ object PermissionHelper {
         try {
             activity.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
             return true
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            try { ScanManager.reportError(null, "无法保存目录授权: ${e.message}") } catch (_: Throwable) {}
             return false
         }
     }

@@ -1,4 +1,5 @@
 import MusicBridge from './musicBridge'
+import { reportError } from './errorService'
 
 export type Track = { id: string; title: string; artist: string }
 
@@ -11,6 +12,7 @@ const MusicApi = {
       return res.map((r: any) => ({ id: String(r.id), title: String(r.title || ''), artist: String(r.artist || '') }))
     } catch (e) {
       console.error('getAllTracks error', e)
+      try { reportError(e) } catch {}
       return []
     }
   },
@@ -26,6 +28,7 @@ const MusicApi = {
       return null
     } catch (e) {
       console.error('getTrackDetails error', e)
+      try { reportError(e) } catch {}
       return null
     }
   },
@@ -35,6 +38,7 @@ const MusicApi = {
       return await MusicBridge.call('play', { id })
     } catch (e) {
       console.error('play error', e)
+      try { reportError(e) } catch {}
       return { ok: false }
     }
   },
@@ -44,6 +48,7 @@ const MusicApi = {
       return await MusicBridge.call('addToQueue', { id })
     } catch (e) {
       console.error('addToQueue error', e)
+      try { reportError(e) } catch {}
       return { ok: false }
     }
   },
@@ -55,6 +60,7 @@ const MusicApi = {
       return res.map((x: any) => String(x))
     } catch (e) {
       console.error('getQueue error', e)
+      try { reportError(e) } catch {}
       return []
     }
   },
