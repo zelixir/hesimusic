@@ -97,20 +97,33 @@ const openExclude = ref(false)
     adding.value = true
     console.debug('[ScanPage] addExclude start')
     try {
-      const res = await ScanApi.requestFolderPermissions()
+      // Prefer single-folder pick flow. Newer native bridges will return { path }
+      const res = await ScanApi.pickFolder()
       console.debug('[ScanPage] addExclude got response', { res })
       if (!res) {
-        error.value = '未能获得权限返回值'
-        return
-      }
-      if (!res.granted) {
-        error.value = '用户未授予文件夹访问权限'
-        return
-      }
-      if (res.folders && res.folders.length > 0) {
-        for (const f of res.folders) {
-          if (!excludes.value.find(x => x.uri === f.uri)) excludes.value.push(f)
+        // Fallback to legacy permission request which may return multiple folders
+        const legacy = await ScanApi.requestFolderPermissions().catch(() => null)
+        if (!legacy) {
+          error.value = '未能获得权限返回值'
+          return
         }
+        if (!legacy.granted) {
+          error.value = '用户未授予文件夹访问权限'
+          return
+        }
+        if (legacy.folders && legacy.folders.length > 0) {
+          for (const f of legacy.folders) {
+            if (!excludes.value.find(x => x.uri === f.uri)) excludes.value.push(f)
+          }
+        }
+        return
+      }
+
+      // New pickFolder returns { path }
+      if ((res as any).path) {
+        const uri = (res as any).path
+        const item = { uri, displayName: friendlyFromUri(uri) }
+        if (!excludes.value.find(x => x.uri === uri)) excludes.value.push(item)
       }
     } catch (e: any) {
       console.error('addExclude error', e)
@@ -140,20 +153,32 @@ async function addFolder() {
   adding.value = true
   console.debug('[ScanPage] addFolder start')
   try {
-    const res = await ScanApi.requestFolderPermissions()
+    // Prefer pickFolder for single selection
+    const res = await ScanApi.pickFolder()
     console.debug('[ScanPage] addFolder got response', { res })
     if (!res) {
-      error.value = '未能获得权限返回值'
-      return
-    }
-    if (!res.granted) {
-      error.value = '用户未授予文件夹访问权限'
-      return
-    }
-    if (res.folders && res.folders.length > 0) {
-      for (const f of res.folders) {
-        if (!folders.value.find(x => x.uri === f.uri)) folders.value.push(f)
+      // fallback to legacy multiple-folder flow
+      const legacy = await ScanApi.requestFolderPermissions().catch(() => null)
+      if (!legacy) {
+        error.value = '未能获得权限返回值'
+        return
       }
+      if (!legacy.granted) {
+        error.value = '用户未授予文件夹访问权限'
+        return
+      }
+      if (legacy.folders && legacy.folders.length > 0) {
+        for (const f of legacy.folders) {
+          if (!folders.value.find(x => x.uri === f.uri)) folders.value.push(f)
+        }
+      }
+      return
+    }
+
+    if ((res as any).path) {
+      const uri = (res as any).path
+      const item = { uri, displayName: friendlyFromUri(uri) }
+      if (!folders.value.find(x => x.uri === uri)) folders.value.push(item)
     }
   } catch (e: any) {
     console.error('addFolder error', e)

@@ -116,25 +116,12 @@ async function callNativeBridge(name: string, args: unknown, timeout = DEFAULT_T
         const res = window.HesiMusicBridge.call(name, payload)
         console.debug('[musicBridge] HesiMusicBridge.call returned (wrapped)', { name, res })
         if (res === null || res === 'null' || typeof res === 'undefined') {
-          // Some native implementations don't use the requestId callback pattern
-          // and instead expect plain args (or return synchronously). Try a
-          // compatibility call with only the args serialized. If that still
-          // yields no result, fall back to waiting for an async callback as
-          // before.
-          try {
-            const altPayload = JSON.stringify(args)
-            console.debug('[musicBridge] trying HesiMusicBridge.call with altPayload (args only)', { name, altPayload })
-            const res2 = window.HesiMusicBridge.call(name, altPayload)
-            console.debug('[musicBridge] HesiMusicBridge.call returned (alt)', { name, res2 })
-            if (!(res2 === null || res2 === 'null' || typeof res2 === 'undefined')) {
-              try { return JSON.parse(res2) } catch (e) { try { reportError(e) } catch {}; return res2 }
-            }
-          } catch (err) {
-            // ignore and continue to wait for async callback
-            try { reportError(err) } catch {}
-          }
-
-          // no immediate result; wait for async callback
+          // Native indicated it will reply asynchronously via window.__music_api_return__.
+          // Do not attempt a second compatibility call here because some native
+          // implementations return a synchronous fallback when called without the
+          // requestId (which leads to duplicate flows: a synchronous fallback
+          // plus an async callback when the user actually picks). Instead wait
+          // for the async callback to resolve the pending request.
           return await createPending()
         }
         // parse sync result
