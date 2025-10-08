@@ -294,67 +294,6 @@
   resolved "https://registry.npmmirror.com/@esbuild/win32-x64/-/win32-x64-0.25.10.tgz#e4b3e255a1b4aea84f6e1d2ae0b73f826c3785bd"
   integrity sha512-9KpxSVFCu0iK1owoez6aC/s/EdUQLDN3adTxGCqxMVhrPDj6bt5dbrHDXUuq+Bs2vATFBBrQS5vdQ/Ed2P+nbw==
 
-"@iconify-json/gravity-ui@^1.2.5":
-  version "1.2.10"
-  resolved "https://registry.yarnpkg.com/@iconify-json/gravity-ui/-/gravity-ui-1.2.10.tgz#ba1b256dbe864921c21553b417bdac553f1b1706"
-  integrity sha512-GpLMMrVCc1XkKuNVQ0HaA37dW2fnkWED/2zcsd288QIncv1pQ8RG/Hr/mCDgGHe4Nec/1eu9OBk6yVqqQiR5Gw==
-  dependencies:
-    "@iconify/types" "*"
-
-"@iconify-json/lucide@^1.2.26":
-  version "1.2.68"
-  resolved "https://registry.yarnpkg.com/@iconify-json/lucide/-/lucide-1.2.68.tgz#0a21fa635c6e1a5c15ad2590692a912c83c40809"
-  integrity sha512-lR5xNJdn2CT0iR7lM25G4SewBO4G2hbr3fTWOc3AE9BspflEcneh02E3l9TBaCU/JOHozTJevWLrxBGypD7Tng==
-  dependencies:
-    "@iconify/types" "*"
-
-"@iconify-json/ph@^1.2.2":
-  version "1.2.2"
-  resolved "https://registry.yarnpkg.com/@iconify-json/ph/-/ph-1.2.2.tgz#eac734e80f4639df6ade990690a825540b4259c4"
-  integrity sha512-PgkEZNtqa8hBGjHXQa4pMwZa93hmfu8FUSjs/nv4oUU6yLsgv+gh9nu28Kqi8Fz9CCVu4hj1MZs9/60J57IzFw==
-  dependencies:
-    "@iconify/types" "*"
-
-"@iconify-json/radix-icons@^1.2.2":
-  version "1.2.5"
-  resolved "https://registry.yarnpkg.com/@iconify-json/radix-icons/-/radix-icons-1.2.5.tgz#e428d87e65847164d1fc228a89d5404e066b482d"
-  integrity sha512-HkUt+ydCivK/S/aFsgaiZRvs7zDEcO07PKkuEuu2EFBWCuC+Pi1mDdXPX0U3qjRr7JknmnoR4sAg53C+Ig35ow==
-  dependencies:
-    "@iconify/types" "*"
-
-"@iconify-json/ri@^1.2.5":
-  version "1.2.5"
-  resolved "https://registry.yarnpkg.com/@iconify-json/ri/-/ri-1.2.5.tgz#bd7d607225cc69b42928df3a55d4069ad8b7aaea"
-  integrity sha512-kWGimOXMZrlYusjBKKXYOWcKhbOHusFsmrmRGmjS7rH0BpML5A9/fy8KHZqFOwZfC4M6amObQYbh8BqO5cMC3w==
-  dependencies:
-    "@iconify/types" "*"
-
-"@iconify-json/simple-icons@^1.2.24":
-  version "1.2.54"
-  resolved "https://registry.yarnpkg.com/@iconify-json/simple-icons/-/simple-icons-1.2.54.tgz#b72bb1c36c03634bd31a8f33666b2237d40b36ad"
-  integrity sha512-OQQYl8yC5j3QklZOYnK31QYe5h47IhyCoxSLd53f0e0nA4dgi8VOZS30SgSAbsecQ+S0xlGJMjXIHTIqZ+ML3w==
-  dependencies:
-    "@iconify/types" "*"
-
-"@iconify-json/tabler@^1.2.16":
-  version "1.2.23"
-  resolved "https://registry.yarnpkg.com/@iconify-json/tabler/-/tabler-1.2.23.tgz#32f06df96c3b84734435d53c6c6017bcea87df9e"
-  integrity sha512-Knb8ykgMwB5uSoqrDv1xIdJYM03OP06OXjN6QvGXaTNtdHkW9ciKA+aftz6lwM2jwJA+bsUWeDzLBlPt2uJm4w==
-  dependencies:
-    "@iconify/types" "*"
-
-"@iconify/types@*", "@iconify/types@^2.0.0":
-  version "2.0.0"
-  resolved "https://registry.yarnpkg.com/@iconify/types/-/types-2.0.0.tgz#ab0e9ea681d6c8a1214f30cd741fe3a20cc57f57"
-  integrity sha512-+wluvCrRhXrhyOmRDJ3q8mux9JkKy5SJ/v8ol2tu4FVjyYvtEzkc/3pK15ET6RKg4b4w4BmTk1+gsCUhf21Ykg==
-
-"@iconify/vue@^4.3.0":
-  version "4.3.0"
-  resolved "https://registry.yarnpkg.com/@iconify/vue/-/vue-4.3.0.tgz#582098aa42056f1b97225ba10d1416c5c0c6e984"
-  integrity sha512-Xq0h6zMrHBbrW8jXJ9fISi+x8oDQllg5hTDkDuxnWiskJ63rpJu9CvJshj8VniHVTbsxCg9fVoPAaNp3RQI5OQ==
-  dependencies:
-    "@iconify/types" "^2.0.0"
-
 "@isaacs/fs-minipass@^4.0.0":
   version "4.0.1"
   resolved "https://registry.npmmirror.com/@isaacs/fs-minipass/-/fs-minipass-4.0.1.tgz#2d59ae3ab4b38fb4270bfa23d30f8e2e86c7fe32"
@@ -1188,6 +1127,11 @@ lodash.union@^4.6.0:
   version "4.6.0"
   resolved "https://registry.npmmirror.com/lodash.union/-/lodash.union-4.6.0.tgz#48bb5088409f16f1821666641c44dd1aaae3cd88"
   integrity sha512-c4pB2CdGrGdjMKYLA+XiRDO7Y0PRQbm/Gzg8qMj+QH+pFVAoTp5sBpO0odL3FjoPCGjK96p6qsP+yQoiLoOBcw==
+
+lucide-vue-next@^0.503.0:
+  version "0.503.0"
+  resolved "https://registry.yarnpkg.com/lucide-vue-next/-/lucide-vue-next-0.503.0.tgz#a66bd31fdf84d4ddc590d8a5cb518b5a7da849ec"
+  integrity sha512-3MrtHIBdh4dPCUZDLxQnvmQ17UzUnBYgezUSIo87Laais8hOz6qIPllp0iG/uS/UIzk7bJxyZRzoZTW/gLSr4A==
 
 magic-string@^0.30.19:
   version "0.30.19"

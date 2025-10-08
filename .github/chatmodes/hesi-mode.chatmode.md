@@ -16,11 +16,17 @@ tools: ['edit', 'search', 'usages', 'problems', 'changes', 'fetch', 'todos', 'co
 
 
 ### typescript规范
-* 使用ts的类型系统, 避免使用any
+* 使用ts的类型系统, 使用严格的类型, 禁止使用any
 * 不要滥用try catch, 只在必要时使用
 * 使用async/await
 
-### kotlin规范
-* 不要滥用try catch, 只在必要时使用
+### 图标库
+使用lucide图标库, 示例:
+```ts
+import { LucideTrash2 } from 'lucide-vue-next'
+```
 
+
+## kotlin规范
+* 不要滥用try catch, 只在必要时使用
 

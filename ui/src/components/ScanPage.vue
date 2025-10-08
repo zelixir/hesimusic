@@ -13,12 +13,12 @@
       <ul>
         <li v-for="(f, idx) in folders" :key="f.uri" class="flex justify-between items-center p-2 bg-white rounded mb-2">
           <div class="flex flex-col flex-1 min-w-0 mr-2">
-            <div class="text-sm font-medium break-words">{{ f.displayName || friendlyFromUri(f.uri) }}</div>
-            <div class="text-xs text-gray-500 break-all">{{ f.uri }}</div>
+            <div class="text-sm font-medium break-words">{{ f.displayName || utilFriendlyFromUri(f.uri) }}</div>
+            <div class="text-xs text-gray-500 break-all">{{ formatUriToPath(f.uri) }}</div>
           </div>
           <div>
             <button class="px-2 py-1 text-red-600" @click="removeFolder(idx)" aria-label="删除">
-              <iconify-icon icon="lucide:trash-2" width="16" height="16"></iconify-icon>
+              <lucide-trash-2 width="16" height="16"></lucide-trash-2>
             </button>
           </div>
         </li>
@@ -44,12 +44,12 @@
         <ul>
           <li v-for="(e, i) in excludes" :key="e.uri" class="flex justify-between items-center p-2 bg-white rounded mb-2">
             <div class="flex flex-col flex-1 min-w-0 mr-2">
-              <div class="text-sm font-medium break-words">{{ e.displayName || friendlyFromUri(e.uri) }}</div>
-              <div class="text-xs text-gray-500 break-all">{{ e.uri }}</div>
+              <div class="text-sm font-medium break-words">{{ e.displayName || utilFriendlyFromUri(e.uri) }}</div>
+              <div class="text-xs text-gray-500 break-all">{{ formatUriToPath(e.uri) }}</div>
             </div>
             <div>
               <button class="px-2 py-1 text-red-600" @click="removeExclude(i)">
-                <iconify-icon icon="lucide:trash-2" width="16" height="16"></iconify-icon>
+                <lucide-trash-2 width="16" height="16"></lucide-trash-2>
               </button>
             </div>
           </li>
@@ -66,7 +66,7 @@
 
     <div v-if="scanning" class="mt-4 bg-white p-4 rounded shadow">
       <div>已扫描：{{ scannedCount }}</div>
-      <div class="break-words">当前文件：{{ currentFile }}</div>
+      <div class="break-words">当前文件：{{ formatUriToPath(currentFile) }}</div>
     </div>
   </div>
 </template>
@@ -75,14 +75,15 @@
 import { ref, onMounted } from 'vue'
 import ScanApi, { FolderSelection, saveSettings as saveScanSettings, loadSettings as loadScanSettings } from '../services/scanApi'
 import { reportError } from '../services/errorService'
-
+import { formatUriToPath, friendlyFromUri as utilFriendlyFromUri } from '../utils/uriUtils'
+import { LucideTrash2 } from 'lucide-vue-next'
 const skipShort = ref(true)
 const skipAmrMid = ref(true)
 const skipHidden = ref(true)
 
 // folders holds objects returned from pickFolder: { uri, displayName }
-  const folders = ref<FolderSelection[]>([])
-  const excludes = ref<FolderSelection[]>([])
+const folders = ref<FolderSelection[]>([])
+const excludes = ref<FolderSelection[]>([])
 
 const scanning = ref(false)
 const scannedCount = ref(0)
@@ -132,52 +133,39 @@ async function saveSettings() {
   }
 }
 
-  async function addExclude() {
-    error.value = null
-    adding.value = true
-    console.debug('[ScanPage] addExclude start')
-    try {
-      // Prefer single-folder pick flow. Newer native bridges will return { path }
-      const res = await ScanApi.pickFolder()
-      console.debug('[ScanPage] addExclude got response', { res })
-      if (!res) {
-        // User cancelled or native bridge not available. Show friendly message.
-        error.value = '未选择任何文件夹'
-        return
-      }
-
-      // New pickFolder returns { path, displayName }
-      if ((res as any).path) {
-        const uri = (res as any).path
-        const displayName = (res as any).displayName || friendlyFromUri(uri)
-        const item = { uri, displayName }
-        if (!excludes.value.find(x => x.uri === uri)) {
-          excludes.value.push(item)
-          await saveSettings()
-        }
-      }
-    } catch (e: any) {
-      console.error('addExclude error', e)
-      try { reportError(e) } catch {}
-      error.value = (e && e.message) ? e.message : String(e)
-    } finally {
-      adding.value = false
-    }
-  }
-
-  function removeExclude(idx: number) {
-    excludes.value.splice(idx, 1)
-    saveSettings()
-  }
-
-function friendlyFromUri(uri: string) {
+async function addExclude() {
+  error.value = null
+  adding.value = true
+  console.debug('[ScanPage] addExclude start')
   try {
-    // show last path segment
-    const parts = uri.split('/')
-    return parts[parts.length - 1] || uri
-  } catch (e) {
-    return uri
+    const res = await ScanApi.pickFolder()
+    console.debug('[ScanPage] addExclude got response', { res })
+    if (!res) {
+      error.value = '未选择任何文件夹'
+      return
+    }
+
+    if ((res as any).path) {
+      const uri = (res as any).path
+      const displayName = (res as any).displayName || utilFriendlyFromUri(uri)
+      const item = { uri, displayName }
+      if (!excludes.value.find(x => x.uri === uri)) {
+        excludes.value.push(item)
+        await saveSettings()
+      }
+    }
+  } catch (e: any) {
+    console.error('addExclude error', e)
+    try { reportError(e) } catch {}
+    error.value = (e && e.message) ? e.message : String(e)
+  } finally {
+    adding.value = false
   }
+}
+
+function removeExclude(idx: number) {
+  excludes.value.splice(idx, 1)
+  saveSettings()
 }
 
 async function addFolder() {
@@ -185,7 +173,6 @@ async function addFolder() {
   adding.value = true
   console.debug('[ScanPage] addFolder start')
   try {
-    // Prefer pickFolder for single selection
     const res = await ScanApi.pickFolder()
     console.debug('[ScanPage] addFolder got response', { res })
     if (!res) {
@@ -195,7 +182,7 @@ async function addFolder() {
 
     if ((res as any).path) {
       const uri = (res as any).path
-      const displayName = (res as any).displayName || friendlyFromUri(uri)
+      const displayName = (res as any).displayName || utilFriendlyFromUri(uri)
       const item = { uri, displayName }
       if (!folders.value.find(x => x.uri === uri)) {
         folders.value.push(item)
@@ -229,7 +216,6 @@ async function startScan() {
       scannedCount.value = p.count || scannedCount.value
       currentFile.value = p.current || currentFile.value
       if (p.error) {
-        // show error message from native
         error.value = p.error.message || String(p.error)
       }
       if (p.finished) {
