@@ -89,7 +89,7 @@ function isNativePresent(): boolean {
   return !!(window.HesiMusicBridge || (window.musicBridge && window.musicBridge.call) || window.ScanBridge)
 }
 
-async function callNativeBridge(name: string, args: unknown, timeout = DEFAULT_TIMEOUT): Promise<any> {
+async function callNativeBridge(name: string, args: unknown, timeout?: number): Promise<any> {
   // Priority: HesiMusicBridge.call (synchronous string return or null + async callback)
   // then window.musicBridge.call (may return Promise or value), then ScanBridge special-case.
 
@@ -99,10 +99,15 @@ async function callNativeBridge(name: string, args: unknown, timeout = DEFAULT_T
   // helper to create pending promise
   const createPending = (): Promise<any> => {
     return new Promise((resolve, reject) => {
-      const timer = window.setTimeout(() => {
-        pending.delete(requestId)
-        reject(new Error(`MusicBridge call timeout: ${name}`))
-      }, timeout)
+      // If timeout is not provided, use default. If timeout is <= 0, treat as "no timeout"
+      const effectiveTimeout = typeof timeout === 'undefined' ? DEFAULT_TIMEOUT : timeout
+      let timer: number | undefined
+      if (effectiveTimeout > 0 && isFinite(effectiveTimeout)) {
+        timer = window.setTimeout(() => {
+          pending.delete(requestId)
+          reject(new Error(`MusicBridge call timeout: ${name}`))
+        }, effectiveTimeout)
+      }
       pending.set(requestId, { resolve, reject, timer })
     })
   }
@@ -190,6 +195,8 @@ const MusicBridge = {
   async call(name: string, args: unknown) {
     // If a native bridge is present, strictly use it and throw on failure to ensure app uses real data
     if (isNativePresent()) {
+      // pickFolder requires waiting for user action and should not timeout.
+      if (name === 'pickFolder') return callNativeBridge(name, args, 0)
       return callNativeBridge(name, args)
     }
 
