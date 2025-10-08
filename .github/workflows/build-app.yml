@@ -39,10 +39,10 @@ jobs:
 
       - name: Build Android app
         working-directory: hesimusic-client
-        run: ./gradlew assembleDebug
+        run: ./gradlew assembleRelease
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: hesimusic-client/app/build/outputs/apk/debug/*.apk
+          name: app-release
+          path: hesimusic-client/app/build/outputs/apk/release/*.apk
