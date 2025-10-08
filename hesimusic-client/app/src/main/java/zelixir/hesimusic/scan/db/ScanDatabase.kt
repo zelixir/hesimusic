@@ -5,7 +5,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import android.content.Context
 
-@Database(entities = [SongEntity::class, ScanState::class], version = 1)
+@Database(entities = [SongEntity::class, ScanState::class, ScanSettingsEntity::class], version = 2)
 abstract class ScanDatabase : RoomDatabase() {
     abstract fun songDao(): SongDao
 
@@ -14,7 +14,9 @@ abstract class ScanDatabase : RoomDatabase() {
 
         fun getInstance(context: Context): ScanDatabase {
             return INSTANCE ?: synchronized(this) {
-                val inst = Room.databaseBuilder(context.applicationContext, ScanDatabase::class.java, "scan_db").build()
+                val inst = Room.databaseBuilder(context.applicationContext, ScanDatabase::class.java, "scan_db")
+                    .fallbackToDestructiveMigration()
+                    .build()
                 INSTANCE = inst
                 inst
             }

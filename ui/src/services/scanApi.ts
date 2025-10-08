@@ -9,13 +9,13 @@ export type FolderNode = {
 }
 
 export type FolderSelection = { uri: string; displayName?: string };
-export type PickFolderResult = { path?: string } | null;
+export type PickFolderResult = { path?: string; displayName?: string } | null;
 
 type ScanProgressCb = (p: { count?: number; current?: string; finished?: boolean }) => void
 
 const ScanApi = {
   async pickFolder(): Promise<PickFolderResult> {
-    // native should return { path: string } or null on cancel
+    // native should return { path: string, displayName?: string } or null on cancel
     return await MusicBridge.call('pickFolder', {}) as Promise<PickFolderResult>
   },
 
@@ -49,6 +49,11 @@ const ScanApi = {
 
 export default ScanApi
 export type ScanSettings = {
+  folders?: FolderSelection[]
+  excludes?: FolderSelection[]
+  skipShort?: boolean
+  skipAmrMid?: boolean
+  skipHidden?: boolean
   minDurationMs?: number
   excluded?: string[]
 }
@@ -64,6 +69,16 @@ function callNative(method: string, payload: any): Promise<any> {
         }
         if (method === 'stopScan') {
           const res = (window as any).ScanBridge.stopScanFromJs(payload.scanId)
+          resolve(typeof res === 'string' ? JSON.parse(res) : res)
+          return
+        }
+        if (method === 'setScanSettings') {
+          const res = (window as any).ScanBridge.setScanSettings(JSON.stringify(payload))
+          resolve(typeof res === 'string' ? JSON.parse(res) : res)
+          return
+        }
+        if (method === 'getScanSettings') {
+          const res = (window as any).ScanBridge.getScanSettings(JSON.stringify(payload))
           resolve(typeof res === 'string' ? JSON.parse(res) : res)
           return
         }
@@ -91,11 +106,30 @@ export async function stopScan(scanId: string) {
 }
 
 export async function saveSettings(settings: ScanSettings) {
-  // just call native if available
-  return callNative('setScanSettings', { settings })
+  // Convert to the format expected by native
+  const payload = {
+    settings: {
+      folders: settings.folders?.map(f => ({ uri: f.uri, displayName: f.displayName })) || [],
+      excludes: settings.excludes?.map(e => ({ uri: e.uri, displayName: e.displayName })) || [],
+      skipShort: settings.skipShort !== undefined ? settings.skipShort : true,
+      skipAmrMid: settings.skipAmrMid !== undefined ? settings.skipAmrMid : true,
+      skipHidden: settings.skipHidden !== undefined ? settings.skipHidden : true
+    }
+  }
+  return callNative('setScanSettings', payload)
 }
 
 export async function loadSettings(): Promise<ScanSettings | null> {
   const r = await callNative('getScanSettings', {})
-  return r?.settings || null
+  if (r?.settings) {
+    const s = r.settings
+    return {
+      folders: s.folders || [],
+      excludes: s.excludes || [],
+      skipShort: s.skipShort !== undefined ? s.skipShort : true,
+      skipAmrMid: s.skipAmrMid !== undefined ? s.skipAmrMid : true,
+      skipHidden: s.skipHidden !== undefined ? s.skipHidden : true
+    }
+  }
+  return null
 }
