@@ -94,7 +94,16 @@ class ScanWorker(appContext: Context, workerParams: WorkerParameters) : Coroutin
             }
 
             checkpoint(scanId, null, ScanManager.getProgress(scanId)?.scannedCount ?: 0)
-            ScanManager.updateProgress(scanId, ScanProgress(scannedCount = ScanManager.getProgress(scanId)?.scannedCount ?: 0, foundSongs = ScanManager.getProgress(scanId)?.foundSongs ?: 0, currentPath = null))
+            val finalProgress = ScanManager.getProgress(scanId)
+            ScanManager.updateProgress(
+                scanId, 
+                ScanProgress(
+                    scannedCount = finalProgress?.scannedCount ?: 0, 
+                    foundSongs = finalProgress?.foundSongs ?: 0, 
+                    currentPath = null, 
+                    finished = true
+                )
+            )
 
             val dir = File(applicationContext.filesDir, "scan_states")
             val f = File(dir, "$scanId.json")

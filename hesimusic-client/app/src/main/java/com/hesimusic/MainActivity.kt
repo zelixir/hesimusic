@@ -133,6 +133,7 @@ class MainActivity : ComponentActivity() {
 
         // Load the frontend index from the virtual domain
         webView.loadUrl("https://app.frontend/")
+        
         // Register aggregated scan error callback to show toast and forward to web UI
         zelixir.hesimusic.scan.ScanManager.setErrorCallback { scanId, summaryJson ->
             try {
@@ -144,6 +145,26 @@ class MainActivity : ComponentActivity() {
                 val js = "window.__music_api_emit__('scanError', { scanId: '${scanId}', summary: ${summaryJson} })"
                 webView.post { webView.evaluateJavascript(js, null) }
             } catch (e: Throwable) { zelixir.hesimusic.scan.ScanManager.reportError(null, "Error forwarding scanError to webview: ${e.message}") }
+        }
+
+        // Register scan progress callback to forward progress updates to web UI
+        zelixir.hesimusic.scan.ScanManager.setProgressCallback { scanId, progress ->
+            try {
+                val progressJson = org.json.JSONObject()
+                progressJson.put("scanId", scanId)
+                progressJson.put("count", progress.scannedCount)
+                progressJson.put("foundSongs", progress.foundSongs)
+                progressJson.put("current", progress.currentPath ?: "")
+                progressJson.put("scannedCount", progress.scannedCount)
+                progressJson.put("currentPath", progress.currentPath ?: "")
+                progressJson.put("finished", progress.finished)
+                
+                // forward to webview via evaluateJavascript -> __music_api_emit__('scanProgress', payload)
+                val js = "window.__music_api_emit__('scanProgress', ${progressJson})"
+                webView.post { webView.evaluateJavascript(js, null) }
+            } catch (e: Throwable) { 
+                try { android.util.Log.w("MainActivity", "Error forwarding scanProgress to webview: ${e.message}") } catch (_: Throwable) {}
+            }
         }
     }
 

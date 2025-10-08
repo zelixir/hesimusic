@@ -25,6 +25,7 @@ object ScanManager {
     // Aggregated error summaries per scanId
     private val errorSummaryMap = ConcurrentHashMap<String, ErrorSummary>()
     private var errorCallback: ((scanId: String, summaryJson: String) -> Unit)? = null
+    private var progressCallback: ((scanId: String, progress: ScanProgress) -> Unit)? = null
     private val debounceTasks = ConcurrentHashMap<String, java.util.TimerTask?>()
     private val timer = java.util.Timer(true)
     private val DEBOUNCE_MS = 2000L
@@ -51,6 +52,10 @@ object ScanManager {
 
     fun setErrorCallback(cb: ((scanId: String, summaryJson: String) -> Unit)?) {
         errorCallback = cb
+    }
+
+    fun setProgressCallback(cb: ((scanId: String, progress: ScanProgress) -> Unit)?) {
+        progressCallback = cb
     }
 
     fun reportError(scanId: String?, message: String?) {
@@ -164,6 +169,12 @@ object ScanManager {
     internal fun updateProgress(scanId: String, progress: ScanProgress) {
         progressMap[scanId] = progress
         writePersistedProgress(scanId, progress)
+        // Notify progress callback
+        try {
+            progressCallback?.invoke(scanId, progress)
+        } catch (e: Throwable) {
+            try { android.util.Log.w("ScanManager", "Progress callback failed: ${e.message}") } catch (_: Throwable) {}
+        }
     }
 
     private fun checkInitialized() {
@@ -209,6 +220,7 @@ object ScanManager {
             put("foundSongs", progress.foundSongs)
             put("currentPath", progress.currentPath)
             put("lastUpdated", progress.lastUpdated)
+            put("finished", progress.finished)
         }
         f.writeText(json.toString())
     }
@@ -222,7 +234,8 @@ object ScanManager {
                 scannedCount = obj.optInt("scannedCount", 0),
                 foundSongs = obj.optInt("foundSongs", 0),
                 currentPath = if (obj.has("currentPath")) obj.optString("currentPath") else null,
-                lastUpdated = obj.optLong("lastUpdated", System.currentTimeMillis())
+                lastUpdated = obj.optLong("lastUpdated", System.currentTimeMillis()),
+                finished = obj.optBoolean("finished", false)
             )
         } catch (t: Throwable) {
             null
@@ -243,5 +256,6 @@ data class ScanProgress(
     val scannedCount: Int = 0,
     val foundSongs: Int = 0,
     val currentPath: String? = null,
-    val lastUpdated: Long = System.currentTimeMillis()
+    val lastUpdated: Long = System.currentTimeMillis(),
+    val finished: Boolean = false
 )
