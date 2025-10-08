@@ -18,15 +18,20 @@ class ScanWebBridge(private val context: Context) {
     @JavascriptInterface
     fun startScanFromJs(optionsJson: String): String {
         val obj = try { JSONObject(optionsJson) } catch (e: Throwable) { ScanManager.reportError(null, "解析扫描参数失败: ${e.message}"); JSONObject() }
+        
+        // Extract the 'options' object if present (frontend sends { options: {...} })
+        val optionsObj = if (obj.has("options")) obj.getJSONObject("options") else obj
+        
         val roots = mutableListOf<String>()
-        val arr = obj.optJSONArray("paths")
+        // Try 'folders' first (new format), then 'paths' (legacy format)
+        val arr = optionsObj.optJSONArray("folders") ?: optionsObj.optJSONArray("paths")
         if (arr != null) {
             for (i in 0 until arr.length()) roots.add(arr.getString(i))
         }
         val excluded = mutableListOf<String>()
-        val ex = obj.optJSONArray("excluded")
+        val ex = optionsObj.optJSONArray("excluded")
         if (ex != null) for (i in 0 until ex.length()) excluded.add(ex.getString(i))
-        val minDuration = obj.optLong("minDurationMs", 0L)
+        val minDuration = optionsObj.optLong("minDurationMs", 0L)
 
         val opts = ScanOptions(roots = roots, excludedPaths = excluded, minDurationMs = minDuration)
         val scanId = ScanManager.startScan(opts)
