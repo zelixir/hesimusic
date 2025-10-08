@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    alias(libs.plugins.ksp)
 }
 
 android {
@@ -53,7 +54,9 @@ dependencies {
     debugImplementation(libs.androidx.ui.test.manifest)
 
     implementation(libs.androidx.room.runtime)
-    annotationProcessor(libs.androidx.room.compiler)
+    ksp(libs.androidx.room.compiler)
+    implementation("androidx.room:room-ktx:2.6.1")
+    implementation("androidx.documentfile:documentfile:1.0.1")
     // Metadata parsing libraries required by MetadataExtractor
     implementation(libs.jaudiotagger)
     implementation(libs.juniversalchardet)

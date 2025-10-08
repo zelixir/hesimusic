@@ -96,7 +96,18 @@ class MainActivity : ComponentActivity() {
                         // flow (requestFolderPermissions) has been removed; frontend no longer expects it.
                         val obj = org.json.JSONObject()
                         obj.put("path", uri.toString())
-                        android.util.Log.d("HesiMusicBridge", "returning pick result to JS: req=$req, path=${uri}")
+                        
+                        // Get display name from DocumentFile
+                        try {
+                            val docFile = androidx.documentfile.provider.DocumentFile.fromTreeUri(this, uri)
+                            val displayName = docFile?.name ?: uri.lastPathSegment ?: ""
+                            obj.put("displayName", displayName)
+                        } catch (e: Throwable) {
+                            // Fallback to last path segment
+                            obj.put("displayName", uri.lastPathSegment ?: "")
+                        }
+                        
+                        android.util.Log.d("HesiMusicBridge", "returning pick result to JS: req=$req, path=${uri}, displayName=${obj.optString("displayName")}")
                         webView.post {
                             webView.evaluateJavascript("window.__music_api_return__('$req', ${obj.toString()})", null)
                         }

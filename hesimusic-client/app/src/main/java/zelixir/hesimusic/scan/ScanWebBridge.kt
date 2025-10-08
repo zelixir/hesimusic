@@ -2,7 +2,12 @@ package zelixir.hesimusic.scan
 
 import android.content.Context
 import android.webkit.JavascriptInterface
+import androidx.documentfile.provider.DocumentFile
+import kotlinx.coroutines.runBlocking
+import org.json.JSONArray
 import org.json.JSONObject
+import zelixir.hesimusic.scan.db.ScanDatabase
+import zelixir.hesimusic.scan.db.ScanSettingsEntity
 
 class ScanWebBridge(private val context: Context) {
 
@@ -44,6 +49,86 @@ class ScanWebBridge(private val context: Context) {
         } catch (e: Throwable) {
             try { ScanManager.reportError(scanId, "getScanState failed: ${e.message}") } catch (_: Throwable) {}
             return JSONObject().put("error", "read_failed").put("message", e.message).toString()
+        }
+    }
+
+    @JavascriptInterface
+    fun setScanSettings(settingsJson: String): String {
+        try {
+            val obj = JSONObject(settingsJson)
+            val settings = obj.optJSONObject("settings") ?: JSONObject()
+            
+            // Extract folder and exclude arrays
+            val foldersArr = settings.optJSONArray("folders") ?: JSONArray()
+            val excludesArr = settings.optJSONArray("excludes") ?: JSONArray()
+            
+            // Convert to JSON strings
+            val foldersJson = foldersArr.toString()
+            val excludesJson = excludesArr.toString()
+            
+            val skipShort = settings.optBoolean("skipShort", true)
+            val skipAmrMid = settings.optBoolean("skipAmrMid", true)
+            val skipHidden = settings.optBoolean("skipHidden", true)
+            
+            val entity = ScanSettingsEntity(
+                id = 1,
+                folders_json = foldersJson,
+                excludes_json = excludesJson,
+                skip_short = skipShort,
+                skip_amr_mid = skipAmrMid,
+                skip_hidden = skipHidden,
+                last_updated_at = System.currentTimeMillis()
+            )
+            
+            runBlocking {
+                ScanDatabase.getInstance(context).songDao().insertScanSettings(entity)
+            }
+            
+            return JSONObject().put("success", true).toString()
+        } catch (e: Throwable) {
+            ScanManager.reportError(null, "setScanSettings failed: ${e.message}")
+            return JSONObject().put("error", e.message).toString()
+        }
+    }
+
+    @JavascriptInterface
+    fun getScanSettings(argsJson: String): String {
+        try {
+            val entity = runBlocking {
+                ScanDatabase.getInstance(context).songDao().getScanSettings()
+            }
+            
+            if (entity == null) {
+                return JSONObject().put("settings", JSONObject.NULL).toString()
+            }
+            
+            val foldersArr = try { JSONArray(entity.folders_json ?: "[]") } catch (_: Throwable) { JSONArray() }
+            val excludesArr = try { JSONArray(entity.excludes_json ?: "[]") } catch (_: Throwable) { JSONArray() }
+            
+            val settings = JSONObject().apply {
+                put("folders", foldersArr)
+                put("excludes", excludesArr)
+                put("skipShort", entity.skip_short)
+                put("skipAmrMid", entity.skip_amr_mid)
+                put("skipHidden", entity.skip_hidden)
+            }
+            
+            return JSONObject().put("settings", settings).toString()
+        } catch (e: Throwable) {
+            ScanManager.reportError(null, "getScanSettings failed: ${e.message}")
+            return JSONObject().put("error", e.message).toString()
+        }
+    }
+
+    // Helper function to get display name from URI using DocumentFile
+    @JavascriptInterface
+    fun getDisplayNameFromUri(uriString: String): String {
+        try {
+            val uri = android.net.Uri.parse(uriString)
+            val docFile = DocumentFile.fromTreeUri(context, uri)
+            return docFile?.name ?: uri.lastPathSegment ?: uriString
+        } catch (e: Throwable) {
+            return uriString
         }
     }
 

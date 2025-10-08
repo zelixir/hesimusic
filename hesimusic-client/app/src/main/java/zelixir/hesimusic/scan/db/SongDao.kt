@@ -16,4 +16,10 @@ interface SongDao {
 
     @Query("SELECT COUNT(*) FROM songs")
     suspend fun countSongs(): Int
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertScanSettings(settings: ScanSettingsEntity)
+
+    @Query("SELECT * FROM scan_settings WHERE id = 1 LIMIT 1")
+    suspend fun getScanSettings(): ScanSettingsEntity?
 }

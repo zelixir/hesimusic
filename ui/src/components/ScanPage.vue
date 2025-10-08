@@ -3,18 +3,18 @@
     <h2 class="text-lg font-semibold mb-4">扫描音乐</h2>
 
     <div class="mb-4 bg-white p-4 rounded shadow">
-      <label class="flex items-center space-x-2"><input type="checkbox" v-model="skipShort" /> <span>不扫描60秒以下歌曲</span></label>
-      <label class="flex items-center space-x-2 mt-2"><input type="checkbox" v-model="skipAmrMid" /> <span>不扫描 amr/mid</span></label>
-      <label class="flex items-center space-x-2 mt-2"><input type="checkbox" v-model="skipHidden" /> <span>不扫描隐藏文件夹</span></label>
+      <label class="flex items-center space-x-2"><input type="checkbox" v-model="skipShort" @change="saveSettings" /> <span>不扫描60秒以下歌曲</span></label>
+      <label class="flex items-center space-x-2 mt-2"><input type="checkbox" v-model="skipAmrMid" @change="saveSettings" /> <span>不扫描 amr/mid</span></label>
+      <label class="flex items-center space-x-2 mt-2"><input type="checkbox" v-model="skipHidden" @change="saveSettings" /> <span>不扫描隐藏文件夹</span></label>
     </div>
 
     <div class="mb-4">
       <h3 class="font-medium">要扫描的文件夹</h3>
       <ul>
         <li v-for="(f, idx) in folders" :key="f.uri" class="flex justify-between items-center p-2 bg-white rounded mb-2">
-          <div class="flex flex-col">
-            <div class="text-sm font-medium">{{ f.displayName || friendlyFromUri(f.uri) }}</div>
-            <div class="text-xs text-gray-500">{{ f.uri }}</div>
+          <div class="flex flex-col flex-1 min-w-0 mr-2">
+            <div class="text-sm font-medium break-words">{{ f.displayName || friendlyFromUri(f.uri) }}</div>
+            <div class="text-xs text-gray-500 break-all">{{ f.uri }}</div>
           </div>
           <div>
             <button class="px-2 py-1 text-red-600" @click="removeFolder(idx)" aria-label="删除">
@@ -43,9 +43,9 @@
         </div>
         <ul>
           <li v-for="(e, i) in excludes" :key="e.uri" class="flex justify-between items-center p-2 bg-white rounded mb-2">
-            <div class="flex flex-col">
-              <div class="text-sm font-medium">{{ e.displayName || friendlyFromUri(e.uri) }}</div>
-              <div class="text-xs text-gray-500">{{ e.uri }}</div>
+            <div class="flex flex-col flex-1 min-w-0 mr-2">
+              <div class="text-sm font-medium break-words">{{ e.displayName || friendlyFromUri(e.uri) }}</div>
+              <div class="text-xs text-gray-500 break-all">{{ e.uri }}</div>
             </div>
             <div>
               <button class="px-2 py-1 text-red-600" @click="removeExclude(i)">
@@ -66,14 +66,14 @@
 
     <div v-if="scanning" class="mt-4 bg-white p-4 rounded shadow">
       <div>已扫描：{{ scannedCount }}</div>
-      <div>当前文件：{{ currentFile }}</div>
+      <div class="break-words">当前文件：{{ currentFile }}</div>
     </div>
   </div>
 </template>
 
 <script lang="ts" setup>
-import { ref } from 'vue'
-import ScanApi, { FolderSelection } from '../services/scanApi'
+import { ref, onMounted } from 'vue'
+import ScanApi, { FolderSelection, saveSettings as saveScanSettings, loadSettings as loadScanSettings } from '../services/scanApi'
 import { reportError } from '../services/errorService'
 
 const skipShort = ref(true)
@@ -92,6 +92,46 @@ const adding = ref(false)
 const error = ref<string | null>(null)
 const openExclude = ref(false)
 
+onMounted(async () => {
+  // Load saved settings
+  try {
+    const settings = await loadScanSettings()
+    if (settings) {
+      if (settings.folders) {
+        folders.value = settings.folders
+      }
+      if (settings.excludes) {
+        excludes.value = settings.excludes
+      }
+      if (settings.skipShort !== undefined) {
+        skipShort.value = settings.skipShort
+      }
+      if (settings.skipAmrMid !== undefined) {
+        skipAmrMid.value = settings.skipAmrMid
+      }
+      if (settings.skipHidden !== undefined) {
+        skipHidden.value = settings.skipHidden
+      }
+    }
+  } catch (e) {
+    console.error('Failed to load settings', e)
+  }
+})
+
+async function saveSettings() {
+  try {
+    await saveScanSettings({
+      folders: folders.value,
+      excludes: excludes.value,
+      skipShort: skipShort.value,
+      skipAmrMid: skipAmrMid.value,
+      skipHidden: skipHidden.value
+    })
+  } catch (e) {
+    console.error('Failed to save settings', e)
+  }
+}
+
   async function addExclude() {
     error.value = null
     adding.value = true
@@ -106,11 +146,15 @@ const openExclude = ref(false)
         return
       }
 
-      // New pickFolder returns { path }
+      // New pickFolder returns { path, displayName }
       if ((res as any).path) {
         const uri = (res as any).path
-        const item = { uri, displayName: friendlyFromUri(uri) }
-        if (!excludes.value.find(x => x.uri === uri)) excludes.value.push(item)
+        const displayName = (res as any).displayName || friendlyFromUri(uri)
+        const item = { uri, displayName }
+        if (!excludes.value.find(x => x.uri === uri)) {
+          excludes.value.push(item)
+          await saveSettings()
+        }
       }
     } catch (e: any) {
       console.error('addExclude error', e)
@@ -123,6 +167,7 @@ const openExclude = ref(false)
 
   function removeExclude(idx: number) {
     excludes.value.splice(idx, 1)
+    saveSettings()
   }
 
 function friendlyFromUri(uri: string) {
@@ -150,8 +195,12 @@ async function addFolder() {
 
     if ((res as any).path) {
       const uri = (res as any).path
-      const item = { uri, displayName: friendlyFromUri(uri) }
-      if (!folders.value.find(x => x.uri === uri)) folders.value.push(item)
+      const displayName = (res as any).displayName || friendlyFromUri(uri)
+      const item = { uri, displayName }
+      if (!folders.value.find(x => x.uri === uri)) {
+        folders.value.push(item)
+        await saveSettings()
+      }
     }
   } catch (e: any) {
     console.error('addFolder error', e)
@@ -164,6 +213,7 @@ async function addFolder() {
 
 function removeFolder(idx: number) {
   folders.value.splice(idx, 1)
+  saveSettings()
 }
 
 async function startScan() {
