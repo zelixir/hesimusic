@@ -73,16 +73,16 @@
 
 <script lang="ts" setup>
 import { ref } from 'vue'
-import ScanApi from '../services/scanApi'
+import ScanApi, { FolderSelection } from '../services/scanApi'
 import { reportError } from '../services/errorService'
 
 const skipShort = ref(true)
 const skipAmrMid = ref(true)
 const skipHidden = ref(true)
 
-// folders now holds objects returned from requestFolderPermissions: { uri, displayName }
-  const folders = ref<Array<{ uri: string; displayName?: string }>>([])
-  const excludes = ref<Array<{ uri: string; displayName?: string }>>([])
+// folders holds objects returned from pickFolder: { uri, displayName }
+  const folders = ref<FolderSelection[]>([])
+  const excludes = ref<FolderSelection[]>([])
 
 const scanning = ref(false)
 const scannedCount = ref(0)
@@ -101,21 +101,8 @@ const openExclude = ref(false)
       const res = await ScanApi.pickFolder()
       console.debug('[ScanPage] addExclude got response', { res })
       if (!res) {
-        // Fallback to legacy permission request which may return multiple folders
-        const legacy = await ScanApi.requestFolderPermissions().catch(() => null)
-        if (!legacy) {
-          error.value = '未能获得权限返回值'
-          return
-        }
-        if (!legacy.granted) {
-          error.value = '用户未授予文件夹访问权限'
-          return
-        }
-        if (legacy.folders && legacy.folders.length > 0) {
-          for (const f of legacy.folders) {
-            if (!excludes.value.find(x => x.uri === f.uri)) excludes.value.push(f)
-          }
-        }
+        // User cancelled or native bridge not available. Show friendly message.
+        error.value = '未选择任何文件夹'
         return
       }
 
@@ -157,21 +144,7 @@ async function addFolder() {
     const res = await ScanApi.pickFolder()
     console.debug('[ScanPage] addFolder got response', { res })
     if (!res) {
-      // fallback to legacy multiple-folder flow
-      const legacy = await ScanApi.requestFolderPermissions().catch(() => null)
-      if (!legacy) {
-        error.value = '未能获得权限返回值'
-        return
-      }
-      if (!legacy.granted) {
-        error.value = '用户未授予文件夹访问权限'
-        return
-      }
-      if (legacy.folders && legacy.folders.length > 0) {
-        for (const f of legacy.folders) {
-          if (!folders.value.find(x => x.uri === f.uri)) folders.value.push(f)
-        }
-      }
+      error.value = '未选择任何文件夹'
       return
     }
 

@@ -210,12 +210,6 @@ const MusicBridge = {
         return mockQueue
       case 'pickFolder':
         return { path: '/storage/emulated/0/Music' }
-      case 'requestFolderPermissions':
-        // simulate user granting permissions and selecting multiple folders
-        return { granted: true, folders: [
-          { uri: 'content://com.android.externalstorage.documents/tree/primary%3AMusic', displayName: 'Music' },
-          { uri: 'content://com.android.externalstorage.documents/tree/primary%3ADownload', displayName: 'Download' }
-        ] }
       case 'listFolders':
         if ((args as any) && (args as any).parent) {
           if ((args as any).parent === '/storage/emulated/0') {

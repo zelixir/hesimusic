@@ -8,26 +8,17 @@ export type FolderNode = {
   children?: FolderNode[]
 }
 
+export type FolderSelection = { uri: string; displayName?: string };
+export type PickFolderResult = { path?: string } | null;
+
 type ScanProgressCb = (p: { count?: number; current?: string; finished?: boolean }) => void
 
 const ScanApi = {
-  async pickFolder() {
-    // native should return { path: string }
-    return await MusicBridge.call('pickFolder', {})
+  async pickFolder(): Promise<PickFolderResult> {
+    // native should return { path: string } or null on cancel
+    return await MusicBridge.call('pickFolder', {}) as Promise<PickFolderResult>
   },
 
-  async requestFolderPermissions(): Promise<{ granted: boolean; folders?: Array<{ uri: string; displayName?: string }> } | null> {
-    try {
-      console.debug('[scanApi] requestFolderPermissions -> calling MusicBridge')
-      const res = await MusicBridge.call('requestFolderPermissions', {})
-      console.debug('[scanApi] requestFolderPermissions <- returned', { res })
-      return res
-    } catch (e) {
-      console.error('requestFolderPermissions failed', e)
-      try { reportError(e) } catch {}
-      throw e
-    }
-  },
 
   async listFolders(opts?: { parent?: string }): Promise<FolderNode[]> {
     // native should return a list of FolderNode for the given parent

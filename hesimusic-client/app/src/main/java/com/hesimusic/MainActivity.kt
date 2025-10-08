@@ -91,49 +91,24 @@ class MainActivity : ComponentActivity() {
 
                     // If there was a pending JS request, return result via global callback
                     val req = pendingJsRequestIdForPick
-                    val method = pendingJsRequestMethod
                     if (req != null) {
-                        if (method == "requestFolderPermissions") {
-                            // build { granted: true, folders: [ { uri, displayName } ] }
-                            val jo = org.json.JSONObject()
-                            jo.put("granted", true)
-                            val arr = org.json.JSONArray()
-                            val item = org.json.JSONObject()
-                            item.put("uri", uri.toString())
-                            item.put("displayName", uri.lastPathSegment ?: uri.toString())
-                            arr.put(item)
-                            jo.put("folders", arr)
-                            android.util.Log.d("HesiMusicBridge", "returning requestFolderPermissions result for req=$req, method=$method, uri=$uri")
-                            webView.post {
-                                webView.evaluateJavascript("window.__music_api_return__('$req', ${jo.toString()})", null)
-                            }
-                        } else {
-                            val obj = org.json.JSONObject()
-                            obj.put("path", uri.toString())
-                            android.util.Log.d("HesiMusicBridge", "returning pick result to JS: req=$req, path=${uri}")
-                            webView.post {
-                                webView.evaluateJavascript("window.__music_api_return__('$req', ${obj.toString()})", null)
-                            }
+                        // Always return a single pickFolder result (path). Legacy multi-folder permission
+                        // flow (requestFolderPermissions) has been removed; frontend no longer expects it.
+                        val obj = org.json.JSONObject()
+                        obj.put("path", uri.toString())
+                        android.util.Log.d("HesiMusicBridge", "returning pick result to JS: req=$req, path=${uri}")
+                        webView.post {
+                            webView.evaluateJavascript("window.__music_api_return__('$req', ${obj.toString()})", null)
                         }
                     }
                 } else {
                     // user cancelled: reply with appropriate structure to pending request
                     val req = pendingJsRequestIdForPick
-                    val method = pendingJsRequestMethod
                     if (req != null) {
-                        if (method == "requestFolderPermissions") {
-                            val jo = org.json.JSONObject()
-                            jo.put("granted", false)
-                            jo.put("folders", org.json.JSONArray())
-                            android.util.Log.d("HesiMusicBridge", "user cancelled pick for requestFolderPermissions, returning granted=false for req=$req")
-                            webView.post {
-                                webView.evaluateJavascript("window.__music_api_return__('$req', ${jo.toString()})", null)
-                            }
-                        } else {
-                            android.util.Log.d("HesiMusicBridge", "user cancelled pick, returning null for req=$req")
-                            webView.post {
-                                webView.evaluateJavascript("window.__music_api_return__('$req', null)", null)
-                            }
+                        // Treat cancellation as no selection (null) for pickFolder.
+                        android.util.Log.d("HesiMusicBridge", "user cancelled pick, returning null for req=$req")
+                        webView.post {
+                            webView.evaluateJavascript("window.__music_api_return__('$req', null)", null)
                         }
                     }
                 }
@@ -212,29 +187,7 @@ class HesiMusicBridgeImpl(
                     android.util.Log.d(tag, "listFolders returning for parent=$parent; items=${list.length()}")
                     return list.toString()
                 }
-                "requestFolderPermissions" -> {
-                    // Support async flow: if JS provided a requestId, we'll trigger SAF via callback
-                    if (argsJson != null) {
-                        val jo = org.json.JSONObject(argsJson)
-                        val req = jo.optString("requestId").takeIf { it.isNotEmpty() }
-                        if (!req.isNullOrEmpty() && onPickRequested != null) {
-                            android.util.Log.d(tag, "requestFolderPermissions called with requestId=$req; invoking onPickRequested(method=requestFolderPermissions)")
-                            onPickRequested.invoke(req, "requestFolderPermissions")
-                            return "null"
-                        }
-                    }
-
-                    // synchronous fallback: return granted true with a likely folder
-                    val jo = org.json.JSONObject()
-                    jo.put("granted", true)
-                    val arr = org.json.JSONArray()
-                    val item = org.json.JSONObject()
-                    item.put("uri", "/storage/emulated/0/Music")
-                    item.put("displayName", "Music")
-                    arr.put(item)
-                    jo.put("folders", arr)
-                    return jo.toString()
-                }
+                // note: legacy requestFolderPermissions flow removed. Frontend uses pickFolder only.
                 "pickFolder" -> {
                     // Support async pick flow: if the JS provided a requestId we will launch SAF via the
                     // onPickRequested callback and return null so the JS side waits for window.__music_api_return__.
