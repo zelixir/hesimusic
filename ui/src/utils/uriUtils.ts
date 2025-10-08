@@ -38,12 +38,17 @@ export function formatUriToPath(uri: string): string {
     try {
       const decoded = decodeURIComponent(uri)
       // handle tree URIs with primary
-      const m = decoded.match(/primary:([\w\-\/\s.%+]+)/i)
+      // match primary: segment with a relaxed pattern (capture until next space or end) so any valid path chars are allowed
+      const m = decoded.match(/primary:([^\s]+)/i)
       if (m && m[1]) {
-        // replace any colon separators with slashes and decode
+        // replace any colon separators with slashes
         const rest = m[1].replace(/:+/g, '/')
-        // Return a user-friendly path without the device prefix and with decoded characters
-        return decodeURIComponent(rest).replace(/^\/+/, '')
+        // Safely decode; if decoding fails, return the raw rest without device prefix
+        try {
+          return decodeURIComponent(rest).replace(/^\/+/, '')
+        } catch (e) {
+          return rest.replace(/^\/+/, '')
+        }
       }
       // handle generic content URIs by showing the last meaningful segment
       if (decoded.startsWith('content://')) {
