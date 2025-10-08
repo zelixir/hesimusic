@@ -12,8 +12,9 @@
   "dependencies": {
     "@types/archiver": "^6.0.3",
     "@types/node": "^24.7.0",
-    "tsx": "^4.20.6",
     "lucide-vue-next": "^0.503.0",
+    "tsx": "^4.20.6",
+    "vitest": "^3.2.4",
     "vue": "^3.3.4"
   },
   "devDependencies": {

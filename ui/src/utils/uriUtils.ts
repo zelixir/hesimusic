@@ -10,13 +10,27 @@ export function formatUriToPath(uri: string): string {
       // Remove only the scheme
       const without = uri.replace(/^file:\/\//, '')
       // If windows drive like C:/..., return as-is
-      if (/^[A-Za-z]:/.test(without)) return without
+      if (/^[A-Za-z]:/.test(without)) return decodeURIComponent(without)
       // If it starts with a slash after removing scheme, keep it (unix-style), otherwise ensure single leading slash
-      return without.startsWith('/') ? without : ('/' + without).replace(/^\/+/, '/')
+      const path = without.startsWith('/') ? without : ('/' + without).replace(/^\/+/, '/')
+      // Decode and remove Android device prefix if present to keep output user-friendly
+      const decodedPath = decodeURIComponent(path)
+      if (decodedPath.startsWith('/storage/emulated/0/')) {
+        return decodedPath.replace(/^\/storage\/emulated\/0/, '')
+      }
+      return decodedPath
     }
 
-    // absolute path already
-    if (uri.startsWith('/')) return uri
+    // absolute path already - strip common Android device prefixes to keep user-friendly
+    if (uri.startsWith('/')) {
+      if (uri.startsWith('/storage/emulated/0/')) {
+        return uri.replace('/storage/emulated/0', '')
+      }
+      if (uri.startsWith('/data/media/0/')) {
+        return uri.replace('/data/media/0', '')
+      }
+      return uri
+    }
 
     // Android SAF / tree/content URIs
     // Example: content://com.android.externalstorage.documents/tree/primary:Music
@@ -26,8 +40,10 @@ export function formatUriToPath(uri: string): string {
       // handle tree URIs with primary
       const m = decoded.match(/primary:([\w\-\/\s.%+]+)/i)
       if (m && m[1]) {
+        // replace any colon separators with slashes and decode
         const rest = m[1].replace(/:+/g, '/')
-        return '/storage/emulated/0/' + rest
+        // Return a user-friendly path without the device prefix and with decoded characters
+        return decodeURIComponent(rest).replace(/^\/+/, '')
       }
       // handle generic content URIs by showing the last meaningful segment
       if (decoded.startsWith('content://')) {
@@ -38,7 +54,8 @@ export function formatUriToPath(uri: string): string {
           if (!p) continue
           // skip segments that look like 'tree' or 'document'
           if (p.toLowerCase().includes('document') || p.toLowerCase().includes('tree')) continue
-          return '/' + p
+          // decode the final segment for user-friendly output and strip leading slashes
+          return decodeURIComponent(p).replace(/^\/+/, '')
         }
       }
     } catch (e) {
@@ -48,9 +65,9 @@ export function formatUriToPath(uri: string): string {
     // If it contains a colon like 'sdcard:Music' or 'primary:Music', convert to path-like
     if (uri.includes(':')) {
       const parts = uri.split(':')
-      // prefer last part as path tail
+      // prefer last part as path tail, join with slashes for nested segments and decode
       const tail = parts.slice(1).join('/')
-      return '/' + tail
+      return decodeURIComponent(tail).replace(/^\/+/, '')
     }
 
     // fallback: return original
