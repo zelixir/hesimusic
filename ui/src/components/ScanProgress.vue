@@ -33,6 +33,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import type { ScanProgress } from '../types'
+import Modal from './Modal.vue'
 
 const props = defineProps<{ scanId: string | null }>()
 const progress = ref<ScanProgress | null>(null)
@@ -86,17 +87,6 @@ onBeforeUnmount(() => {
 
 </script>
 
-<template #modal>
-  <div v-if="showModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center">
-    <div class="bg-white p-4 rounded w-3/4 max-h-3/4 overflow-auto">
-      <div class="flex justify-between items-center mb-2">
-        <div class="font-medium">完整日志</div>
-        <button class="text-sm text-gray-600" @click="showModal = false">关闭</button>
-      </div>
-      <pre class="text-xs">{{ modalContent }}</pre>
-    </div>
-  </div>
-</template>
-
-<style scoped>
-</style>
+<modal :visible="showModal" title="完整日志" size="lg" @close="showModal = false">
+  <pre class="text-xs whitespace-pre-wrap">{{ modalContent }}</pre>
+</modal>
