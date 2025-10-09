@@ -1,0 +1,6 @@
+# Generated icons temporary directory
+/generated-icons/
+
+# Node modules in tools
+/tools/generate-icons/node_modules/
+/tools/generate-icons/package-lock.json

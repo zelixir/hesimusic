@@ -1,0 +1,12 @@
+{
+  "name": "generate-icons",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "node-fetch": "^3.4.1",
+    "sharp": "^0.32.0",
+    "png-to-ico": "^1.1.0",
+    "fast-glob": "^3.2.12"
+  },
+  "type": "module"
+}

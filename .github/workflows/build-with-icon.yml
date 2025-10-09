@@ -1,0 +1,57 @@
+name: Build with custom icon
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_url:
+        description: '可访问的图片 URL（优先）'
+        required: false
+        default: ''
+      image_base64:
+        description: 'Base64 编码的图片（不推荐）'
+        required: false
+        default: ''
+      repo_image_path:
+        description: '仓库内图片路径（相对于仓库根），例如 assets/source-icon.png'
+        required: false
+        default: ''
+      commit_changes:
+        description: '是否把生成/替换的图标提交回仓库 (true/false)'
+        required: false
+        default: 'false'
+
+jobs:
+  prepare-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install generate-icons dependencies
+        run: npm ci
+        working-directory: tools/generate-icons
+
+      - name: Generate and replace icons from provided image
+        env:
+          IMAGE_URL: ${{ github.event.inputs.image_url }}
+          IMAGE_BASE64: ${{ github.event.inputs.image_base64 }}
+          REPO_IMAGE_PATH: ${{ github.event.inputs.repo_image_path }}
+          COMMIT_CHANGES: ${{ github.event.inputs.commit_changes }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node tools/generate-icons/generate-icons.js
+
+      # 在这里添加你的打包步骤（示例：Android / Kotlin）
+      - name: Build Android release (example)
+        if: always()
+        working-directory: hesimusic-client
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleRelease
