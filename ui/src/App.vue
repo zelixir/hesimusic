@@ -14,7 +14,7 @@
     </div>
 
     <main class="p-4">
-      <component :is="currentView" @navigate="onNavigate" />
+      <component :is="currentView" @navigate="handleNavigate" />
     </main>
 
     <footer class="fixed bottom-0 left-0 right-0 bg-white p-3 border-t">
@@ -24,28 +24,17 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, computed } from 'vue'
+import { computed } from 'vue'
 import { useErrors } from './services/errorService'
-import SongLibrary from './components/SongLibrary.vue'
-import ScanPage from './components/ScanPage.vue'
+import { useNavigation } from './composables'
 import PlaybackStatusBar from './components/PlaybackStatusBar.vue'
 
-const view = ref<'library' | 'scan'>('library')
-
-const currentView = computed(() => (view.value === 'library' ? SongLibrary : ScanPage))
-
-function goScan() {
-  view.value = 'scan'
-}
+const { currentView, goToScan, handleNavigate } = useNavigation()
 
 const { errors } = useErrors()
 const latestError = computed(() => errors.value.length ? errors.value[0] : null)
 
 function dismissError() {
   try { errors.value.shift() } catch {}
-}
-
-function onNavigate(name: string) {
-  if (name === 'library') view.value = 'library'
 }
 </script>

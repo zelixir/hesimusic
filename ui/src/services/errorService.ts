@@ -1,6 +1,5 @@
 import { ref } from 'vue'
-
-type ErrorEntry = { id: string; message: string; time: number }
+import type { ErrorEntry } from '../types'
 
 const errors = ref<ErrorEntry[]>([])
 

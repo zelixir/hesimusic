@@ -1,7 +1,6 @@
 import MusicBridge from './musicBridge'
 import { reportError } from './errorService'
-
-export type Track = { id: string; title: string; artist: string }
+import type { Track } from '../types'
 
 const MusicApi = {
   async getAllTracks(): Promise<Track[]> {

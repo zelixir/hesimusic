@@ -1,5 +1,6 @@
 import MusicBridge from './musicBridge'
 import { reportError } from './errorService'
+import type { FolderSelection, ScanSettings } from '../types'
 
 export type FolderNode = {
   path: string
@@ -8,7 +9,6 @@ export type FolderNode = {
   children?: FolderNode[]
 }
 
-export type FolderSelection = { uri: string; displayName?: string };
 export type PickFolderResult = { path?: string; displayName?: string } | null;
 
 type ScanProgressCb = (p: { count?: number; current?: string; finished?: boolean }) => void
@@ -48,15 +48,6 @@ const ScanApi = {
 }
 
 export default ScanApi
-export type ScanSettings = {
-  folders?: FolderSelection[]
-  excludes?: FolderSelection[]
-  skipShort?: boolean
-  skipAmrMid?: boolean
-  skipHidden?: boolean
-  minDurationMs?: number
-  excluded?: string[]
-}
 
 function callNative(method: string, payload: any): Promise<any> {
   return new Promise((resolve) => {

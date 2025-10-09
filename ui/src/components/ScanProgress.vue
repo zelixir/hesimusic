@@ -31,12 +31,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, watch, computed } from 'vue'
-
-interface Progress { scannedCount: number; foundSongs: number; currentPath?: string | null }
+import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
+import type { ScanProgress } from '../types'
 
 const props = defineProps<{ scanId: string | null }>()
-const progress = ref<Progress | null>(null)
+const progress = ref<ScanProgress | null>(null)
 const logs = ref<string[]>([])
 const errors = ref<string[]>([])
 const showModal = ref(false)

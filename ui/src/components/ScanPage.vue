@@ -3,9 +3,9 @@
     <h2 class="text-lg font-semibold mb-4">扫描音乐</h2>
 
     <div class="mb-4 bg-white p-4 rounded shadow">
-      <label class="flex items-center space-x-2"><input type="checkbox" v-model="skipShort" @change="saveSettings" /> <span>不扫描60秒以下歌曲</span></label>
-      <label class="flex items-center space-x-2 mt-2"><input type="checkbox" v-model="skipAmrMid" @change="saveSettings" /> <span>不扫描 amr/mid</span></label>
-      <label class="flex items-center space-x-2 mt-2"><input type="checkbox" v-model="skipHidden" @change="saveSettings" /> <span>不扫描隐藏文件夹</span></label>
+      <label class="flex items-center space-x-2"><input type="checkbox" v-model="skipShort" @change="saveCurrentSettings" /> <span>不扫描60秒以下歌曲</span></label>
+      <label class="flex items-center space-x-2 mt-2"><input type="checkbox" v-model="skipAmrMid" @change="saveCurrentSettings" /> <span>不扫描 amr/mid</span></label>
+      <label class="flex items-center space-x-2 mt-2"><input type="checkbox" v-model="skipHidden" @change="saveCurrentSettings" /> <span>不扫描隐藏文件夹</span></label>
     </div>
 
     <div class="mb-4">
@@ -17,7 +17,7 @@
             <div class="text-xs text-gray-500 break-all">{{ formatUriToPath(f.uri) }}</div>
           </div>
           <div>
-            <button class="px-2 py-1 text-red-600" @click="removeFolder(idx)" aria-label="删除">
+            <button class="px-2 py-1 text-red-600" @click="removeFolderFromSettings(idx)" aria-label="删除">
               <lucide-trash-2 width="16" height="16"></lucide-trash-2>
             </button>
           </div>
@@ -48,7 +48,7 @@
               <div class="text-xs text-gray-500 break-all">{{ formatUriToPath(e.uri) }}</div>
             </div>
             <div>
-              <button class="px-2 py-1 text-red-600" @click="removeExclude(i)">
+              <button class="px-2 py-1 text-red-600" @click="removeExcludeFromSettings(i)">
                 <lucide-trash-2 width="16" height="16"></lucide-trash-2>
               </button>
             </div>
@@ -73,17 +73,25 @@
 
 <script lang="ts" setup>
 import { ref, onMounted } from 'vue'
-import ScanApi, { FolderSelection, saveSettings as saveScanSettings, loadSettings as loadScanSettings } from '../services/scanApi'
+import ScanApi from '../services/scanApi'
 import { reportError } from '../services/errorService'
 import { formatUriToPath, friendlyFromUri as utilFriendlyFromUri } from '../utils/uriUtils'
 import { LucideTrash2 } from 'lucide-vue-next'
-const skipShort = ref(true)
-const skipAmrMid = ref(true)
-const skipHidden = ref(true)
+import { useScanSettings } from '../composables'
 
-// folders holds objects returned from pickFolder: { uri, displayName }
-const folders = ref<FolderSelection[]>([])
-const excludes = ref<FolderSelection[]>([])
+const {
+  skipShort,
+  skipAmrMid,
+  skipHidden,
+  folders,
+  excludes,
+  loadSavedSettings,
+  saveCurrentSettings,
+  addFolder: addFolderToSettings,
+  removeFolder: removeFolderFromSettings,
+  addExclude: addExcludeToSettings,
+  removeExclude: removeExcludeFromSettings
+} = useScanSettings()
 
 const scanning = ref(false)
 const scannedCount = ref(0)
@@ -94,44 +102,9 @@ const error = ref<string | null>(null)
 const openExclude = ref(false)
 
 onMounted(async () => {
-  // Load saved settings
-  try {
-    const settings = await loadScanSettings()
-    if (settings) {
-      if (settings.folders) {
-        folders.value = settings.folders
-      }
-      if (settings.excludes) {
-        excludes.value = settings.excludes
-      }
-      if (settings.skipShort !== undefined) {
-        skipShort.value = settings.skipShort
-      }
-      if (settings.skipAmrMid !== undefined) {
-        skipAmrMid.value = settings.skipAmrMid
-      }
-      if (settings.skipHidden !== undefined) {
-        skipHidden.value = settings.skipHidden
-      }
-    }
-  } catch (e) {
-    console.error('Failed to load settings', e)
-  }
+  await loadSavedSettings()
 })
 
-async function saveSettings() {
-  try {
-    await saveScanSettings({
-      folders: folders.value,
-      excludes: excludes.value,
-      skipShort: skipShort.value,
-      skipAmrMid: skipAmrMid.value,
-      skipHidden: skipHidden.value
-    })
-  } catch (e) {
-    console.error('Failed to save settings', e)
-  }
-}
 
 async function addExclude() {
   error.value = null
@@ -148,11 +121,7 @@ async function addExclude() {
     if ((res as any).path) {
       const uri = (res as any).path
       const displayName = (res as any).displayName || utilFriendlyFromUri(uri)
-      const item = { uri, displayName }
-      if (!excludes.value.find(x => x.uri === uri)) {
-        excludes.value.push(item)
-        await saveSettings()
-      }
+      addExcludeToSettings({ uri, displayName })
     }
   } catch (e: any) {
     console.error('addExclude error', e)
@@ -161,11 +130,6 @@ async function addExclude() {
   } finally {
     adding.value = false
   }
-}
-
-function removeExclude(idx: number) {
-  excludes.value.splice(idx, 1)
-  saveSettings()
 }
 
 async function addFolder() {
@@ -183,11 +147,7 @@ async function addFolder() {
     if ((res as any).path) {
       const uri = (res as any).path
       const displayName = (res as any).displayName || utilFriendlyFromUri(uri)
-      const item = { uri, displayName }
-      if (!folders.value.find(x => x.uri === uri)) {
-        folders.value.push(item)
-        await saveSettings()
-      }
+      addFolderToSettings({ uri, displayName })
     }
   } catch (e: any) {
     console.error('addFolder error', e)
@@ -196,11 +156,6 @@ async function addFolder() {
   } finally {
     adding.value = false
   }
-}
-
-function removeFolder(idx: number) {
-  folders.value.splice(idx, 1)
-  saveSettings()
 }
 
 async function startScan() {

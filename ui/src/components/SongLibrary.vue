@@ -5,17 +5,25 @@
       <button class="ml-2 px-3 py-1 bg-blue-500 text-white rounded" @click="refresh">刷新</button>
     </div>
 
-    <track-list :tracks="tracks" @play="onPlay" />
+    <track-list :tracks="filteredTracks" @play="onPlay" />
   </div>
 </template>
 
 <script lang="ts" setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import TrackList from './TrackList.vue'
-import MusicApi, { Track } from '../services/musicApi'
+import MusicApi from '../services/musicApi'
+import type { Track } from '../types'
 
 const tracks = ref<Track[]>([])
 const query = ref('')
+
+const filteredTracks = computed(() => {
+  if (!query.value) return tracks.value
+  return tracks.value.filter(t => 
+    (t.title + ' ' + t.artist).toLowerCase().includes(query.value.toLowerCase())
+  )
+})
 
 onMounted(async () => {
   tracks.value = await MusicApi.getAllTracks()
