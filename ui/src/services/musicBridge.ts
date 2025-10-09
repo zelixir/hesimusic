@@ -7,7 +7,7 @@
 //   used by native code (e.g. __music_api_on_<name>__ and __music_api_emit__).
 // - Falls back to a local mock for web development when no native bridge is available.
 
-type Track = { id: string; title: string; artist: string }
+import type { Track } from '../types'
 
 declare global {
   interface Window {
