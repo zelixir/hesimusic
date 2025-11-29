@@ -25,7 +25,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 
 @Composable
 fun ScanScreen(
-    viewModel: ScanViewModel = viewModel()
+    viewModel: ScanViewModel = viewModel(),
+    onDebugClick: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
@@ -76,6 +77,15 @@ fun ScanScreen(
             enabled = !uiState.isScanning
         ) {
             Text(text = "Clear Database")
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Button(
+            onClick = onDebugClick,
+            enabled = !uiState.isScanning
+        ) {
+            Text(text = "Tag Debugger")
         }
     }
 }

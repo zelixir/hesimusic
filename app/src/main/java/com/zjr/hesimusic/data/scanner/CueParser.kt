@@ -21,7 +21,15 @@ class CueParser @Inject constructor() {
     fun parse(cueFile: File): List<CueTrack> {
         val encoding = detectEncoding(cueFile)
         val lines = try {
-            cueFile.readLines(Charset.forName(encoding))
+            val rawLines = cueFile.readLines(Charset.forName(encoding))
+            // Handle UTF-8 BOM
+            if (rawLines.isNotEmpty() && rawLines[0].startsWith("\uFEFF")) {
+                val mutableLines = rawLines.toMutableList()
+                mutableLines[0] = rawLines[0].substring(1)
+                mutableLines
+            } else {
+                rawLines
+            }
         } catch (e: Exception) {
             return emptyList()
         }

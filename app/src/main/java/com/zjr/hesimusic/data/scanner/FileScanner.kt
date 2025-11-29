@@ -79,15 +79,19 @@ class FileScanner @Inject constructor(
                     val tag = audioFile.tag
                     val header = audioFile.audioHeader
 
+                    val title = cleanTag(tag?.getFirst(FieldKey.TITLE))
+                    val artist = cleanTag(tag?.getFirst(FieldKey.ARTIST))
+                    val album = cleanTag(tag?.getFirst(FieldKey.ALBUM))
+
                     songs.add(Song(
-                        title = tag?.getFirst(FieldKey.TITLE) ?: file.nameWithoutExtension,
-                        artist = tag?.getFirst(FieldKey.ARTIST) ?: "Unknown Artist",
-                        album = tag?.getFirst(FieldKey.ALBUM) ?: "Unknown Album",
+                        title = title.ifEmpty { file.nameWithoutExtension },
+                        artist = artist.ifEmpty { "Unknown Artist" },
+                        album = album.ifEmpty { "Unknown Album" },
                         filePath = file.absolutePath,
                         duration = header.trackLength.toLong() * 1000,
                         trackNumber = tag?.getFirst(FieldKey.TRACK)?.toIntOrNull() ?: 0,
-                        year = tag?.getFirst(FieldKey.YEAR),
-                        genre = tag?.getFirst(FieldKey.GENRE),
+                        year = cleanTag(tag?.getFirst(FieldKey.YEAR)),
+                        genre = cleanTag(tag?.getFirst(FieldKey.GENRE)),
                         mimeType = "audio/${file.extension}",
                         size = file.length(),
                         dateAdded = file.lastModified()
@@ -128,5 +132,14 @@ class FileScanner @Inject constructor(
                 }
             }
         }
+    }
+
+    private fun cleanTag(value: String?): String {
+        if (value.isNullOrEmpty()) return ""
+        var res = value
+        if (res.startsWith("\uFEFF")) {
+            res = res.substring(1)
+        }
+        return res.trim()
     }
 }
