@@ -34,8 +34,6 @@ public interface Artwork
      */
     public boolean setImageFromData();
 
-    public Object getImage() throws IOException;
-
     public boolean isLinked();
 
     public void setLinked(boolean linked);

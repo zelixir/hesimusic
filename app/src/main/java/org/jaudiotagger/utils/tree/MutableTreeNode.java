@@ -13,7 +13,6 @@ package org.jaudiotagger.utils.tree;
  * of a user object stored in the node.
  *
  * @see DefaultMutableTreeNode
- * @see javax.swing.JTree
  *
  * @version 1.13 03/23/10
  * @author Rob Davis

@@ -4,10 +4,6 @@ import org.jaudiotagger.audio.flac.metadatablock.MetadataBlockDataPicture;
 import org.jaudiotagger.tag.id3.valuepair.ImageFormats;
 import org.jaudiotagger.tag.reference.PictureTypes;
 
-import javax.imageio.ImageIO;
-import javax.imageio.stream.ImageInputStream;
-import java.awt.image.BufferedImage;
-import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -77,24 +73,8 @@ public class StandardArtwork implements Artwork
      */
     public boolean setImageFromData()
     {
-        try
-        {
-            BufferedImage image = (BufferedImage)getImage();
-            setWidth(image.getWidth());
-            setHeight(image.getHeight());
-        }
-        catch(IOException ioe)
-        {
-            return false;
-        }
-        return true;
-    }
-
-    public Object getImage() throws IOException
-    {
-        ImageInputStream iis = ImageIO.createImageInputStream(new ByteArrayInputStream(getBinaryData()));
-        BufferedImage bi = ImageIO.read(iis);
-        return bi;
+        // Image processing not supported without java.awt
+        return false;
     }
 
     public boolean isLinked()

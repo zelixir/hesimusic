@@ -43,7 +43,7 @@ public class ExtractID3TagFromFile
         }
     }
 
-    final class MP3FileFilter extends javax.swing.filechooser.FileFilter implements java.io.FileFilter
+    final class MP3FileFilter implements java.io.FileFilter
     {
 
         /**
@@ -83,16 +83,6 @@ public class ExtractID3TagFromFile
         public final boolean accept(final File file)
         {
             return (((file.getName()).toLowerCase().endsWith(".mp3")) || (file.isDirectory() && (this.allowDirectories)));
-        }
-
-        /**
-         * Returns the Name of the Filter for use in the Chooser Dialog
-         *
-         * @return The Description of the Filter
-         */
-        public final String getDescription()
-        {
-            return ".mp3 Files";
         }
     }
 

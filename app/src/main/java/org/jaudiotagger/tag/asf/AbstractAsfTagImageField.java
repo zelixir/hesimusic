@@ -1,12 +1,6 @@
 package org.jaudiotagger.tag.asf;
 
 import org.jaudiotagger.audio.asf.data.MetadataDescriptor;
-import org.jaudiotagger.tag.TagField;
-
-import javax.imageio.ImageIO;
-import java.awt.image.BufferedImage;
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
 
 /**
  * An <code>AbstractAsfTagImageField</code> is an abstract class for representing tag
@@ -46,17 +40,6 @@ abstract class AbstractAsfTagImageField extends AsfTagField
      */
     public AbstractAsfTagImageField(final String fieldKey) {
         super(fieldKey);
-    }
-
-    /**
-     * This method returns an image instance from the
-     * {@linkplain #getRawImageData() image content}.
-     * 
-     * @return the image instance
-     * @throws IOException
-     */
-    public BufferedImage getImage() throws IOException {
-        return ImageIO.read(new ByteArrayInputStream(getRawImageData()));
     }
 
     /**

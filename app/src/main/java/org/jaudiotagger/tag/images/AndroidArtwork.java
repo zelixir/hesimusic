@@ -76,11 +76,6 @@ public class AndroidArtwork implements Artwork
         throw new UnsupportedOperationException();
     }
 
-    public Object getImage() throws IOException
-    {
-        throw new UnsupportedOperationException();
-    }
-
     public boolean isLinked()
     {
         return isLinked;
