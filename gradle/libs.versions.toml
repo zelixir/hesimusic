@@ -13,7 +13,6 @@ room = "2.6.1"
 media3 = "1.3.1"
 coil = "2.6.0"
 accompanist = "0.34.0"
-jaudiotagger = "3.0.1" # Using official library from Maven Central
 juniversalchardet = "2.4.0"
 ksp = "2.0.21-1.0.27"
 
@@ -55,7 +54,6 @@ coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coi
 accompanist-permissions = { group = "com.google.accompanist", name = "accompanist-permissions", version.ref = "accompanist" }
 
 # Audio & Encoding
-jaudiotagger = { group = "net.jthink", name = "jaudiotagger", version.ref = "jaudiotagger" }
 juniversalchardet = { group = "com.github.albfernandez", name = "juniversalchardet", version.ref = "juniversalchardet" }
 
 [plugins]

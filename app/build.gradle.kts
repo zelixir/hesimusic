@@ -81,6 +81,5 @@ dependencies {
     implementation(libs.accompanist.permissions)
 
     // Audio & Encoding
-    implementation(libs.jaudiotagger)
     implementation(libs.juniversalchardet)
 }
