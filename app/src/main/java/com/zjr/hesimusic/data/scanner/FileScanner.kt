@@ -12,7 +12,7 @@ class FileScanner @Inject constructor(
 ) {
     private val supportedExtensions = setOf("mp3", "flac", "wav", "m4a", "aac", "ogg")
 
-    fun scan(): List<Song> {
+    suspend fun scan(onProgress: suspend (String, Int) -> Unit): List<Song> {
         val root = Environment.getExternalStorageDirectory()
         val songs = mutableListOf<Song>()
         val cueReferencedFiles = mutableSetOf<String>() // Absolute paths
@@ -21,19 +21,11 @@ class FileScanner @Inject constructor(
         val cueFiles = mutableListOf<File>()
         val audioFiles = mutableListOf<File>()
 
-        root.walkTopDown().forEach { file ->
-            if (file.isFile) {
-                val ext = file.extension.lowercase()
-                if (ext == "cue") {
-                    cueFiles.add(file)
-                } else if (supportedExtensions.contains(ext)) {
-                    audioFiles.add(file)
-                }
-            }
-        }
+        scanDirectory(root, cueFiles, audioFiles, songs.size, onProgress)
 
         // 2. Process CUE files
         cueFiles.forEach { cueFile ->
+            onProgress(cueFile.parent ?: cueFile.absolutePath, songs.size)
             val tracks = cueParser.parse(cueFile)
             if (tracks.isNotEmpty()) {
                 // Group by file name to handle multiple files in one CUE
@@ -71,6 +63,7 @@ class FileScanner @Inject constructor(
                                 startPosition = track.startMs,
                                 endPosition = endMs
                             ))
+                            onProgress(cueFile.parent ?: cueFile.absolutePath, songs.size)
                         }
                     }
                 }
@@ -79,6 +72,7 @@ class FileScanner @Inject constructor(
 
         // 3. Process regular audio files
         audioFiles.forEach { file ->
+            onProgress(file.parent ?: file.absolutePath, songs.size)
             if (!cueReferencedFiles.contains(file.absolutePath)) {
                 try {
                     val audioFile = AudioFileIO.read(file)
@@ -98,6 +92,7 @@ class FileScanner @Inject constructor(
                         size = file.length(),
                         dateAdded = file.lastModified()
                     ))
+                    onProgress(file.parent ?: file.absolutePath, songs.size)
                 } catch (e: Exception) {
                     // Log error or skip
                     e.printStackTrace()
@@ -106,5 +101,32 @@ class FileScanner @Inject constructor(
         }
 
         return songs
+    }
+
+    private suspend fun scanDirectory(
+        dir: File,
+        cueFiles: MutableList<File>,
+        audioFiles: MutableList<File>,
+        currentSongCount: Int,
+        onProgress: suspend (String, Int) -> Unit
+    ) {
+        val files = dir.listFiles() ?: return
+
+        for (file in files) {
+            if (file.isDirectory) {
+                val shouldEnter = !file.path.contains("/Recordings/", ignoreCase = true) && !file.name.contains("录音")
+                if (shouldEnter) {
+                    onProgress(file.absolutePath, currentSongCount)
+                    scanDirectory(file, cueFiles, audioFiles, currentSongCount, onProgress)
+                }
+            } else {
+                val ext = file.extension.lowercase()
+                if (ext == "cue") {
+                    cueFiles.add(file)
+                } else if (supportedExtensions.contains(ext)) {
+                    audioFiles.add(file)
+                }
+            }
+        }
     }
 }

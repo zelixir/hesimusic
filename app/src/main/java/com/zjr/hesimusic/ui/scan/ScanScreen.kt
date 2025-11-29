@@ -27,7 +27,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 fun ScanScreen(
     viewModel: ScanViewModel = viewModel()
 ) {
-    val scanStatus by viewModel.scanStatus.collectAsState()
+    val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
 
     Column(
@@ -41,7 +41,15 @@ fun ScanScreen(
         
         Spacer(modifier = Modifier.height(32.dp))
         
-        Text(text = scanStatus)
+        Text(text = uiState.statusMessage)
+
+        if (uiState.isScanning || uiState.scannedCount > 0) {
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(text = "Scanned: ${uiState.scannedCount}")
+            Text(text = "Time: ${formatTime(uiState.elapsedTimeMs)}")
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(text = "Current: ${uiState.currentPath}", style = MaterialTheme.typography.bodySmall)
+        }
         
         Spacer(modifier = Modifier.height(32.dp))
 
@@ -57,8 +65,25 @@ fun ScanScreen(
             } else {
                 viewModel.startScan()
             }
-        }) {
-            Text(text = "Start Scan")
+        }, enabled = !uiState.isScanning) {
+            Text(text = if (uiState.isScanning) "Scanning..." else "Start Scan")
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Button(
+            onClick = { viewModel.clearDatabase() },
+            enabled = !uiState.isScanning
+        ) {
+            Text(text = "Clear Database")
         }
     }
+}
+
+fun formatTime(ms: Long): String {
+    val seconds = ms / 1000
+    val minutes = seconds / 60
+    val remainingSeconds = seconds % 60
+    val tenths = (ms % 1000) / 100
+    return String.format("%02d:%02d.%d", minutes, remainingSeconds, tenths)
 }
