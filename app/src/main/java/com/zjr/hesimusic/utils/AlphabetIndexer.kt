@@ -14,6 +14,8 @@ object AlphabetIndexer {
         toneType = HanyuPinyinToneType.WITHOUT_TONE
     }
 
+    private val cache = android.util.LruCache<Char, Char>(1000)
+
     private fun isChinese(c: Char): Boolean {
         return (c.code in 0x4E00..0x9FA5) || c.code == 0x3007
     }
@@ -32,6 +34,14 @@ object AlphabetIndexer {
     }
 
     fun getInitial(c: Char): Char {
+        cache.get(c)?.let { return it }
+
+        val initial = computeInitial(c)
+        cache.put(c, initial)
+        return initial
+    }
+
+    private fun computeInitial(c: Char): Char {
         // 1. English / Latin
         if (c in 'a'..'z') return c.uppercaseChar()
         if (c in 'A'..'Z') return c

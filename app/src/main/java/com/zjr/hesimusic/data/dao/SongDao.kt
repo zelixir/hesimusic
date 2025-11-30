@@ -34,4 +34,7 @@ interface SongDao {
 
     @Query("SELECT * FROM songs WHERE album = :album ORDER BY trackNumber ASC")
     fun getSongsByAlbum(album: String): Flow<List<Song>>
+
+    @Query("SELECT * FROM songs WHERE id IN (:ids)")
+    suspend fun getSongsByIds(ids: List<Long>): List<Song>
 }

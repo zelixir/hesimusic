@@ -28,6 +28,7 @@ fun MusicListItem(
     modifier: Modifier = Modifier,
     icon: ImageVector = Icons.Default.MusicNote,
     isCurrent: Boolean = false,
+    index: Int? = null,
     onClick: () -> Unit
 ) {
     val backgroundColor = if (isCurrent) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
@@ -46,6 +47,15 @@ fun MusicListItem(
                 .fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            if (index != null) {
+                Text(
+                    text = index.toString(),
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = subtitleColor,
+                    modifier = Modifier.width(40.dp)
+                )
+            }
+
             /* Icon removed as per request
             Surface(
                 shape = MaterialTheme.shapes.small,

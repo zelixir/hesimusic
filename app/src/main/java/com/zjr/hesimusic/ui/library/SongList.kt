@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -21,7 +22,10 @@ import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.ui.common.FastScrollbar
 import com.zjr.hesimusic.ui.common.MusicListItem
 import com.zjr.hesimusic.utils.AlphabetIndexer
+import androidx.compose.runtime.produceState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -34,13 +38,26 @@ fun SongList(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
-    val grouped = remember(songs) {
-        songs.groupBy { AlphabetIndexer.getInitial(it.title) }
-            .toSortedMap()
-    }
+    val grouped = produceState<Map<Char, List<Song>>>(initialValue = emptyMap(), key1 = songs) {
+        value = withContext(Dispatchers.Default) {
+            songs.groupBy { AlphabetIndexer.getInitial(it.title) }
+                .toSortedMap()
+        }
+    }.value
     
     val flattenedSongs = remember(grouped) {
         grouped.values.flatten()
+    }
+
+    // Calculate the starting index for each group for display
+    val groupStartingIndices = remember(grouped) {
+        val indices = mutableMapOf<Char, Int>()
+        var currentCount = 0
+        grouped.forEach { (key, list) ->
+            indices[key] = currentCount
+            currentCount += list.size
+        }
+        indices
     }
 
     // Calculate the scroll position for each section
@@ -75,11 +92,17 @@ fun SongList(
                     }
                 }
                 
-                items(songsInGroup, key = { it.id }) { song ->
+                itemsIndexed(
+                    items = songsInGroup,
+                    key = { _, item -> item.id },
+                    contentType = { _, _ -> "song" }
+                ) { index, song ->
+                    val globalIndex = (groupStartingIndices[initial] ?: 0) + index + 1
                     MusicListItem(
                         title = song.title,
                         subtitle = "${song.artist} - ${song.album}",
                         isCurrent = song.id.toString() == currentPlayingSongId,
+                        index = globalIndex,
                         onClick = { 
                             val index = flattenedSongs.indexOf(song)
                             if (index != -1) {

@@ -16,7 +16,11 @@ fun ArtistList(
     modifier: Modifier = Modifier
 ) {
     LazyColumn(modifier = modifier) {
-        items(artists, key = { it.name }) { artist ->
+        items(
+            items = artists,
+            key = { it.name },
+            contentType = { "artist" }
+        ) { artist ->
             MusicListItem(
                 title = artist.name,
                 subtitle = "${artist.songCount} songs",

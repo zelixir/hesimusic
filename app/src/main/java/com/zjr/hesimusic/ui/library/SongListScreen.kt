@@ -14,6 +14,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.zjr.hesimusic.data.model.Song
@@ -43,6 +44,10 @@ fun SongListScreen(
     
     val songs by songsFlow.collectAsState(initial = emptyList())
     val musicUiState by musicViewModel.uiState.collectAsState()
+
+    val handleSongClick = remember(musicViewModel) {
+        { list: List<Song>, index: Int -> musicViewModel.playList(list, index) }
+    }
 
     Scaffold(
         topBar = {
@@ -83,7 +88,7 @@ fun SongListScreen(
             SongList(
                 songs = songs,
                 currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
-                onSongClick = { list, index -> musicViewModel.playList(list, index) }
+                onSongClick = handleSongClick
             )
         }
     }

@@ -55,7 +55,21 @@ fun FolderList(
              }
         }
 
-        items(items) { item ->
+        items(
+            items = items,
+            key = { item ->
+                when (item) {
+                    is FileSystemItem.Folder -> item.path
+                    is FileSystemItem.MusicFile -> item.song.id
+                }
+            },
+            contentType = { item ->
+                when (item) {
+                    is FileSystemItem.Folder -> "folder"
+                    is FileSystemItem.MusicFile -> "file"
+                }
+            }
+        ) { item ->
             when (item) {
                 is FileSystemItem.Folder -> {
                     MusicListItem(
