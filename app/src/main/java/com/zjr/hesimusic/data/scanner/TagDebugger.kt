@@ -1,14 +1,14 @@
 package com.zjr.hesimusic.data.scanner
 
 import android.util.Log
-import org.jaudiotagger.audio.AudioFileIO
-import org.jaudiotagger.tag.FieldKey
 import org.mozilla.universalchardet.UniversalDetector
 import java.io.File
 import java.nio.charset.Charset
 import javax.inject.Inject
 
-class TagDebugger @Inject constructor() {
+class TagDebugger @Inject constructor(
+    private val tagLibHelper: TagLibHelper
+) {
 
     data class DebugResult(
         val filePath: String,
@@ -32,18 +32,17 @@ class TagDebugger @Inject constructor() {
         }
 
         try {
-            val audioFile = AudioFileIO.read(file)
-            val tag = audioFile.tag
+            val metadata = tagLibHelper.extractMetadata(filePath)
             
-            if (tag == null) {
-                return DebugResult(filePath, emptyList(), "No tag found")
+            if (metadata == null) {
+                return DebugResult(filePath, emptyList(), "No tag found or file unreadable")
             }
 
-            val fieldsToCheck = listOf(FieldKey.TITLE, FieldKey.ARTIST, FieldKey.ALBUM)
+            val fieldsToCheck = listOf("TITLE", "ARTIST", "ALBUM")
             val debugInfos = fieldsToCheck.mapNotNull { key ->
-                val value = tag.getFirst(key)
+                val value = metadata[key]
                 if (value.isNullOrEmpty()) null
-                else analyzeField(key.name, value)
+                else analyzeField(key, value)
             }
 
             // Log results
