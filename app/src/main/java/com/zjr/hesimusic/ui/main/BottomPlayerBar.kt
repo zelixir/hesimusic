@@ -46,6 +46,10 @@ fun BottomPlayerBar(
     onNextClick: () -> Unit,
     onClick: () -> Unit,
     onScanClick: () -> Unit,
+    onSettingsClick: () -> Unit,
+    onEqualizerClick: () -> Unit,
+    onAboutClick: () -> Unit,
+    onSleepTimerClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     if (currentMediaItem == null) return
@@ -131,19 +135,31 @@ fun BottomPlayerBar(
                     ) {
                         DropdownMenuItem(
                             text = { Text("Settings") },
-                            onClick = { showMenu = false /* TODO */ }
+                            onClick = { 
+                                showMenu = false
+                                onSettingsClick()
+                            }
                         )
                         DropdownMenuItem(
                             text = { Text("Equalizer") },
-                            onClick = { showMenu = false /* TODO */ }
+                            onClick = { 
+                                showMenu = false
+                                onEqualizerClick()
+                            }
                         )
                         DropdownMenuItem(
                             text = { Text("About") },
-                            onClick = { showMenu = false /* TODO */ }
+                            onClick = { 
+                                showMenu = false
+                                onAboutClick()
+                            }
                         )
                         DropdownMenuItem(
                             text = { Text("Sleep Timer") },
-                            onClick = { showMenu = false /* TODO */ }
+                            onClick = { 
+                                showMenu = false
+                                onSleepTimerClick()
+                            }
                         )
                         DropdownMenuItem(
                             text = { Text("Scan") },

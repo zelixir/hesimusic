@@ -12,11 +12,15 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.zjr.hesimusic.ui.about.AboutScreen
 import com.zjr.hesimusic.ui.debug.TagDebugScreen
+import com.zjr.hesimusic.ui.equalizer.EqualizerScreen
 import com.zjr.hesimusic.ui.library.SongListScreen
 import com.zjr.hesimusic.ui.main.MainScreen
 import com.zjr.hesimusic.ui.player.PlayerScreen
 import com.zjr.hesimusic.ui.scan.ScanScreen
+import com.zjr.hesimusic.ui.settings.SettingsScreen
+import com.zjr.hesimusic.ui.sleeptimer.SleepTimerScreen
 import com.zjr.hesimusic.ui.test.PlayerTestScreen
 import com.zjr.hesimusic.ui.theme.HesimusicTheme
 import dagger.hilt.android.AndroidEntryPoint
@@ -62,14 +66,32 @@ class MainActivity : ComponentActivity() {
                                 onPlayerClick = {
                                     navController.navigate("player")
                                 },
-                                onScanClick = {
-                                    navController.navigate("scan")
-                                }
+                                onScanClick = { navController.navigate("scan") },
+                                onSettingsClick = { navController.navigate("settings") },
+                                onEqualizerClick = { navController.navigate("equalizer") },
+                                onAboutClick = { navController.navigate("about") },
+                                onSleepTimerClick = { navController.navigate("sleep_timer") }
                             )
                         }
 
                         composable("player") {
                             PlayerScreen(onBackClick = { navController.popBackStack() })
+                        }
+
+                        composable("settings") {
+                            SettingsScreen(onBackClick = { navController.popBackStack() })
+                        }
+
+                        composable("equalizer") {
+                            EqualizerScreen(onBackClick = { navController.popBackStack() })
+                        }
+
+                        composable("about") {
+                            AboutScreen(onBackClick = { navController.popBackStack() })
+                        }
+
+                        composable("sleep_timer") {
+                            SleepTimerScreen(onBackClick = { navController.popBackStack() })
                         }
 
                         composable("debug") {
@@ -94,7 +116,11 @@ class MainActivity : ComponentActivity() {
                                 value = value,
                                 onBack = { navController.popBackStack() },
                                 onSongClick = { /* TODO: Play */ },
-                                onScanClick = { navController.navigate("scan") }
+                                onScanClick = { navController.navigate("scan") },
+                                onSettingsClick = { navController.navigate("settings") },
+                                onEqualizerClick = { navController.navigate("equalizer") },
+                                onAboutClick = { navController.navigate("about") },
+                                onSleepTimerClick = { navController.navigate("sleep_timer") }
                             )
                         }
                     }

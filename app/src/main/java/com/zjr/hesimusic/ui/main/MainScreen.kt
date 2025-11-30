@@ -36,7 +36,11 @@ fun MainScreen(
     onArtistClick: (Artist) -> Unit,
     onAlbumClick: (Album) -> Unit,
     onPlayerClick: () -> Unit,
-    onScanClick: () -> Unit
+    onScanClick: () -> Unit,
+    onSettingsClick: () -> Unit,
+    onEqualizerClick: () -> Unit,
+    onAboutClick: () -> Unit,
+    onSleepTimerClick: () -> Unit
 ) {
     val pagerState = rememberPagerState(pageCount = { 4 })
     val scope = rememberCoroutineScope()
@@ -60,7 +64,11 @@ fun MainScreen(
                 onPreviousClick = { musicViewModel.skipToPrevious() },
                 onNextClick = { musicViewModel.skipToNext() },
                 onClick = onPlayerClick,
-                onScanClick = onScanClick
+                onScanClick = onScanClick,
+                onSettingsClick = onSettingsClick,
+                onEqualizerClick = onEqualizerClick,
+                onAboutClick = onAboutClick,
+                onSleepTimerClick = onSleepTimerClick
             )
         }
     ) { innerPadding ->
