@@ -2,13 +2,12 @@ package com.zjr.hesimusic.data.scanner
 
 import android.os.Environment
 import com.zjr.hesimusic.data.model.Song
-import org.jaudiotagger.audio.AudioFileIO
-import org.jaudiotagger.tag.FieldKey
 import java.io.File
 import javax.inject.Inject
 
 class FileScanner @Inject constructor(
-    private val cueParser: CueParser
+    private val cueParser: CueParser,
+    private val tagLibHelper: TagLibHelper
 ) {
     private val supportedExtensions = setOf("mp3", "flac", "wav", "m4a", "aac", "ogg")
 
@@ -37,11 +36,9 @@ class FileScanner @Inject constructor(
                         cueReferencedFiles.add(audioFile.absolutePath)
                         
                         // Get audio file metadata for duration etc.
-                        val audioHeader = try {
-                            AudioFileIO.read(audioFile).audioHeader
-                        } catch (e: Exception) { null }
+                        val metadata = tagLibHelper.extractMetadata(audioFile.absolutePath)
                         
-                        val totalDuration = audioHeader?.trackLength?.toLong()?.times(1000) ?: 0L
+                        val totalDuration = metadata?.get("DURATION")?.toLongOrNull() ?: 0L
                         val mimeType = "audio/${audioFile.extension}"
 
                         fileTracks.forEachIndexed { index, track ->
@@ -75,27 +72,40 @@ class FileScanner @Inject constructor(
             onProgress(file.parent ?: file.absolutePath, songs.size)
             if (!cueReferencedFiles.contains(file.absolutePath)) {
                 try {
-                    val audioFile = AudioFileIO.read(file)
-                    val tag = audioFile.tag
-                    val header = audioFile.audioHeader
+                    val metadata = tagLibHelper.extractMetadata(file.absolutePath)
 
-                    val title = cleanTag(tag?.getFirst(FieldKey.TITLE))
-                    val artist = cleanTag(tag?.getFirst(FieldKey.ARTIST))
-                    val album = cleanTag(tag?.getFirst(FieldKey.ALBUM))
+                    if (metadata != null) {
+                        val title = cleanTag(metadata["TITLE"])
+                        val artist = cleanTag(metadata["ARTIST"])
+                        val album = cleanTag(metadata["ALBUM"])
+                        val duration = metadata["DURATION"]?.toDoubleOrNull()?.toLong() ?: 0L // TagLib returns ms as string from double? No, I cast to long in C++ but let's be safe. C++ code: std::to_string(properties->length() * 1000) which is int/long.
 
-                    songs.add(Song(
-                        title = title.ifEmpty { file.nameWithoutExtension },
-                        artist = artist.ifEmpty { "Unknown Artist" },
-                        album = album.ifEmpty { "Unknown Album" },
-                        filePath = file.absolutePath,
-                        duration = header.trackLength.toLong() * 1000,
-                        trackNumber = tag?.getFirst(FieldKey.TRACK)?.toIntOrNull() ?: 0,
-                        year = cleanTag(tag?.getFirst(FieldKey.YEAR)),
-                        genre = cleanTag(tag?.getFirst(FieldKey.GENRE)),
-                        mimeType = "audio/${file.extension}",
-                        size = file.length(),
-                        dateAdded = file.lastModified()
-                    ))
+                        songs.add(Song(
+                            title = title.ifEmpty { file.nameWithoutExtension },
+                            artist = artist.ifEmpty { "Unknown Artist" },
+                            album = album.ifEmpty { "Unknown Album" },
+                            filePath = file.absolutePath,
+                            duration = duration,
+                            trackNumber = metadata["TRACK"]?.toIntOrNull() ?: 0,
+                            year = cleanTag(metadata["YEAR"]),
+                            genre = cleanTag(metadata["GENRE"]),
+                            mimeType = "audio/${file.extension}",
+                            size = file.length(),
+                            dateAdded = file.lastModified()
+                        ))
+                    } else {
+                         songs.add(Song(
+                            title = file.nameWithoutExtension,
+                            artist = "Unknown Artist",
+                            album = "Unknown Album",
+                            filePath = file.absolutePath,
+                            duration = 0,
+                            trackNumber = 0,
+                            mimeType = "audio/${file.extension}",
+                            size = file.length(),
+                            dateAdded = file.lastModified()
+                        ))
+                    }
                     onProgress(file.parent ?: file.absolutePath, songs.size)
                 } catch (e: Exception) {
                     // Log error or skip
