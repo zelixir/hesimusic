@@ -14,7 +14,7 @@ import com.zjr.hesimusic.data.scanner.TagDebugger
 fun TagDebugScreen(
     viewModel: TagDebugViewModel = hiltViewModel()
 ) {
-    var filePath by remember { mutableStateOf("/storage/emulated/0/Music/02. destiny.mp3") }
+    var filePath by remember { mutableStateOf("/storage/emulated/0/Music/01.君がいる限り.mp3") }
     val uiState by viewModel.uiState.collectAsState()
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {

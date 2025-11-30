@@ -4,9 +4,9 @@
 #include <map>
 
 // TagLib headers
-#include "taglib/fileref.h"
-#include "taglib/tag.h"
-#include "taglib/tpropertymap.h"
+#include "fileref.h"
+#include "tag.h"
+#include "tpropertymap.h"
 
 #define LOG_TAG "TagLibJNI"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -74,8 +74,8 @@ Java_com_zjr_hesimusic_data_scanner_TagLibHelper_extractMetadata(
 
     if (properties) {
         jstring jKey = env->NewStringUTF("DURATION");
-        // Duration in seconds * 1000 = ms
-        jstring jValue = env->NewStringUTF(std::to_string(properties->length() * 1000).c_str());
+        // Duration in milliseconds
+        jstring jValue = env->NewStringUTF(std::to_string(properties->lengthInMilliseconds()).c_str());
         env->CallObjectMethod(hashMap, put, jKey, jValue);
         env->DeleteLocalRef(jKey);
         env->DeleteLocalRef(jValue);
