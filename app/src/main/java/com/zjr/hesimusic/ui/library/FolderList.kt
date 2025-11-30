@@ -23,7 +23,7 @@ fun FolderList(
     viewModel: LibraryViewModel,
     modifier: Modifier = Modifier,
     initialPath: String = "/storage/emulated/0",
-    onSongClick: (Song) -> Unit
+    onSongClick: (List<Song>, Int) -> Unit
 ) {
     var currentPath by remember { mutableStateOf(initialPath) }
     val items by viewModel.getFolderContents(currentPath).collectAsState(initial = emptyList())
@@ -69,7 +69,13 @@ fun FolderList(
                         title = item.song.title,
                         subtitle = "${item.song.artist} - ${item.song.album}",
                         icon = Icons.Default.MusicNote,
-                        onClick = { onSongClick(item.song) }
+                        onClick = { 
+                            val songsInFolder = items.filterIsInstance<FileSystemItem.MusicFile>().map { it.song }
+                            val index = songsInFolder.indexOf(item.song)
+                            if (index != -1) {
+                                onSongClick(songsInFolder, index)
+                            }
+                        }
                     )
                 }
             }

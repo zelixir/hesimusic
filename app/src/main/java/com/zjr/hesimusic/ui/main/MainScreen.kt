@@ -33,7 +33,8 @@ fun MainScreen(
     viewModel: LibraryViewModel = hiltViewModel(),
     musicViewModel: MusicViewModel = hiltViewModel(),
     onArtistClick: (Artist) -> Unit,
-    onAlbumClick: (Album) -> Unit
+    onAlbumClick: (Album) -> Unit,
+    onPlayerClick: () -> Unit
 ) {
     val pagerState = rememberPagerState(pageCount = { 4 })
     val scope = rememberCoroutineScope()
@@ -51,7 +52,8 @@ fun MainScreen(
                     } else {
                         musicViewModel.resume()
                     }
-                }
+                },
+                onClick = onPlayerClick
             )
         }
     ) { innerPadding ->
@@ -77,7 +79,7 @@ fun MainScreen(
                 when (page) {
                     0 -> {
                         val songs by viewModel.songs.collectAsState()
-                        SongList(songs = songs, onSongClick = { song -> musicViewModel.play(song) })
+                        SongList(songs = songs, onSongClick = { list, index -> musicViewModel.playList(list, index) })
                     }
                     1 -> {
                         val artists by viewModel.artists.collectAsState()
@@ -88,7 +90,7 @@ fun MainScreen(
                         AlbumList(albums = albums, onAlbumClick = onAlbumClick)
                     }
                     3 -> {
-                        FolderList(viewModel = viewModel, onSongClick = { song -> musicViewModel.play(song) })
+                        FolderList(viewModel = viewModel, onSongClick = { list, index -> musicViewModel.playList(list, index) })
                     }
                 }
             }

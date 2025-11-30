@@ -15,6 +15,7 @@ import androidx.navigation.navArgument
 import com.zjr.hesimusic.ui.debug.TagDebugScreen
 import com.zjr.hesimusic.ui.library.SongListScreen
 import com.zjr.hesimusic.ui.main.MainScreen
+import com.zjr.hesimusic.ui.player.PlayerScreen
 import com.zjr.hesimusic.ui.scan.ScanScreen
 import com.zjr.hesimusic.ui.test.PlayerTestScreen
 import com.zjr.hesimusic.ui.theme.HesimusicTheme
@@ -57,8 +58,15 @@ class MainActivity : ComponentActivity() {
                                 onAlbumClick = { album ->
                                     val encodedName = URLEncoder.encode(album.name, StandardCharsets.UTF_8.toString()).replace("+", "%20")
                                     navController.navigate("details/album/$encodedName")
+                                },
+                                onPlayerClick = {
+                                    navController.navigate("player")
                                 }
                             )
+                        }
+
+                        composable("player") {
+                            PlayerScreen(onBackClick = { navController.popBackStack() })
                         }
 
                         composable("debug") {

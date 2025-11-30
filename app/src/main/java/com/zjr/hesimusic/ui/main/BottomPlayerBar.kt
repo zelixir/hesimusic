@@ -29,6 +29,7 @@ fun BottomPlayerBar(
     currentMediaItem: MediaItem?,
     isPlaying: Boolean,
     onPlayPauseClick: () -> Unit,
+    onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     if (currentMediaItem == null) return
@@ -37,7 +38,7 @@ fun BottomPlayerBar(
         modifier = modifier
             .fillMaxWidth()
             .height(64.dp)
-            .clickable { /* TODO: Open Player Screen */ },
+            .clickable { onClick() },
         color = MaterialTheme.colorScheme.surfaceVariant, // Using surfaceVariant for contrast
         tonalElevation = 8.dp
     ) {

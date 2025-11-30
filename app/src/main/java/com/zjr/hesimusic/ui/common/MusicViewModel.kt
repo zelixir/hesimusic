@@ -2,6 +2,7 @@ package com.zjr.hesimusic.ui.common
 
 import android.content.ComponentName
 import android.content.Context
+import android.os.CountDownTimer
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
@@ -15,10 +16,13 @@ import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.service.MusicService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 @HiltViewModel
@@ -31,6 +35,11 @@ class MusicViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(MusicUiState())
     val uiState: StateFlow<MusicUiState> = _uiState.asStateFlow()
+
+    private val _sleepTimerState = MutableStateFlow<Long?>(null)
+    val sleepTimerState: StateFlow<Long?> = _sleepTimerState.asStateFlow()
+
+    private var sleepTimer: CountDownTimer? = null
 
     init {
         val sessionToken = SessionToken(context, ComponentName(context, MusicService::class.java))
@@ -57,20 +66,43 @@ class MusicViewModel @Inject constructor(
                 override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
                     updateState()
                 }
+                
+                override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+                    updateState()
+                }
             })
             updateState()
+            startProgressUpdateLoop()
         }, MoreExecutors.directExecutor())
+    }
+
+    private fun startProgressUpdateLoop() {
+        viewModelScope.launch {
+            while (isActive) {
+                if (mediaController?.isPlaying == true) {
+                    updateState()
+                }
+                delay(1000) // Update every second
+            }
+        }
     }
 
     private fun updateState() {
         mediaController?.let { controller ->
+            val playlist = List(controller.mediaItemCount) { i -> controller.getMediaItemAt(i) }
+            val audioSessionId = controller.sessionExtras.getInt("AUDIO_SESSION_ID", 0)
             _uiState.update {
                 it.copy(
                     isPlaying = controller.isPlaying,
                     currentMediaItem = controller.currentMediaItem,
                     playbackState = controller.playbackState,
                     repeatMode = controller.repeatMode,
-                    shuffleModeEnabled = controller.shuffleModeEnabled
+                    shuffleModeEnabled = controller.shuffleModeEnabled,
+                    currentPosition = controller.currentPosition,
+                    duration = controller.duration,
+                    bufferedPosition = controller.bufferedPosition,
+                    playlist = playlist,
+                    audioSessionId = audioSessionId
                 )
             }
         }
@@ -103,11 +135,25 @@ class MusicViewModel @Inject constructor(
     }
     
     fun skipToNext() {
-        mediaController?.seekToNext()
+        mediaController?.let { controller ->
+            if (controller.hasNextMediaItem()) {
+                controller.seekToNext()
+            } else {
+                if (controller.mediaItemCount > 0) {
+                    controller.seekToDefaultPosition(0)
+                    controller.play()
+                }
+            }
+        }
     }
     
     fun skipToPrevious() {
         mediaController?.seekToPrevious()
+    }
+
+    fun seekTo(position: Long) {
+        mediaController?.seekTo(position)
+        updateState() // Immediate update for UI responsiveness
     }
 
     fun setRepeatMode(repeatMode: Int) {
@@ -118,11 +164,42 @@ class MusicViewModel @Inject constructor(
         mediaController?.shuffleModeEnabled = shuffleModeEnabled
     }
 
+    fun removeMediaItem(index: Int) {
+        mediaController?.removeMediaItem(index)
+    }
+
+    fun moveMediaItem(currentIndex: Int, newIndex: Int) {
+        mediaController?.moveMediaItem(currentIndex, newIndex)
+    }
+    
+    fun clearPlaylist() {
+        mediaController?.clearMediaItems()
+    }
+
+    fun startSleepTimer(minutes: Int) {
+        sleepTimer?.cancel()
+        sleepTimer = object : CountDownTimer(minutes * 60 * 1000L, 1000) {
+            override fun onTick(millisUntilFinished: Long) {
+                _sleepTimerState.value = millisUntilFinished
+            }
+            override fun onFinish() {
+                pause()
+                _sleepTimerState.value = null
+            }
+        }.start()
+    }
+
+    fun cancelSleepTimer() {
+        sleepTimer?.cancel()
+        _sleepTimerState.value = null
+    }
+
     override fun onCleared() {
         super.onCleared()
         mediaControllerFuture?.let {
             MediaController.releaseFuture(it)
         }
+        sleepTimer?.cancel()
     }
 }
 
@@ -131,5 +208,10 @@ data class MusicUiState(
     val currentMediaItem: MediaItem? = null,
     val playbackState: Int = Player.STATE_IDLE,
     val repeatMode: Int = Player.REPEAT_MODE_OFF,
-    val shuffleModeEnabled: Boolean = false
+    val shuffleModeEnabled: Boolean = false,
+    val currentPosition: Long = 0L,
+    val duration: Long = 0L,
+    val bufferedPosition: Long = 0L,
+    val playlist: List<MediaItem> = emptyList(),
+    val audioSessionId: Int = 0
 )

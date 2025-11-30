@@ -52,7 +52,7 @@ fun SongListScreen(
         Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
             SongList(
                 songs = songs,
-                onSongClick = { song -> musicViewModel.play(song) }
+                onSongClick = { list, index -> musicViewModel.playList(list, index) }
             )
         }
     }

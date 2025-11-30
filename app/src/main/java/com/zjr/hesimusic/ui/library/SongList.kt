@@ -19,12 +19,16 @@ import com.zjr.hesimusic.ui.common.MusicListItem
 @Composable
 fun SongList(
     songs: List<Song>,
-    onSongClick: (Song) -> Unit,
+    onSongClick: (List<Song>, Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val grouped = remember(songs) {
         songs.groupBy { it.title.firstOrNull()?.uppercaseChar() ?: '#' }
             .toSortedMap()
+    }
+    
+    val flattenedSongs = remember(grouped) {
+        grouped.values.flatten()
     }
 
     LazyColumn(modifier = modifier) {
@@ -46,7 +50,12 @@ fun SongList(
                 MusicListItem(
                     title = song.title,
                     subtitle = "${song.artist} - ${song.album}",
-                    onClick = { onSongClick(song) }
+                    onClick = { 
+                        val index = flattenedSongs.indexOf(song)
+                        if (index != -1) {
+                            onSongClick(flattenedSongs, index)
+                        }
+                    }
                 )
             }
         }
