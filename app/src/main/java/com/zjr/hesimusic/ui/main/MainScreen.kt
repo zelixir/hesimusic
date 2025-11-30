@@ -18,6 +18,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.media3.common.Player
 import com.zjr.hesimusic.data.model.Album
 import com.zjr.hesimusic.data.model.Artist
 import com.zjr.hesimusic.ui.common.MusicViewModel
@@ -54,6 +55,8 @@ fun MainScreen(
                 isPlaying = musicUiState.isPlaying,
                 currentPosition = musicUiState.currentPosition,
                 duration = musicUiState.duration,
+                repeatMode = musicUiState.repeatMode,
+                shuffleModeEnabled = musicUiState.shuffleModeEnabled,
                 onPlayPauseClick = {
                     if (musicUiState.isPlaying) {
                         musicViewModel.pause()
@@ -63,6 +66,15 @@ fun MainScreen(
                 },
                 onPreviousClick = { musicViewModel.skipToPrevious() },
                 onNextClick = { musicViewModel.skipToNext() },
+                onPlayModeClick = {
+                    val (newShuffle, newRepeat) = when {
+                        musicUiState.shuffleModeEnabled -> false to Player.REPEAT_MODE_ONE // Random -> Single Loop
+                        musicUiState.repeatMode == Player.REPEAT_MODE_ONE -> false to Player.REPEAT_MODE_ALL // Single Loop -> Sequential
+                        else -> true to Player.REPEAT_MODE_ALL // Sequential -> Random
+                    }
+                    musicViewModel.setShuffleModeEnabled(newShuffle)
+                    musicViewModel.setRepeatMode(newRepeat)
+                },
                 onClick = onPlayerClick,
                 onScanClick = onScanClick,
                 onSettingsClick = onSettingsClick,

@@ -34,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 
 @Composable
 fun BottomPlayerBar(
@@ -41,9 +42,12 @@ fun BottomPlayerBar(
     isPlaying: Boolean,
     currentPosition: Long,
     duration: Long,
+    repeatMode: Int,
+    shuffleModeEnabled: Boolean,
     onPlayPauseClick: () -> Unit,
     onPreviousClick: () -> Unit,
     onNextClick: () -> Unit,
+    onPlayModeClick: () -> Unit,
     onClick: () -> Unit,
     onScanClick: () -> Unit,
     onSettingsClick: () -> Unit,
@@ -132,6 +136,22 @@ fun BottomPlayerBar(
                         expanded = showMenu,
                         onDismissRequest = { showMenu = false }
                     ) {
+                        DropdownMenuItem(
+                            text = {
+                                val modeText = if (shuffleModeEnabled) {
+                                    "随机播放"
+                                } else {
+                                    when (repeatMode) {
+                                        Player.REPEAT_MODE_ONE -> "单曲循环"
+                                        else -> "顺序播放"
+                                    }
+                                }
+                                Text("播放模式: $modeText")
+                            },
+                            onClick = {
+                                onPlayModeClick()
+                            }
+                        )
                         DropdownMenuItem(
                             text = { Text("设置") },
                             onClick = { 
