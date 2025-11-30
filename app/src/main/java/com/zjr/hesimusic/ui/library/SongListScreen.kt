@@ -18,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.ui.common.MusicViewModel
+import com.zjr.hesimusic.ui.main.BottomPlayerBar
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -36,6 +37,7 @@ fun SongListScreen(
     }
     
     val songs by songsFlow.collectAsState(initial = emptyList())
+    val musicUiState by musicViewModel.uiState.collectAsState()
 
     Scaffold(
         topBar = {
@@ -47,11 +49,30 @@ fun SongListScreen(
                     }
                 }
             )
+        },
+        bottomBar = {
+            BottomPlayerBar(
+                currentMediaItem = musicUiState.currentMediaItem,
+                isPlaying = musicUiState.isPlaying,
+                currentPosition = musicUiState.currentPosition,
+                duration = musicUiState.duration,
+                onPlayPauseClick = {
+                    if (musicUiState.isPlaying) {
+                        musicViewModel.pause()
+                    } else {
+                        musicViewModel.resume()
+                    }
+                },
+                onPreviousClick = { musicViewModel.skipToPrevious() },
+                onNextClick = { musicViewModel.skipToNext() },
+                onClick = { /* TODO: Navigate to player if needed, or just expand */ }
+            )
         }
     ) { innerPadding ->
         Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
             SongList(
                 songs = songs,
+                currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
                 onSongClick = { list, index -> musicViewModel.playList(list, index) }
             )
         }

@@ -19,6 +19,7 @@ import com.zjr.hesimusic.ui.common.MusicListItem
 @Composable
 fun SongList(
     songs: List<Song>,
+    currentPlayingSongId: String? = null,
     onSongClick: (List<Song>, Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -50,6 +51,7 @@ fun SongList(
                 MusicListItem(
                     title = song.title,
                     subtitle = "${song.artist} - ${song.album}",
+                    isCurrent = song.id.toString() == currentPlayingSongId,
                     onClick = { 
                         val index = flattenedSongs.indexOf(song)
                         if (index != -1) {

@@ -46,6 +46,8 @@ fun MainScreen(
             BottomPlayerBar(
                 currentMediaItem = musicUiState.currentMediaItem,
                 isPlaying = musicUiState.isPlaying,
+                currentPosition = musicUiState.currentPosition,
+                duration = musicUiState.duration,
                 onPlayPauseClick = {
                     if (musicUiState.isPlaying) {
                         musicViewModel.pause()
@@ -53,6 +55,8 @@ fun MainScreen(
                         musicViewModel.resume()
                     }
                 },
+                onPreviousClick = { musicViewModel.skipToPrevious() },
+                onNextClick = { musicViewModel.skipToNext() },
                 onClick = onPlayerClick
             )
         }
@@ -79,7 +83,11 @@ fun MainScreen(
                 when (page) {
                     0 -> {
                         val songs by viewModel.songs.collectAsState()
-                        SongList(songs = songs, onSongClick = { list, index -> musicViewModel.playList(list, index) })
+                        SongList(
+                            songs = songs,
+                            currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
+                            onSongClick = { list, index -> musicViewModel.playList(list, index) }
+                        )
                     }
                     1 -> {
                         val artists by viewModel.artists.collectAsState()
@@ -90,7 +98,11 @@ fun MainScreen(
                         AlbumList(albums = albums, onAlbumClick = onAlbumClick)
                     }
                     3 -> {
-                        FolderList(viewModel = viewModel, onSongClick = { list, index -> musicViewModel.playList(list, index) })
+                        FolderList(
+                            viewModel = viewModel,
+                            currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
+                            onSongClick = { list, index -> musicViewModel.playList(list, index) }
+                        )
                     }
                 }
             }

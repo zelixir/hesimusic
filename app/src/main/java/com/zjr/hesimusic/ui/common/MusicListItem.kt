@@ -27,13 +27,18 @@ fun MusicListItem(
     subtitle: String,
     modifier: Modifier = Modifier,
     icon: ImageVector = Icons.Default.MusicNote,
+    isCurrent: Boolean = false,
     onClick: () -> Unit
 ) {
+    val backgroundColor = if (isCurrent) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
+    val contentColor = if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+    val subtitleColor = if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurfaceVariant
+
     Surface(
         modifier = modifier
             .fillMaxWidth()
             .clickable(onClick = onClick),
-        color = MaterialTheme.colorScheme.surface
+        color = backgroundColor
     ) {
         Row(
             modifier = Modifier
@@ -43,7 +48,7 @@ fun MusicListItem(
         ) {
             Surface(
                 shape = MaterialTheme.shapes.small,
-                color = MaterialTheme.colorScheme.secondaryContainer,
+                color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer,
                 modifier = Modifier.size(48.dp)
             ) {
                 Icon(
@@ -52,7 +57,7 @@ fun MusicListItem(
                     modifier = Modifier
                         .padding(12.dp)
                         .size(24.dp),
-                    tint = MaterialTheme.colorScheme.onSecondaryContainer
+                    tint = if (isCurrent) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer
                 )
             }
             
@@ -64,14 +69,14 @@ fun MusicListItem(
                     style = MaterialTheme.typography.bodyLarge,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = contentColor
                 )
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodyMedium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = subtitleColor
                 )
             }
         }
