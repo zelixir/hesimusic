@@ -26,7 +26,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 @Composable
 fun ScanScreen(
     viewModel: ScanViewModel = viewModel(),
-    onDebugClick: () -> Unit = {}
+    onDebugClick: () -> Unit = {},
+    onPlayerTestClick: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
@@ -86,6 +87,15 @@ fun ScanScreen(
             enabled = !uiState.isScanning
         ) {
             Text(text = "Tag Debugger")
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Button(
+            onClick = onPlayerTestClick,
+            enabled = !uiState.isScanning
+        ) {
+            Text(text = "Player Test")
         }
     }
 }

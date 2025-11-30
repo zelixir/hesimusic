@@ -16,6 +16,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.zjr.hesimusic.ui.debug.TagDebugScreen
 import com.zjr.hesimusic.ui.scan.ScanScreen
+import com.zjr.hesimusic.ui.test.PlayerTestScreen
 import com.zjr.hesimusic.ui.theme.HesimusicTheme
 import dagger.hilt.android.AndroidEntryPoint
 
@@ -32,13 +33,20 @@ class MainActivity : ComponentActivity() {
                     Box(modifier = Modifier.padding(innerPadding)) {
                         when (currentScreen) {
                             "scan" -> ScanScreen(
-                                onDebugClick = { currentScreen = "debug" }
+                                onDebugClick = { currentScreen = "debug" },
+                                onPlayerTestClick = { currentScreen = "player_test" }
                             )
                             "debug" -> {
                                 BackHandler {
                                     currentScreen = "scan"
                                 }
                                 TagDebugScreen()
+                            }
+                            "player_test" -> {
+                                BackHandler {
+                                    currentScreen = "scan"
+                                }
+                                PlayerTestScreen()
                             }
                         }
                     }
