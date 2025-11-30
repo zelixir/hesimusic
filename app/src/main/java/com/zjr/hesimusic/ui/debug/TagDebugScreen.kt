@@ -24,6 +24,18 @@ fun TagDebugScreen(
             label = { Text("File Path") },
             modifier = Modifier.fillMaxWidth()
         )
+
+        val pageSize = remember {
+            try {
+                android.system.Os.sysconf(android.system.OsConstants._SC_PAGESIZE)
+            } catch (e: Exception) {
+                -1L
+            }
+        }
+        Text("System Page Size: $pageSize bytes", style = MaterialTheme.typography.bodySmall)
+        if (pageSize == 16384L) {
+            Text("Running on 16 KB Page Size Device", color = MaterialTheme.colorScheme.tertiary)
+        }
         
         Spacer(modifier = Modifier.height(8.dp))
         

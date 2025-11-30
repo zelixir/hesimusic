@@ -22,6 +22,7 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags("")
+                arguments("-DANDROID_STL=c++_shared", "-DANDROID_LINKER_FLAGS=-Wl,-z,max-page-size=16384")
             }
         }
     }
