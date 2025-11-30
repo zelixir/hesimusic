@@ -46,6 +46,7 @@ fun MusicListItem(
                 .fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            /* Icon removed as per request
             Surface(
                 shape = MaterialTheme.shapes.small,
                 color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer,
@@ -62,6 +63,7 @@ fun MusicListItem(
             }
             
             Spacer(modifier = Modifier.width(16.dp))
+            */
             
             Column(modifier = Modifier.weight(1f)) {
                 Text(

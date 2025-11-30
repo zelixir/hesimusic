@@ -15,6 +15,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.zjr.hesimusic.data.model.Album
@@ -34,7 +35,8 @@ fun MainScreen(
     musicViewModel: MusicViewModel = hiltViewModel(),
     onArtistClick: (Artist) -> Unit,
     onAlbumClick: (Album) -> Unit,
-    onPlayerClick: () -> Unit
+    onPlayerClick: () -> Unit,
+    onScanClick: () -> Unit
 ) {
     val pagerState = rememberPagerState(pageCount = { 4 })
     val scope = rememberCoroutineScope()
@@ -57,7 +59,8 @@ fun MainScreen(
                 },
                 onPreviousClick = { musicViewModel.skipToPrevious() },
                 onNextClick = { musicViewModel.skipToNext() },
-                onClick = onPlayerClick
+                onClick = onPlayerClick,
+                onScanClick = onScanClick
             )
         }
     ) { innerPadding ->
@@ -78,7 +81,8 @@ fun MainScreen(
 
             HorizontalPager(
                 state = pagerState,
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.Top
             ) { page ->
                 when (page) {
                     0 -> {

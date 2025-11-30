@@ -38,7 +38,7 @@ class MainActivity : ComponentActivity() {
                     
                     NavHost(
                         navController = navController,
-                        startDestination = "scan",
+                        startDestination = "home",
                         modifier = Modifier.fillMaxSize()
                     ) {
                         composable("scan") {
@@ -61,6 +61,9 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onPlayerClick = {
                                     navController.navigate("player")
+                                },
+                                onScanClick = {
+                                    navController.navigate("scan")
                                 }
                             )
                         }
@@ -90,7 +93,8 @@ class MainActivity : ComponentActivity() {
                                 type = type,
                                 value = value,
                                 onBack = { navController.popBackStack() },
-                                onSongClick = { /* TODO: Play */ }
+                                onSongClick = { /* TODO: Play */ },
+                                onScanClick = { navController.navigate("scan") }
                             )
                         }
                     }

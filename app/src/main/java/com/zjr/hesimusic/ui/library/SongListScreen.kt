@@ -28,7 +28,8 @@ fun SongListScreen(
     viewModel: LibraryViewModel = hiltViewModel(),
     musicViewModel: MusicViewModel = hiltViewModel(),
     onBack: () -> Unit,
-    onSongClick: (Song) -> Unit
+    onSongClick: (Song) -> Unit,
+    onScanClick: () -> Unit
 ) {
     val songsFlow = when (type) {
         "artist" -> viewModel.getSongsByArtist(value)
@@ -65,7 +66,8 @@ fun SongListScreen(
                 },
                 onPreviousClick = { musicViewModel.skipToPrevious() },
                 onNextClick = { musicViewModel.skipToNext() },
-                onClick = { /* TODO: Navigate to player if needed, or just expand */ }
+                onClick = { /* TODO: Navigate to player if needed, or just expand */ },
+                onScanClick = onScanClick
             )
         }
     ) { innerPadding ->
