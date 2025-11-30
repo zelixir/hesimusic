@@ -97,4 +97,5 @@ dependencies {
 
     // Audio & Encoding
     implementation(libs.juniversalchardet)
+    implementation(libs.pinyin4j)
 }
