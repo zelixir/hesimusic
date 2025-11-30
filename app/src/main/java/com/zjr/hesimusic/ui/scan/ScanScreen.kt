@@ -21,13 +21,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.hilt.navigation.compose.hiltViewModel
 
 @Composable
 fun ScanScreen(
-    viewModel: ScanViewModel = viewModel(),
+    viewModel: ScanViewModel = hiltViewModel(),
     onDebugClick: () -> Unit = {},
-    onPlayerTestClick: () -> Unit = {}
+    onPlayerTestClick: () -> Unit = {},
+    onLibraryClick: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
@@ -78,6 +79,15 @@ fun ScanScreen(
             enabled = !uiState.isScanning
         ) {
             Text(text = "Clear Database")
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Button(
+            onClick = onLibraryClick,
+            enabled = !uiState.isScanning
+        ) {
+            Text(text = "Go to Library")
         }
 
         Spacer(modifier = Modifier.height(16.dp))
