@@ -13,6 +13,8 @@ import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.data.preferences.PlaybackPreferences
+import com.zjr.hesimusic.data.repository.SongRepository
 import com.zjr.hesimusic.service.MusicService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -27,7 +29,9 @@ import javax.inject.Inject
 
 @HiltViewModel
 class MusicViewModel @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val playbackPreferences: PlaybackPreferences,
+    private val songRepository: SongRepository
 ) : ViewModel() {
 
     private var mediaControllerFuture: ListenableFuture<MediaController>? = null
@@ -42,6 +46,28 @@ class MusicViewModel @Inject constructor(
     private var sleepTimer: CountDownTimer? = null
 
     init {
+        // Load last played song for immediate UI update
+        viewModelScope.launch {
+            val queueIds = playbackPreferences.getQueue()
+            val currentIndex = playbackPreferences.getCurrentSongIndex()
+            if (queueIds.isNotEmpty() && currentIndex in queueIds.indices) {
+                val songId = queueIds[currentIndex]
+                val songs = songRepository.getSongsByIds(listOf(songId))
+                val song = songs.firstOrNull()
+                if (song != null) {
+                    val mediaItem = song.toMediaItem()
+                    val position = playbackPreferences.getLastPosition()
+                    _uiState.update {
+                        it.copy(
+                            currentMediaItem = mediaItem,
+                            currentPosition = position,
+                            duration = song.duration
+                        )
+                    }
+                }
+            }
+        }
+
         val sessionToken = SessionToken(context, ComponentName(context, MusicService::class.java))
         mediaControllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
         mediaControllerFuture?.addListener({

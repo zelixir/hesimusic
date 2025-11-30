@@ -21,17 +21,17 @@ fun EqualizerScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Equalizer") },
+                title = { Text("均衡器") },
                 navigationIcon = {
                     IconButton(onClick = onBackClick) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 }
             )
         }
     ) { innerPadding ->
         Column(modifier = Modifier.padding(innerPadding)) {
-            Text("Equalizer will be implemented here.")
+            Text("均衡器功能即将上线。")
         }
     }
 }

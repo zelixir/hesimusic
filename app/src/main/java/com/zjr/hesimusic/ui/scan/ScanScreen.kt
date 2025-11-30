@@ -40,7 +40,7 @@ fun ScanScreen(
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(text = "Music Scanner", style = MaterialTheme.typography.headlineMedium)
+        Text(text = "音乐扫描", style = MaterialTheme.typography.headlineMedium)
         
         Spacer(modifier = Modifier.height(32.dp))
         
@@ -48,10 +48,10 @@ fun ScanScreen(
 
         if (uiState.isScanning || uiState.scannedCount > 0) {
             Spacer(modifier = Modifier.height(16.dp))
-            Text(text = "Scanned: ${uiState.scannedCount}")
-            Text(text = "Time: ${formatTime(uiState.elapsedTimeMs)}")
+            Text(text = "已扫描: ${uiState.scannedCount}")
+            Text(text = "耗时: ${formatTime(uiState.elapsedTimeMs)}")
             Spacer(modifier = Modifier.height(8.dp))
-            Text(text = "Current: ${uiState.currentPath}", style = MaterialTheme.typography.bodySmall)
+            Text(text = "当前路径: ${uiState.currentPath}", style = MaterialTheme.typography.bodySmall)
         }
         
         Spacer(modifier = Modifier.height(32.dp))
@@ -69,7 +69,7 @@ fun ScanScreen(
                 viewModel.startScan()
             }
         }, enabled = !uiState.isScanning) {
-            Text(text = if (uiState.isScanning) "Scanning..." else "Start Scan")
+            Text(text = if (uiState.isScanning) "扫描中..." else "开始扫描")
         }
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -78,7 +78,7 @@ fun ScanScreen(
             onClick = { viewModel.clearDatabase() },
             enabled = !uiState.isScanning
         ) {
-            Text(text = "Clear Database")
+            Text(text = "清空数据库")
         }
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -87,26 +87,10 @@ fun ScanScreen(
             onClick = onLibraryClick,
             enabled = !uiState.isScanning
         ) {
-            Text(text = "Go to Library")
+            Text(text = "前往媒体库")
         }
 
         Spacer(modifier = Modifier.height(16.dp))
-
-        Button(
-            onClick = onDebugClick,
-            enabled = !uiState.isScanning
-        ) {
-            Text(text = "Tag Debugger")
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        Button(
-            onClick = onPlayerTestClick,
-            enabled = !uiState.isScanning
-        ) {
-            Text(text = "Player Test")
-        }
     }
 }
 

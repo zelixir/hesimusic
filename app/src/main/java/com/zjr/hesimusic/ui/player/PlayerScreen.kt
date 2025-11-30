@@ -54,21 +54,21 @@ fun PlayerScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Now Playing") },
+                title = { Text("正在播放") },
                 navigationIcon = {
                     IconButton(onClick = onBackClick) {
-                        Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Back")
+                        Icon(Icons.Default.KeyboardArrowDown, contentDescription = "返回")
                     }
                 },
                 actions = {
                     IconButton(onClick = { showSleepTimer = true }) {
-                        Icon(Icons.Rounded.Timer, contentDescription = "Sleep Timer")
+                        Icon(Icons.Rounded.Timer, contentDescription = "睡眠定时")
                     }
                     IconButton(onClick = { showEqualizer = true }) {
-                        Icon(Icons.Rounded.GraphicEq, contentDescription = "Equalizer")
+                        Icon(Icons.Rounded.GraphicEq, contentDescription = "均衡器")
                     }
                     IconButton(onClick = { showQueue = true }) {
-                        Icon(Icons.Rounded.QueueMusic, contentDescription = "Queue")
+                        Icon(Icons.Rounded.QueueMusic, contentDescription = "播放队列")
                     }
                 }
             )
@@ -88,7 +88,7 @@ fun PlayerScreen(
                     .data(uiState.currentMediaItem?.mediaMetadata?.artworkUri)
                     .crossfade(true)
                     .build(),
-                contentDescription = "Cover Art",
+                contentDescription = "封面",
                 modifier = Modifier
                     .aspectRatio(1f)
                     .clip(MaterialTheme.shapes.medium)
@@ -99,14 +99,14 @@ fun PlayerScreen(
             // Title & Artist
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
-                    text = uiState.currentMediaItem?.mediaMetadata?.title?.toString() ?: "Unknown Title",
+                    text = uiState.currentMediaItem?.mediaMetadata?.title?.toString() ?: "未知标题",
                     style = MaterialTheme.typography.headlineSmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = uiState.currentMediaItem?.mediaMetadata?.artist?.toString() ?: "Unknown Artist",
+                    text = uiState.currentMediaItem?.mediaMetadata?.artist?.toString() ?: "未知歌手",
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
@@ -151,13 +151,13 @@ fun PlayerScreen(
                 }) {
                     Icon(
                         imageVector = if (uiState.shuffleModeEnabled) Icons.Default.Shuffle else Icons.Default.ArrowRightAlt, // Placeholder for Shuffle Off
-                        contentDescription = "Shuffle",
+                        contentDescription = "随机播放",
                         tint = if (uiState.shuffleModeEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
                     )
                 }
 
                 IconButton(onClick = { viewModel.skipToPrevious() }, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Default.SkipPrevious, contentDescription = "Previous", modifier = Modifier.size(32.dp))
+                    Icon(Icons.Default.SkipPrevious, contentDescription = "上一首", modifier = Modifier.size(32.dp))
                 }
 
                 FilledIconButton(
@@ -168,13 +168,13 @@ fun PlayerScreen(
                 ) {
                     Icon(
                         imageVector = if (uiState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                        contentDescription = "Play/Pause",
+                        contentDescription = "播放/暂停",
                         modifier = Modifier.size(32.dp)
                     )
                 }
 
                 IconButton(onClick = { viewModel.skipToNext() }, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Default.SkipNext, contentDescription = "Next", modifier = Modifier.size(32.dp))
+                    Icon(Icons.Default.SkipNext, contentDescription = "下一首", modifier = Modifier.size(32.dp))
                 }
 
                 IconButton(onClick = {
@@ -191,7 +191,7 @@ fun PlayerScreen(
                             Player.REPEAT_MODE_ALL -> Icons.Default.Repeat
                             else -> Icons.Default.Repeat // Placeholder for Off
                         },
-                        contentDescription = "Repeat",
+                        contentDescription = "循环播放",
                         tint = if (uiState.repeatMode != Player.REPEAT_MODE_OFF) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
                     )
                 }
@@ -233,7 +233,7 @@ fun PlayerScreen(
                 onDismiss = { showEqualizer = false }
             )
         } else {
-            Toast.makeText(context, "Audio Session ID not available", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "音频会话ID不可用", Toast.LENGTH_SHORT).show()
             showEqualizer = false
         }
     }
@@ -256,9 +256,9 @@ fun QueueSheet(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Queue (${playlist.size})", style = MaterialTheme.typography.titleMedium)
+                Text("播放队列 (${playlist.size})", style = MaterialTheme.typography.titleMedium)
                 TextButton(onClick = onClearQueue) {
-                    Text("Clear")
+                    Text("清空")
                 }
             }
             LazyColumn {
@@ -278,20 +278,20 @@ fun QueueSheet(
                         )
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = item.mediaMetadata.title?.toString() ?: "Unknown",
+                                text = item.mediaMetadata.title?.toString() ?: "未知",
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
                             )
                             Text(
-                                text = item.mediaMetadata.artist?.toString() ?: "Unknown",
+                                text = item.mediaMetadata.artist?.toString() ?: "未知",
                                 style = MaterialTheme.typography.bodySmall,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
                         IconButton(onClick = { onRemoveItem(index) }) {
-                            Icon(Icons.Default.Close, contentDescription = "Remove")
+                            Icon(Icons.Default.Close, contentDescription = "移除")
                         }
                     }
                 }
@@ -309,14 +309,14 @@ fun SleepTimerDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Sleep Timer") },
+        title = { Text("睡眠定时") },
         text = {
             Column {
                 if (remainingTime != null) {
-                    Text("Time remaining: ${formatTime(remainingTime)}")
+                    Text("剩余时间: ${formatTime(remainingTime)}")
                     Spacer(modifier = Modifier.height(16.dp))
                     Button(onClick = onCancelTimer) {
-                        Text("Cancel Timer")
+                        Text("取消定时")
                     }
                 } else {
                     val options = listOf(15, 30, 45, 60)
@@ -328,7 +328,7 @@ fun SleepTimerDialog(
                             },
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text("$minutes minutes")
+                            Text("$minutes 分钟")
                         }
                     }
                 }
@@ -336,7 +336,7 @@ fun SleepTimerDialog(
         },
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text("Close")
+                Text("关闭")
             }
         }
     )
@@ -359,7 +359,7 @@ fun EqualizerDialog(
                 enabled = true
             }
         } catch (e: Exception) {
-            Toast.makeText(context, "Error initializing Equalizer", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "初始化均衡器失败", Toast.LENGTH_SHORT).show()
             null
         }
 
@@ -388,7 +388,7 @@ fun EqualizerDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Equalizer") },
+        title = { Text("均衡器") },
         text = {
             if (equalizer != null) {
                 Column {
@@ -414,12 +414,12 @@ fun EqualizerDialog(
                     }
                 }
             } else {
-                Text("Equalizer not available")
+                Text("均衡器不可用")
             }
         },
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text("Done")
+                Text("完成")
             }
         }
     )

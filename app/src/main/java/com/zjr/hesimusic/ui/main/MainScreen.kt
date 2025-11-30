@@ -44,7 +44,7 @@ fun MainScreen(
 ) {
     val pagerState = rememberPagerState(pageCount = { 4 })
     val scope = rememberCoroutineScope()
-    val titles = listOf("Songs", "Artists", "Albums", "Folders")
+    val titles = listOf("歌曲", "歌手", "专辑", "文件夹")
     val musicUiState by musicViewModel.uiState.collectAsState()
 
     Scaffold(

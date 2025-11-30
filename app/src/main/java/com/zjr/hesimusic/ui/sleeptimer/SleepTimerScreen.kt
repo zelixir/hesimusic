@@ -21,17 +21,17 @@ fun SleepTimerScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Sleep Timer") },
+                title = { Text("睡眠定时") },
                 navigationIcon = {
                     IconButton(onClick = onBackClick) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 }
             )
         }
     ) { innerPadding ->
         Column(modifier = Modifier.padding(innerPadding)) {
-            Text("Sleep Timer settings will be here.")
+            Text("睡眠定时设置即将上线。")
         }
     }
 }

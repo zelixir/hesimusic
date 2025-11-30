@@ -52,7 +52,6 @@ fun BottomPlayerBar(
     onSleepTimerClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    if (currentMediaItem == null) return
     var showMenu by remember { mutableStateOf(false) }
 
     Surface(
@@ -88,13 +87,13 @@ fun BottomPlayerBar(
                 
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = currentMediaItem.mediaMetadata.title?.toString() ?: "Unknown Title",
+                        text = currentMediaItem?.mediaMetadata?.title?.toString() ?: "海瑟音乐",
                         style = MaterialTheme.typography.bodyMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = currentMediaItem.mediaMetadata.artist?.toString() ?: "Unknown Artist",
+                        text = currentMediaItem?.mediaMetadata?.artist?.toString() ?: "选择一首歌曲",
                         style = MaterialTheme.typography.bodySmall,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -104,21 +103,21 @@ fun BottomPlayerBar(
                 IconButton(onClick = onPreviousClick) {
                     Icon(
                         imageVector = Icons.Default.SkipPrevious,
-                        contentDescription = "Previous"
+                        contentDescription = "上一首"
                     )
                 }
 
                 IconButton(onClick = onPlayPauseClick) {
                     Icon(
                         imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                        contentDescription = if (isPlaying) "Pause" else "Play"
+                        contentDescription = if (isPlaying) "暂停" else "播放"
                     )
                 }
 
                 IconButton(onClick = onNextClick) {
                     Icon(
                         imageVector = Icons.Default.SkipNext,
-                        contentDescription = "Next"
+                        contentDescription = "下一首"
                     )
                 }
 
@@ -126,7 +125,7 @@ fun BottomPlayerBar(
                     IconButton(onClick = { showMenu = true }) {
                         Icon(
                             imageVector = Icons.Default.MoreVert,
-                            contentDescription = "Menu"
+                            contentDescription = "菜单"
                         )
                     }
                     DropdownMenu(
@@ -134,35 +133,35 @@ fun BottomPlayerBar(
                         onDismissRequest = { showMenu = false }
                     ) {
                         DropdownMenuItem(
-                            text = { Text("Settings") },
+                            text = { Text("设置") },
                             onClick = { 
                                 showMenu = false
                                 onSettingsClick()
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("Equalizer") },
+                            text = { Text("均衡器") },
                             onClick = { 
                                 showMenu = false
                                 onEqualizerClick()
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("About") },
+                            text = { Text("关于") },
                             onClick = { 
                                 showMenu = false
                                 onAboutClick()
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("Sleep Timer") },
+                            text = { Text("睡眠定时") },
                             onClick = { 
                                 showMenu = false
                                 onSleepTimerClick()
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("Scan") },
+                            text = { Text("扫描音乐") },
                             onClick = { 
                                 showMenu = false
                                 onScanClick()

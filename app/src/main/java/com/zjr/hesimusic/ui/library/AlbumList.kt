@@ -23,7 +23,7 @@ fun AlbumList(
         ) { album ->
             MusicListItem(
                 title = album.name,
-                subtitle = "${album.artist} • ${album.songCount} songs",
+                subtitle = "${album.artist} • ${album.songCount} 首歌曲",
                 icon = Icons.Default.Album,
                 onClick = { onAlbumClick(album) }
             )

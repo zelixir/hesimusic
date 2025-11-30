@@ -43,7 +43,7 @@ fun FolderList(
              item {
                  MusicListItem(
                      title = "..",
-                     subtitle = "Parent Folder",
+                     subtitle = "上级目录",
                      icon = Icons.Default.Folder,
                      onClick = {
                          val parent = File(currentPath).parent
@@ -74,7 +74,7 @@ fun FolderList(
                 is FileSystemItem.Folder -> {
                     MusicListItem(
                         title = item.name,
-                        subtitle = "${item.songCount} songs",
+                        subtitle = "${item.songCount} 首歌曲",
                         icon = Icons.Default.Folder,
                         onClick = { currentPath = item.path }
                     )

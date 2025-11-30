@@ -23,7 +23,7 @@ fun ArtistList(
         ) { artist ->
             MusicListItem(
                 title = artist.name,
-                subtitle = "${artist.songCount} songs",
+                subtitle = "${artist.songCount} 首歌曲",
                 icon = Icons.Default.Person,
                 onClick = { onArtistClick(artist) }
             )

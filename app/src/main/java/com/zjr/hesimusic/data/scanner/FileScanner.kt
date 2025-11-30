@@ -128,7 +128,7 @@ class FileScanner @Inject constructor(
 
         for (file in files) {
             if (file.isDirectory) {
-                val shouldEnter = !file.path.contains("/Recordings/", ignoreCase = true) && !file.name.contains("录音")
+                val shouldEnter = !file.path.contains("/Recordings/", ignoreCase = true) && !file.path.contains("/sound_recorder/")
                 if (shouldEnter) {
                     onProgress(file.absolutePath, currentSongCount)
                     scanDirectory(file, cueFiles, audioFiles, currentSongCount, onProgress)
