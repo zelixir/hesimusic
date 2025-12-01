@@ -182,16 +182,19 @@ class MusicViewModel @Inject constructor(
     ) {
         if (songs.isEmpty()) return
         
+        // Ensure startIndex is within bounds
+        val safeIndex = startIndex.coerceIn(0, songs.lastIndex)
+        
         mediaController?.let { controller ->
             val mediaItems = songs.map { it.toMediaItem() }
-            controller.setMediaItems(mediaItems, startIndex, 0)
+            controller.setMediaItems(mediaItems, safeIndex, 0)
             controller.prepare()
             controller.play()
             
             // Save the playback context
             currentPlaylistType = playlistType
             currentPlaylistIdentifier = playlistIdentifier
-            val songId = songs.getOrNull(startIndex)?.id ?: -1L
+            val songId = songs[safeIndex].id
             playbackPreferences.savePlaybackContext(playlistType, playlistIdentifier, songId)
         }
     }
