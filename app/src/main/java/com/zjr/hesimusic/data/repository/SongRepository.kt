@@ -11,4 +11,6 @@ class SongRepository @Inject constructor(
     fun getAllSongs(): Flow<List<Song>> = songDao.getAllSongs()
 
     suspend fun getSongsByIds(ids: List<Long>): List<Song> = songDao.getSongsByIds(ids)
+    
+    suspend fun getSongByFilePath(filePath: String): Song? = songDao.getSongsByPath(filePath).firstOrNull()
 }

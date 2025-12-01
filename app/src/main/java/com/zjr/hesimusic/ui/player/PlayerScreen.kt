@@ -1,7 +1,6 @@
 package com.zjr.hesimusic.ui.player
 
 import android.media.audiofx.Equalizer
-import android.text.format.DateUtils
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -32,11 +31,9 @@ import androidx.media3.common.Player
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.zjr.hesimusic.ui.common.MusicViewModel
+import com.zjr.hesimusic.utils.TimeFormatter
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.util.Formatter
-import java.util.Locale
-import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -125,21 +122,24 @@ fun PlayerScreen(
 
             // Progress
             Column {
+                // Ensure valid range for Slider: duration must be positive
+                val safeDuration = if (uiState.duration > 0) uiState.duration else 1L
+                val safePosition = uiState.currentPosition.coerceIn(0L, safeDuration)
                 Slider(
-                    value = uiState.currentPosition.toFloat(),
+                    value = safePosition.toFloat(),
                     onValueChange = { viewModel.seekTo(it.toLong()) },
-                    valueRange = 0f..uiState.duration.coerceAtLeast(1L).toFloat()
+                    valueRange = 0f..safeDuration.toFloat()
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = formatTime(uiState.currentPosition),
+                        text = TimeFormatter.formatTime(uiState.currentPosition),
                         style = MaterialTheme.typography.bodySmall
                     )
                     Text(
-                        text = formatTime(uiState.duration),
+                        text = TimeFormatter.formatTime(uiState.duration),
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
@@ -317,7 +317,7 @@ fun SleepTimerDialog(
         text = {
             Column {
                 if (remainingTime != null) {
-                    Text("剩余时间: ${formatTime(remainingTime)}")
+                    Text("剩余时间: ${TimeFormatter.formatTime(remainingTime)}")
                     Spacer(modifier = Modifier.height(16.dp))
                     Button(onClick = onCancelTimer) {
                         Text("取消定时")
@@ -427,11 +427,4 @@ fun EqualizerDialog(
             }
         }
     )
-}
-
-private fun formatTime(millis: Long): String {
-    val totalSeconds = millis / 1000
-    val minutes = totalSeconds / 60
-    val seconds = totalSeconds % 60
-    return String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
 }

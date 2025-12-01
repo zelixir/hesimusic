@@ -60,11 +60,14 @@ class MusicViewModel @Inject constructor(
                     val mediaItem = song.toMediaItem()
                     val position = playbackPreferences.getLastPosition()
                     val isFavorite = favoriteRepository.isFavoriteSync(song.filePath)
+                    // Ensure duration is valid (not negative)
+                    val safeDuration = song.duration.coerceAtLeast(0L)
+                    val safePosition = position.coerceAtLeast(0L)
                     _uiState.update {
                         it.copy(
                             currentMediaItem = mediaItem,
-                            currentPosition = position,
-                            duration = song.duration,
+                            currentPosition = safePosition,
+                            duration = safeDuration,
                             currentSongFilePath = song.filePath,
                             isCurrentSongFavorite = isFavorite
                         )
@@ -137,20 +140,45 @@ class MusicViewModel @Inject constructor(
             val audioSessionId = controller.sessionExtras.getInt("AUDIO_SESSION_ID", 0)
             // Extract file path from current media item URI
             val currentFilePath = controller.currentMediaItem?.localConfiguration?.uri?.path
-            _uiState.update {
-                it.copy(
-                    isPlaying = controller.isPlaying,
-                    currentMediaItem = controller.currentMediaItem,
-                    playbackState = controller.playbackState,
-                    repeatMode = controller.repeatMode,
-                    shuffleModeEnabled = controller.shuffleModeEnabled,
-                    currentPosition = controller.currentPosition,
-                    duration = controller.duration,
-                    bufferedPosition = controller.bufferedPosition,
-                    playlist = playlist,
-                    audioSessionId = audioSessionId,
-                    currentSongFilePath = currentFilePath
-                )
+            val safePosition = controller.currentPosition.coerceAtLeast(0L)
+            
+            // Capture all controller state before any async operation
+            val isPlaying = controller.isPlaying
+            val currentMediaItem = controller.currentMediaItem
+            val playbackState = controller.playbackState
+            val repeatMode = controller.repeatMode
+            val shuffleModeEnabled = controller.shuffleModeEnabled
+            val bufferedPosition = controller.bufferedPosition
+            val controllerDuration = controller.duration
+            
+            // Helper function to update UI state with given duration
+            fun performStateUpdate(duration: Long) {
+                _uiState.update {
+                    it.copy(
+                        isPlaying = isPlaying,
+                        currentMediaItem = currentMediaItem,
+                        playbackState = playbackState,
+                        repeatMode = repeatMode,
+                        shuffleModeEnabled = shuffleModeEnabled,
+                        currentPosition = safePosition,
+                        duration = duration,
+                        bufferedPosition = bufferedPosition,
+                        playlist = playlist,
+                        audioSessionId = audioSessionId,
+                        currentSongFilePath = currentFilePath
+                    )
+                }
+            }
+            
+            // If controller.duration is negative (C.TIME_UNSET), get duration from database
+            if (controllerDuration < 0 && currentFilePath != null) {
+                viewModelScope.launch {
+                    val song = songRepository.getSongByFilePath(currentFilePath)
+                    val correctDuration = song?.duration?.coerceAtLeast(0L) ?: 0L
+                    performStateUpdate(correctDuration)
+                }
+            } else {
+                performStateUpdate(controllerDuration.coerceAtLeast(0L))
             }
         }
     }
