@@ -10,6 +10,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.rounded.Favorite
+import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Timer
@@ -61,6 +63,13 @@ fun PlayerScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = { viewModel.toggleCurrentSongFavorite() }) {
+                        Icon(
+                            imageVector = if (uiState.isCurrentSongFavorite) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                            contentDescription = if (uiState.isCurrentSongFavorite) "取消收藏" else "收藏",
+                            tint = if (uiState.isCurrentSongFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                     IconButton(onClick = { showSleepTimer = true }) {
                         Icon(Icons.Rounded.Timer, contentDescription = "睡眠定时")
                     }

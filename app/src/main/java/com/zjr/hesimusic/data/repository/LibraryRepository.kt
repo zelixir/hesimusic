@@ -1,17 +1,20 @@
 package com.zjr.hesimusic.data.repository
 
+import com.zjr.hesimusic.data.dao.FavoriteDao
 import com.zjr.hesimusic.data.dao.SongDao
 import com.zjr.hesimusic.data.model.Album
 import com.zjr.hesimusic.data.model.Artist
 import com.zjr.hesimusic.data.model.FileSystemItem
 import com.zjr.hesimusic.data.model.Song
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import java.io.File
 import javax.inject.Inject
 
 class LibraryRepository @Inject constructor(
-    private val songDao: SongDao
+    private val songDao: SongDao,
+    private val favoriteDao: FavoriteDao
 ) {
     fun getAllSongs(): Flow<List<Song>> = songDao.getAllSongs()
 
@@ -22,6 +25,13 @@ class LibraryRepository @Inject constructor(
     fun getSongsByArtist(artist: String): Flow<List<Song>> = songDao.getSongsByArtist(artist)
 
     fun getSongsByAlbum(album: String): Flow<List<Song>> = songDao.getSongsByAlbum(album)
+
+    fun getFavoriteSongs(): Flow<List<Song>> {
+        return favoriteDao.getAllFavoritePaths().combine(songDao.getAllSongs()) { favoritePaths, allSongs ->
+            val favoritePathSet = favoritePaths.toSet()
+            allSongs.filter { it.filePath in favoritePathSet }
+        }
+    }
 
     fun getFolderContents(parentPath: String): Flow<List<FileSystemItem>> {
         return songDao.getAllSongs().map { songs ->
