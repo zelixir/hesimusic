@@ -47,4 +47,20 @@ class PlaybackPreferences @Inject constructor(
     fun getLastPosition(): Long {
         return prefs.getLong("current_position", 0L)
     }
+
+    fun saveRepeatMode(repeatMode: Int) {
+        prefs.edit().putInt("repeat_mode", repeatMode).apply()
+    }
+
+    fun getRepeatMode(): Int {
+        return prefs.getInt("repeat_mode", 2) // Default: REPEAT_MODE_ALL (list repeat)
+    }
+
+    fun saveShuffleModeEnabled(shuffleModeEnabled: Boolean) {
+        prefs.edit().putBoolean("shuffle_mode_enabled", shuffleModeEnabled).apply()
+    }
+
+    fun getShuffleModeEnabled(): Boolean {
+        return prefs.getBoolean("shuffle_mode_enabled", false)
+    }
 }

@@ -92,6 +92,10 @@ class MusicService : MediaSessionService() {
 
     private fun restorePlaybackState() {
         serviceScope.launch {
+            // Restore playback mode
+            player.repeatMode = playbackPreferences.getRepeatMode()
+            player.shuffleModeEnabled = playbackPreferences.getShuffleModeEnabled()
+
             val queueIds = playbackPreferences.getQueue()
             if (queueIds.isNotEmpty()) {
                 val songs = songRepository.getSongsByIds(queueIds)
