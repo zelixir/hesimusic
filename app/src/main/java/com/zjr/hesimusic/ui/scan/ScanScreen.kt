@@ -269,6 +269,10 @@ private fun FolderSelectionCard(
 }
 
 fun formatTime(ms: Long): String {
+    // Handle negative values
+    if (ms < 0) {
+        return "00:00.0"
+    }
     val seconds = ms / 1000
     val minutes = seconds / 60
     val remainingSeconds = seconds % 60

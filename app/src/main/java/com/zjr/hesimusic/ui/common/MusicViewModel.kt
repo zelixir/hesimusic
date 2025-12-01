@@ -60,11 +60,14 @@ class MusicViewModel @Inject constructor(
                     val mediaItem = song.toMediaItem()
                     val position = playbackPreferences.getLastPosition()
                     val isFavorite = favoriteRepository.isFavoriteSync(song.filePath)
+                    // Ensure duration is valid (not negative)
+                    val safeDuration = song.duration.coerceAtLeast(0L)
+                    val safePosition = position.coerceAtLeast(0L)
                     _uiState.update {
                         it.copy(
                             currentMediaItem = mediaItem,
-                            currentPosition = position,
-                            duration = song.duration,
+                            currentPosition = safePosition,
+                            duration = safeDuration,
                             currentSongFilePath = song.filePath,
                             isCurrentSongFavorite = isFavorite
                         )
@@ -137,6 +140,9 @@ class MusicViewModel @Inject constructor(
             val audioSessionId = controller.sessionExtras.getInt("AUDIO_SESSION_ID", 0)
             // Extract file path from current media item URI
             val currentFilePath = controller.currentMediaItem?.localConfiguration?.uri?.path
+            // Handle C.TIME_UNSET (Long.MIN_VALUE) and other negative values
+            val safeDuration = controller.duration.coerceAtLeast(0L)
+            val safePosition = controller.currentPosition.coerceAtLeast(0L)
             _uiState.update {
                 it.copy(
                     isPlaying = controller.isPlaying,
@@ -144,8 +150,8 @@ class MusicViewModel @Inject constructor(
                     playbackState = controller.playbackState,
                     repeatMode = controller.repeatMode,
                     shuffleModeEnabled = controller.shuffleModeEnabled,
-                    currentPosition = controller.currentPosition,
-                    duration = controller.duration,
+                    currentPosition = safePosition,
+                    duration = safeDuration,
                     bufferedPosition = controller.bufferedPosition,
                     playlist = playlist,
                     audioSessionId = audioSessionId,
