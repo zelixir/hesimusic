@@ -48,6 +48,16 @@ class MusicViewModel @Inject constructor(
     // Track the current playback context
     private var currentPlaylistType: PlaylistType = PlaylistType.ALL_SONGS
     private var currentPlaylistIdentifier: String = ""
+    
+    // Flag to prevent saving context during app startup/restore
+    // Use @Volatile for thread-safe access as it may be accessed from different threads
+    @Volatile
+    private var isRestoringState: Boolean = true
+    
+    companion object {
+        // Delay to allow MediaController to finish setup before allowing context saves
+        private const val MEDIA_CONTROLLER_SETUP_DELAY_MS = 1000L
+    }
 
     private var sleepTimer: CountDownTimer? = null
 
@@ -78,6 +88,10 @@ class MusicViewModel @Inject constructor(
                 currentPlaylistType = context.playlistType
                 currentPlaylistIdentifier = context.identifier
             }
+            
+            // Mark restoration as complete after a delay to allow MediaController to finish setup
+            delay(MEDIA_CONTROLLER_SETUP_DELAY_MS)
+            isRestoringState = false
         }
 
         val sessionToken = SessionToken(context, ComponentName(context, MusicService::class.java))
@@ -95,8 +109,10 @@ class MusicViewModel @Inject constructor(
 
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                     updateState()
-                    // Update the playback context when track changes
-                    saveCurrentPlaybackContext()
+                    // Only save playback context when user manually changes track, not during restore
+                    if (!isRestoringState) {
+                        saveCurrentPlaybackContext()
+                    }
                 }
 
                 override fun onRepeatModeChanged(repeatMode: Int) {
