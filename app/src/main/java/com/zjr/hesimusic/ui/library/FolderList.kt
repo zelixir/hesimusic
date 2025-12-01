@@ -1,5 +1,6 @@
 package com.zjr.hesimusic.ui.library
 
+import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -7,6 +8,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -18,15 +20,29 @@ import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.ui.common.MusicListItem
 import java.io.File
 
+private const val TAG = "FolderList"
+
 @Composable
 fun FolderList(
     viewModel: LibraryViewModel,
     modifier: Modifier = Modifier,
     initialPath: String = "/storage/emulated/0",
     currentPlayingSongId: String? = null,
-    onSongClick: (List<Song>, Int) -> Unit
+    savedFolderPath: String? = null,  // Path to restore from saved state
+    onSongClick: (List<Song>, Int, String) -> Unit  // Added folderPath parameter
 ) {
-    var currentPath by remember { mutableStateOf(initialPath) }
+    // Start from saved path if available, otherwise use initial path
+    val startPath = remember(savedFolderPath) {
+        if (savedFolderPath != null && savedFolderPath.startsWith(initialPath)) {
+            Log.d(TAG, "FolderList: starting from saved path: $savedFolderPath")
+            savedFolderPath
+        } else {
+            Log.d(TAG, "FolderList: starting from initial path: $initialPath")
+            initialPath
+        }
+    }
+    
+    var currentPath by remember { mutableStateOf(startPath) }
     val items by viewModel.getFolderContents(currentPath).collectAsState(initial = emptyList())
 
     // Handle back press to go up directory
@@ -34,6 +50,7 @@ fun FolderList(
     BackHandler(enabled = currentPath != initialPath) {
         val parent = File(currentPath).parent
         if (parent != null) {
+            Log.d(TAG, "BackHandler: navigating from $currentPath to $parent")
             currentPath = parent
         }
     }
@@ -48,6 +65,7 @@ fun FolderList(
                      onClick = {
                          val parent = File(currentPath).parent
                          if (parent != null) {
+                             Log.d(TAG, "Parent click: navigating from $currentPath to $parent")
                              currentPath = parent
                          }
                      }
@@ -76,7 +94,10 @@ fun FolderList(
                         title = item.name,
                         subtitle = "${item.songCount} 首歌曲",
                         icon = Icons.Default.Folder,
-                        onClick = { currentPath = item.path }
+                        onClick = { 
+                            Log.d(TAG, "Folder click: navigating from $currentPath to ${item.path}")
+                            currentPath = item.path 
+                        }
                     )
                 }
                 is FileSystemItem.MusicFile -> {
@@ -89,7 +110,8 @@ fun FolderList(
                             val songsInFolder = items.filterIsInstance<FileSystemItem.MusicFile>().map { it.song }
                             val index = songsInFolder.indexOf(item.song)
                             if (index != -1) {
-                                onSongClick(songsInFolder, index)
+                                Log.d(TAG, "Song click: playing song '${item.song.title}' at index $index in folder $currentPath")
+                                onSongClick(songsInFolder, index, currentPath)
                             }
                         }
                     )

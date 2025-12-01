@@ -3,6 +3,7 @@ package com.zjr.hesimusic.ui.common
 import android.content.ComponentName
 import android.content.Context
 import android.os.CountDownTimer
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
@@ -14,6 +15,8 @@ import com.google.common.util.concurrent.MoreExecutors
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
+import com.zjr.hesimusic.data.preferences.PlaylistContext
+import com.zjr.hesimusic.data.preferences.PlaylistType
 import com.zjr.hesimusic.data.repository.FavoriteRepository
 import com.zjr.hesimusic.data.repository.SongRepository
 import com.zjr.hesimusic.service.MusicService
@@ -36,6 +39,10 @@ class MusicViewModel @Inject constructor(
     private val favoriteRepository: FavoriteRepository
 ) : ViewModel() {
 
+    companion object {
+        private const val TAG = "MusicViewModel"
+    }
+
     private var mediaControllerFuture: ListenableFuture<MediaController>? = null
     private var mediaController: MediaController? = null
 
@@ -44,19 +51,33 @@ class MusicViewModel @Inject constructor(
 
     private val _sleepTimerState = MutableStateFlow<Long?>(null)
     val sleepTimerState: StateFlow<Long?> = _sleepTimerState.asStateFlow()
+    
+    // Expose the saved playlist context for UI to use when restoring state
+    private val _savedPlaylistContext = MutableStateFlow<PlaylistContext?>(null)
+    val savedPlaylistContext: StateFlow<PlaylistContext?> = _savedPlaylistContext.asStateFlow()
 
     private var sleepTimer: CountDownTimer? = null
 
     init {
-        // Load last played song for immediate UI update
+        Log.d(TAG, "init: MusicViewModel created")
+        
+        // Load last played song and playlist context for immediate UI update
         viewModelScope.launch {
             val queueIds = playbackPreferences.getQueue()
             val currentIndex = playbackPreferences.getCurrentSongIndex()
+            val playlistContext = playbackPreferences.getPlaylistContext()
+            
+            Log.d(TAG, "init: restoring state - queueIds=${queueIds.size}, currentIndex=$currentIndex, playlistContext=$playlistContext")
+            
+            // Update the saved playlist context for UI to use
+            _savedPlaylistContext.value = playlistContext
+            
             if (queueIds.isNotEmpty() && currentIndex in queueIds.indices) {
                 val songId = queueIds[currentIndex]
                 val songs = songRepository.getSongsByIds(listOf(songId))
                 val song = songs.firstOrNull()
                 if (song != null) {
+                    Log.d(TAG, "init: restored song '${song.title}' at index $currentIndex")
                     val mediaItem = song.toMediaItem()
                     val position = playbackPreferences.getLastPosition()
                     val isFavorite = favoriteRepository.isFavoriteSync(song.filePath)
@@ -66,10 +87,15 @@ class MusicViewModel @Inject constructor(
                             currentPosition = position,
                             duration = song.duration,
                             currentSongFilePath = song.filePath,
-                            isCurrentSongFavorite = isFavorite
+                            isCurrentSongFavorite = isFavorite,
+                            playlistContext = playlistContext
                         )
                     }
+                } else {
+                    Log.w(TAG, "init: could not find song with id $songId")
                 }
+            } else {
+                Log.d(TAG, "init: no valid saved state to restore")
             }
         }
 
@@ -77,6 +103,7 @@ class MusicViewModel @Inject constructor(
         mediaControllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
         mediaControllerFuture?.addListener({
             mediaController = mediaControllerFuture?.get()
+            Log.d(TAG, "init: MediaController connected")
             mediaController?.addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     updateState()
@@ -87,6 +114,7 @@ class MusicViewModel @Inject constructor(
                 }
 
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                    Log.d(TAG, "onMediaItemTransition: mediaId=${mediaItem?.mediaId}, reason=$reason")
                     updateState()
                     // Update favorite status when song changes
                     updateCurrentSongFavoriteStatus()
@@ -156,6 +184,7 @@ class MusicViewModel @Inject constructor(
     }
 
     fun play(song: Song) {
+        Log.d(TAG, "play: single song '${song.title}'")
         mediaController?.let { controller ->
             val mediaItem = song.toMediaItem()
             controller.setMediaItem(mediaItem)
@@ -164,12 +193,22 @@ class MusicViewModel @Inject constructor(
         }
     }
     
-    fun playList(songs: List<Song>, startIndex: Int = 0) {
-         mediaController?.let { controller ->
+    /**
+     * Play a list of songs, starting from the specified index.
+     * Also saves the playlist context for later restoration.
+     */
+    fun playList(songs: List<Song>, startIndex: Int = 0, playlistContext: PlaylistContext = PlaylistContext.GLOBAL) {
+        Log.d(TAG, "playList: ${songs.size} songs, startIndex=$startIndex, context=$playlistContext")
+        mediaController?.let { controller ->
             val mediaItems = songs.map { it.toMediaItem() }
             controller.setMediaItems(mediaItems, startIndex, 0)
             controller.prepare()
             controller.play()
+            
+            // Save the playlist context
+            playbackPreferences.savePlaylistContext(playlistContext)
+            _uiState.update { it.copy(playlistContext = playlistContext) }
+            Log.d(TAG, "playList: saved context $playlistContext")
         }
     }
 
@@ -222,7 +261,10 @@ class MusicViewModel @Inject constructor(
     }
     
     fun clearPlaylist() {
+        Log.d(TAG, "clearPlaylist: clearing all media items")
         mediaController?.clearMediaItems()
+        playbackPreferences.clearPlaybackState()
+        _uiState.update { it.copy(playlistContext = null) }
     }
 
     fun toggleCurrentSongFavorite() {
@@ -250,9 +292,18 @@ class MusicViewModel @Inject constructor(
         sleepTimer?.cancel()
         _sleepTimerState.value = null
     }
+    
+    /**
+     * Mark the saved playlist context as consumed after the UI has used it to navigate.
+     */
+    fun consumeSavedPlaylistContext() {
+        Log.d(TAG, "consumeSavedPlaylistContext: clearing saved context")
+        _savedPlaylistContext.value = null
+    }
 
     override fun onCleared() {
         super.onCleared()
+        Log.d(TAG, "onCleared: MusicViewModel destroyed")
         mediaControllerFuture?.let {
             MediaController.releaseFuture(it)
         }
@@ -272,5 +323,6 @@ data class MusicUiState(
     val playlist: List<MediaItem> = emptyList(),
     val audioSessionId: Int = 0,
     val currentSongFilePath: String? = null,
-    val isCurrentSongFavorite: Boolean = false
+    val isCurrentSongFavorite: Boolean = false,
+    val playlistContext: PlaylistContext? = null
 )
