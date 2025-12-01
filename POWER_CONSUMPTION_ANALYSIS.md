@@ -94,12 +94,38 @@ private fun startProgressUpdateLoop() {
 
 **优化方案**:
 
-方案A - 生命周期感知:
+方案A - 使用 ProcessLifecycleOwner 实现生命周期感知:
 ```kotlin
+// 在 Application 或 ViewModel 中添加前台检测
+class AppLifecycleObserver : DefaultLifecycleObserver {
+    var isAppInForeground = false
+        private set
+    
+    override fun onStart(owner: LifecycleOwner) {
+        isAppInForeground = true
+    }
+    
+    override fun onStop(owner: LifecycleOwner) {
+        isAppInForeground = false
+    }
+}
+
+// 在 HesiMusicApplication 中注册
+class HesiMusicApplication : Application() {
+    val lifecycleObserver = AppLifecycleObserver()
+    
+    override fun onCreate() {
+        super.onCreate()
+        ProcessLifecycleOwner.get().lifecycle.addObserver(lifecycleObserver)
+    }
+}
+
+// 在 MusicViewModel 中使用
 private fun startProgressUpdateLoop() {
     viewModelScope.launch {
         while (isActive) {
-            if (mediaController?.isPlaying == true && isAppInForeground) {
+            val app = context.applicationContext as HesiMusicApplication
+            if (mediaController?.isPlaying == true && app.lifecycleObserver.isAppInForeground) {
                 updateState()
             }
             delay(1000)
@@ -108,15 +134,21 @@ private fun startProgressUpdateLoop() {
 }
 ```
 
-方案B - 使用 Player.Listener 替代轮询:
+方案B - 使用 Handler 配合 Lifecycle:
 ```kotlin
-// 移除 startProgressUpdateLoop()，改为在 Player.Listener 中使用:
-override fun onPositionDiscontinuity(
-    oldPosition: Player.PositionInfo,
-    newPosition: Player.PositionInfo,
-    reason: Int
-) {
-    updateState()
+// 更简单的方案：在 Compose 中使用 LaunchedEffect 配合 lifecycle
+@Composable
+fun PlayerProgressTracker(viewModel: MusicViewModel) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                viewModel.updateProgressIfPlaying()
+                delay(1000)
+            }
+        }
+    }
 }
 ```
 
@@ -365,17 +397,23 @@ fun ensureProgressLoop() {
 - 但如果有其他后台任务，可能导致不必要的唤醒
 
 **建议**:
-确保 Service 使用正确的 WakeLock 策略:
+Media3 的 ExoPlayer 在播放音频时会自动管理 WakeLock。无需手动管理，但应确保：
+1. 不要有其他后台任务（如周期性协程）阻止系统休眠
+2. 使用 `setWakeMode(context, C.WAKE_MODE_NETWORK)` 或 `C.WAKE_MODE_LOCAL` 如果需要额外控制
+3. 确保在 `MediaModule.kt` 中正确配置 ExoPlayer:
+
 ```kotlin
-// 确保只在音频播放时持有 WakeLock
-private fun setupWakeLock() {
-    player.addListener(object : Player.Listener {
-        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-            // Media3 ExoPlayer 已经内置了 WakeLock 管理
-            // 不需要额外配置，但确保不要有其他任务阻止系统休眠
-        }
-    })
-}
+@Provides
+@Singleton
+fun provideExoPlayer(
+    @ApplicationContext context: Context,
+    audioAttributes: AudioAttributes
+): ExoPlayer =
+    ExoPlayer.Builder(context)
+        .setAudioAttributes(audioAttributes, true)
+        .setHandleAudioBecomingNoisy(true)
+        .setWakeMode(context, C.WAKE_MODE_LOCAL) // 仅在本地播放时保持设备唤醒
+        .build()
 ```
 
 ---
