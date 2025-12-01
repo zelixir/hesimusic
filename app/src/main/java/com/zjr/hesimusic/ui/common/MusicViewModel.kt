@@ -205,10 +205,12 @@ class MusicViewModel @Inject constructor(
 
     fun setRepeatMode(repeatMode: Int) {
         mediaController?.repeatMode = repeatMode
+        playbackPreferences.saveRepeatMode(repeatMode)
     }
 
     fun setShuffleModeEnabled(shuffleModeEnabled: Boolean) {
         mediaController?.shuffleModeEnabled = shuffleModeEnabled
+        playbackPreferences.saveShuffleModeEnabled(shuffleModeEnabled)
     }
 
     fun removeMediaItem(index: Int) {

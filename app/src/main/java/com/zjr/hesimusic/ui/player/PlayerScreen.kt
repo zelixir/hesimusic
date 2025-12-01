@@ -151,17 +151,28 @@ fun PlayerScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // Three-state playback mode button: 列表循环 -> 随机播放 -> 单曲循环
                 IconButton(onClick = {
-                    val nextMode = when (uiState.shuffleModeEnabled) {
-                        true -> false
-                        false -> true
+                    val (newShuffle, newRepeat) = when {
+                        uiState.shuffleModeEnabled -> false to Player.REPEAT_MODE_ONE // Random -> Single Loop
+                        uiState.repeatMode == Player.REPEAT_MODE_ONE -> false to Player.REPEAT_MODE_ALL // Single Loop -> List Loop
+                        else -> true to Player.REPEAT_MODE_ALL // List Loop -> Random
                     }
-                    viewModel.setShuffleModeEnabled(nextMode)
+                    viewModel.setShuffleModeEnabled(newShuffle)
+                    viewModel.setRepeatMode(newRepeat)
                 }) {
                     Icon(
-                        imageVector = if (uiState.shuffleModeEnabled) Icons.Default.Shuffle else Icons.Default.ArrowRightAlt, // Placeholder for Shuffle Off
-                        contentDescription = "随机播放",
-                        tint = if (uiState.shuffleModeEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                        imageVector = when {
+                            uiState.shuffleModeEnabled -> Icons.Default.Shuffle
+                            uiState.repeatMode == Player.REPEAT_MODE_ONE -> Icons.Default.RepeatOne
+                            else -> Icons.Default.Repeat
+                        },
+                        contentDescription = when {
+                            uiState.shuffleModeEnabled -> "随机播放"
+                            uiState.repeatMode == Player.REPEAT_MODE_ONE -> "单曲循环"
+                            else -> "列表循环"
+                        },
+                        tint = MaterialTheme.colorScheme.primary
                     )
                 }
 
@@ -186,24 +197,8 @@ fun PlayerScreen(
                     Icon(Icons.Default.SkipNext, contentDescription = "下一首", modifier = Modifier.size(32.dp))
                 }
 
-                IconButton(onClick = {
-                    val nextMode = when (uiState.repeatMode) {
-                        Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
-                        Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
-                        else -> Player.REPEAT_MODE_OFF
-                    }
-                    viewModel.setRepeatMode(nextMode)
-                }) {
-                    Icon(
-                        imageVector = when (uiState.repeatMode) {
-                            Player.REPEAT_MODE_ONE -> Icons.Default.RepeatOne
-                            Player.REPEAT_MODE_ALL -> Icons.Default.Repeat
-                            else -> Icons.Default.Repeat // Placeholder for Off
-                        },
-                        contentDescription = "循环播放",
-                        tint = if (uiState.repeatMode != Player.REPEAT_MODE_OFF) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                    )
-                }
+                // Placeholder for balanced layout
+                Spacer(modifier = Modifier.size(48.dp))
             }
         }
     }

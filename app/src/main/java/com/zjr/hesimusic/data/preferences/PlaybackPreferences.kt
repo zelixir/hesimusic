@@ -2,6 +2,7 @@ package com.zjr.hesimusic.data.preferences
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.media3.common.Player
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -46,5 +47,21 @@ class PlaybackPreferences @Inject constructor(
     // Fix for getCurrentPosition using getLong
     fun getLastPosition(): Long {
         return prefs.getLong("current_position", 0L)
+    }
+
+    fun saveRepeatMode(repeatMode: Int) {
+        prefs.edit().putInt("repeat_mode", repeatMode).apply()
+    }
+
+    fun getRepeatMode(): Int {
+        return prefs.getInt("repeat_mode", Player.REPEAT_MODE_ALL)
+    }
+
+    fun saveShuffleModeEnabled(shuffleModeEnabled: Boolean) {
+        prefs.edit().putBoolean("shuffle_mode_enabled", shuffleModeEnabled).apply()
+    }
+
+    fun getShuffleModeEnabled(): Boolean {
+        return prefs.getBoolean("shuffle_mode_enabled", false)
     }
 }
