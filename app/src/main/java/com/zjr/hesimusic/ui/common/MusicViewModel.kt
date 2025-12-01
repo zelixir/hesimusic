@@ -79,7 +79,7 @@ class MusicViewModel @Inject constructor(
                 if (song != null) {
                     Log.d(TAG, "init: restored song '${song.title}' at index $currentIndex")
                     val mediaItem = song.toMediaItem()
-                    val position = playbackPreferences.getLastPosition()
+                    val position = playbackPreferences.getSavedPosition()
                     val isFavorite = favoriteRepository.isFavoriteSync(song.filePath)
                     _uiState.update {
                         it.copy(

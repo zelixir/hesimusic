@@ -40,6 +40,13 @@ import kotlinx.coroutines.launch
 
 private const val TAG = "MainScreen"
 
+// Tab indices for the main screen pager
+private const val TAB_INDEX_GLOBAL = 0
+private const val TAB_INDEX_FAVORITES = 1
+private const val TAB_INDEX_ARTISTS = 2
+private const val TAB_INDEX_ALBUMS = 3
+private const val TAB_INDEX_FOLDER = 4
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MainScreen(
@@ -74,26 +81,23 @@ fun MainScreen(
             // ARTIST and ALBUM are handled by MainActivity's LaunchedEffect
             when (context.type) {
                 PlaylistType.GLOBAL -> {
-                    val targetPage = 0
-                    if (pagerState.currentPage != targetPage) {
-                        Log.d(TAG, "LaunchedEffect: scrolling to GLOBAL tab (0)")
-                        pagerState.scrollToPage(targetPage)
+                    if (pagerState.currentPage != TAB_INDEX_GLOBAL) {
+                        Log.d(TAG, "LaunchedEffect: scrolling to GLOBAL tab ($TAB_INDEX_GLOBAL)")
+                        pagerState.scrollToPage(TAB_INDEX_GLOBAL)
                     }
                     musicViewModel.consumeSavedPlaylistContext()
                 }
                 PlaylistType.FAVORITES -> {
-                    val targetPage = 1
-                    if (pagerState.currentPage != targetPage) {
-                        Log.d(TAG, "LaunchedEffect: scrolling to FAVORITES tab (1)")
-                        pagerState.scrollToPage(targetPage)
+                    if (pagerState.currentPage != TAB_INDEX_FAVORITES) {
+                        Log.d(TAG, "LaunchedEffect: scrolling to FAVORITES tab ($TAB_INDEX_FAVORITES)")
+                        pagerState.scrollToPage(TAB_INDEX_FAVORITES)
                     }
                     musicViewModel.consumeSavedPlaylistContext()
                 }
                 PlaylistType.FOLDER -> {
-                    val targetPage = 4
-                    if (pagerState.currentPage != targetPage) {
-                        Log.d(TAG, "LaunchedEffect: scrolling to FOLDER tab (4)")
-                        pagerState.scrollToPage(targetPage)
+                    if (pagerState.currentPage != TAB_INDEX_FOLDER) {
+                        Log.d(TAG, "LaunchedEffect: scrolling to FOLDER tab ($TAB_INDEX_FOLDER)")
+                        pagerState.scrollToPage(TAB_INDEX_FOLDER)
                     }
                     // Save the folder path for FolderList to use
                     Log.d(TAG, "LaunchedEffect: saving folder path for FolderList: ${context.value}")

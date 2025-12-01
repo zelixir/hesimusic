@@ -94,9 +94,9 @@ class PlaybackPreferences @Inject constructor(
     /**
      * Get the saved playback position. Uses getLong to correctly read the Long value.
      */
-    fun getLastPosition(): Long {
+    fun getSavedPosition(): Long {
         val position = prefs.getLong(KEY_CURRENT_POSITION, 0L)
-        Log.d(TAG, "getLastPosition: $position")
+        Log.d(TAG, "getSavedPosition: $position")
         return position
     }
 

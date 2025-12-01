@@ -19,8 +19,44 @@ import com.zjr.hesimusic.data.model.FileSystemItem
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.ui.common.MusicListItem
 import java.io.File
+import java.nio.file.Path
+import java.nio.file.Paths
 
 private const val TAG = "FolderList"
+
+/**
+ * Validates that a saved path is safely contained within the initial path.
+ * Uses NIO.2 Path API for robust path traversal protection.
+ * 
+ * @param savedPath The path to validate
+ * @param initialPath The base/root path that savedPath must be within
+ * @return The validated absolute path, or null if validation fails
+ */
+private fun validateSavedPath(savedPath: String, initialPath: String): String? {
+    return try {
+        val initialNioPath: Path = Paths.get(initialPath).toRealPath()
+        val savedNioPath: Path = Paths.get(savedPath).normalize()
+        
+        // Resolve the saved path against initial path and normalize it
+        val resolvedPath = if (savedNioPath.isAbsolute) {
+            savedNioPath.toRealPath()
+        } else {
+            initialNioPath.resolve(savedNioPath).normalize().toRealPath()
+        }
+        
+        // Verify the resolved path starts with the initial path
+        if (resolvedPath.startsWith(initialNioPath)) {
+            Log.d(TAG, "validateSavedPath: validated path: $resolvedPath")
+            resolvedPath.toString()
+        } else {
+            Log.w(TAG, "validateSavedPath: path '$savedPath' is outside initial path '$initialPath'")
+            null
+        }
+    } catch (e: Exception) {
+        Log.e(TAG, "validateSavedPath: error validating path '$savedPath'", e)
+        null
+    }
+}
 
 @Composable
 fun FolderList(
@@ -32,23 +68,11 @@ fun FolderList(
     onSongClick: (List<Song>, Int, String) -> Unit  // Added folderPath parameter
 ) {
     // Start from saved path if available, otherwise use initial path
-    // Use canonical path to prevent path traversal attacks
+    // Use NIO.2 Path API for robust path traversal protection
     val startPath = remember(savedFolderPath, initialPath) {
         if (savedFolderPath != null) {
-            try {
-                val savedFile = File(savedFolderPath).canonicalFile
-                val initialFile = File(initialPath).canonicalFile
-                // Verify the saved path is actually under the initial path (no path traversal)
-                if (savedFile.absolutePath.startsWith(initialFile.absolutePath + File.separator) ||
-                    savedFile.absolutePath == initialFile.absolutePath) {
-                    Log.d(TAG, "FolderList: starting from saved path: ${savedFile.absolutePath}")
-                    savedFile.absolutePath
-                } else {
-                    Log.w(TAG, "FolderList: saved path '$savedFolderPath' is outside initial path, ignoring")
-                    initialPath
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "FolderList: error validating saved path", e)
+            validateSavedPath(savedFolderPath, initialPath) ?: run {
+                Log.d(TAG, "FolderList: falling back to initial path: $initialPath")
                 initialPath
             }
         } else {

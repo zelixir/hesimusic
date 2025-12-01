@@ -122,7 +122,7 @@ class MusicService : MediaSessionService() {
                 if (mediaItems.isNotEmpty()) {
                     player.setMediaItems(mediaItems)
                     val index = playbackPreferences.getCurrentSongIndex()
-                    val position = playbackPreferences.getLastPosition()
+                    val position = playbackPreferences.getSavedPosition()
                     
                     Log.d(TAG, "restorePlaybackState: seeking to index=$index, position=$position")
                     if (index in mediaItems.indices) {
