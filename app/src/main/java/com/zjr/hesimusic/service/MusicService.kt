@@ -40,6 +40,9 @@ class MusicService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    
+    // Flag to prevent saving state during restoration
+    private var isRestoringState = false
 
     override fun onCreate() {
         super.onCreate()
@@ -99,46 +102,77 @@ class MusicService : MediaSessionService() {
 
     private fun restorePlaybackState() {
         Log.d(TAG, "restorePlaybackState: starting state restoration")
+        isRestoringState = true  // Prevent saving state during restoration
+        
         serviceScope.launch {
-            // Restore playback mode
-            val repeatMode = playbackPreferences.getRepeatMode()
-            val shuffleMode = playbackPreferences.getShuffleModeEnabled()
-            player.repeatMode = repeatMode
-            player.shuffleModeEnabled = shuffleMode
-            Log.d(TAG, "restorePlaybackState: repeatMode=$repeatMode, shuffleMode=$shuffleMode")
+            try {
+                // Get saved state first
+                val repeatMode = playbackPreferences.getRepeatMode()
+                val savedShuffleMode = playbackPreferences.getShuffleModeEnabled()
+                val savedSongId = playbackPreferences.getCurrentSongId()
+                val savedIndex = playbackPreferences.getCurrentSongIndex()
+                val savedPosition = playbackPreferences.getSavedPosition()
+                
+                Log.d(TAG, "restorePlaybackState: repeatMode=$repeatMode, shuffleMode=$savedShuffleMode, songId=$savedSongId, index=$savedIndex")
 
-            val queueIds = playbackPreferences.getQueue()
-            val playlistContext = playbackPreferences.getPlaylistContext()
-            Log.d(TAG, "restorePlaybackState: queueIds=${queueIds.size}, playlistContext=$playlistContext")
-            
-            if (queueIds.isNotEmpty()) {
-                val songs = songRepository.getSongsByIds(queueIds)
-                Log.d(TAG, "restorePlaybackState: found ${songs.size} songs for ${queueIds.size} queue IDs")
+                val queueIds = playbackPreferences.getQueue()
+                val playlistContext = playbackPreferences.getPlaylistContext()
+                Log.d(TAG, "restorePlaybackState: queueIds=${queueIds.size}, playlistContext=$playlistContext")
                 
-                // Maintain order based on IDs
-                val sortedSongs = queueIds.mapNotNull { id -> songs.find { it.id == id } }
-                val mediaItems = sortedSongs.map { it.toMediaItem() }
-                
-                if (mediaItems.isNotEmpty()) {
-                    player.setMediaItems(mediaItems)
-                    val index = playbackPreferences.getCurrentSongIndex()
-                    val position = playbackPreferences.getSavedPosition()
+                if (queueIds.isNotEmpty()) {
+                    val songs = songRepository.getSongsByIds(queueIds)
+                    Log.d(TAG, "restorePlaybackState: found ${songs.size} songs for ${queueIds.size} queue IDs")
                     
-                    Log.d(TAG, "restorePlaybackState: seeking to index=$index, position=$position")
-                    if (index in mediaItems.indices) {
-                        player.seekTo(index, position)
+                    // Maintain order based on IDs
+                    val sortedSongs = queueIds.mapNotNull { id -> songs.find { it.id == id } }
+                    val mediaItems = sortedSongs.map { it.toMediaItem() }
+                    
+                    if (mediaItems.isNotEmpty()) {
+                        // Set repeat mode but NOT shuffle mode yet (to avoid shuffling the queue)
+                        player.repeatMode = repeatMode
+                        player.shuffleModeEnabled = false
+                        
+                        // Set media items
+                        player.setMediaItems(mediaItems)
+                        
+                        // Find the correct index using song ID (more reliable than saved index when shuffle was enabled)
+                        var targetIndex = savedIndex
+                        if (savedSongId > 0) {
+                            val foundIndex = mediaItems.indexOfFirst { it.mediaId == savedSongId.toString() }
+                            if (foundIndex >= 0) {
+                                targetIndex = foundIndex
+                                Log.d(TAG, "restorePlaybackState: found song by ID at index $foundIndex")
+                            } else {
+                                Log.w(TAG, "restorePlaybackState: song ID $savedSongId not found, using saved index $savedIndex")
+                            }
+                        }
+                        
+                        Log.d(TAG, "restorePlaybackState: seeking to index=$targetIndex, position=$savedPosition")
+                        if (targetIndex in mediaItems.indices) {
+                            player.seekTo(targetIndex, savedPosition)
+                        } else {
+                            Log.w(TAG, "restorePlaybackState: index $targetIndex out of range, mediaItems size=${mediaItems.size}")
+                        }
+                        
+                        player.prepare()
+                        // Do not auto-play
+                        player.pause()
+                        
+                        // Now enable shuffle mode if it was enabled (after seeking to the correct song)
+                        if (savedShuffleMode) {
+                            player.shuffleModeEnabled = true
+                            Log.d(TAG, "restorePlaybackState: enabled shuffle mode after restoration")
+                        }
+                        
+                        Log.d(TAG, "restorePlaybackState: state restored successfully")
                     } else {
-                        Log.w(TAG, "restorePlaybackState: index $index out of range, mediaItems size=${mediaItems.size}")
+                        Log.w(TAG, "restorePlaybackState: no media items to restore")
                     }
-                    player.prepare()
-                    // Do not auto-play
-                    player.pause()
-                    Log.d(TAG, "restorePlaybackState: state restored successfully")
                 } else {
-                    Log.w(TAG, "restorePlaybackState: no media items to restore")
+                    Log.d(TAG, "restorePlaybackState: no saved queue to restore")
                 }
-            } else {
-                Log.d(TAG, "restorePlaybackState: no saved queue to restore")
+            } finally {
+                isRestoringState = false  // Allow saving state again
             }
         }
     }
@@ -162,7 +196,9 @@ class MusicService : MediaSessionService() {
             
             override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
                 Log.d(TAG, "onTimelineChanged: windowCount=${timeline.windowCount}, reason=$reason")
-                saveQueueState()
+                if (!isRestoringState) {
+                    saveQueueState()
+                }
             }
         })
     }
@@ -170,7 +206,7 @@ class MusicService : MediaSessionService() {
     private fun startPeriodicSave() {
         serviceScope.launch {
             while (isActive) {
-                if (player.isPlaying) {
+                if (player.isPlaying && !isRestoringState) {
                     saveCurrentState()
                 }
                 delay(5000) // Save every 5 seconds
@@ -179,13 +215,27 @@ class MusicService : MediaSessionService() {
     }
 
     private fun saveCurrentState() {
+        if (isRestoringState) {
+            Log.d(TAG, "saveCurrentState: skipped (restoring state)")
+            return
+        }
+        
         val index = player.currentMediaItemIndex
         val position = player.currentPosition
+        val mediaItem = player.currentMediaItem
+        val songId = mediaItem?.mediaId?.toLongOrNull() ?: -1L
+        
         playbackPreferences.saveCurrentSongIndex(index)
+        playbackPreferences.saveCurrentSongId(songId)
         playbackPreferences.saveCurrentPosition(position)
     }
     
     private fun saveQueueState() {
+        if (isRestoringState) {
+            Log.d(TAG, "saveQueueState: skipped (restoring state)")
+            return
+        }
+        
         val mediaItems = List(player.mediaItemCount) { i -> player.getMediaItemAt(i) }
         val ids = mediaItems.mapNotNull { it.mediaId.toLongOrNull() }
         Log.d(TAG, "saveQueueState: saving ${ids.size} items")

@@ -64,20 +64,29 @@ class MusicViewModel @Inject constructor(
         // Load last played song and playlist context for immediate UI update
         viewModelScope.launch {
             val queueIds = playbackPreferences.getQueue()
+            val savedSongId = playbackPreferences.getCurrentSongId()
             val currentIndex = playbackPreferences.getCurrentSongIndex()
             val playlistContext = playbackPreferences.getPlaylistContext()
             
-            Log.d(TAG, "init: restoring state - queueIds=${queueIds.size}, currentIndex=$currentIndex, playlistContext=$playlistContext")
+            Log.d(TAG, "init: restoring state - queueIds=${queueIds.size}, savedSongId=$savedSongId, currentIndex=$currentIndex, playlistContext=$playlistContext")
             
             // Update the saved playlist context for UI to use
             _savedPlaylistContext.value = playlistContext
             
-            if (queueIds.isNotEmpty() && currentIndex in queueIds.indices) {
-                val songId = queueIds[currentIndex]
-                val songs = songRepository.getSongsByIds(listOf(songId))
+            // Prefer song ID over index (more reliable when shuffle was enabled)
+            val songIdToLoad = if (savedSongId > 0) {
+                savedSongId
+            } else if (queueIds.isNotEmpty() && currentIndex in queueIds.indices) {
+                queueIds[currentIndex]
+            } else {
+                null
+            }
+            
+            if (songIdToLoad != null) {
+                val songs = songRepository.getSongsByIds(listOf(songIdToLoad))
                 val song = songs.firstOrNull()
                 if (song != null) {
-                    Log.d(TAG, "init: restored song '${song.title}' at index $currentIndex")
+                    Log.d(TAG, "init: restored song '${song.title}' (id=$songIdToLoad)")
                     val mediaItem = song.toMediaItem()
                     val position = playbackPreferences.getSavedPosition()
                     val isFavorite = favoriteRepository.isFavoriteSync(song.filePath)
@@ -92,7 +101,7 @@ class MusicViewModel @Inject constructor(
                         )
                     }
                 } else {
-                    Log.w(TAG, "init: could not find song with id $songId")
+                    Log.w(TAG, "init: could not find song with id $songIdToLoad")
                 }
             } else {
                 Log.d(TAG, "init: no valid saved state to restore")

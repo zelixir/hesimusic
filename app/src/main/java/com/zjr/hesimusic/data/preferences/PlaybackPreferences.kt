@@ -43,6 +43,7 @@ class PlaybackPreferences @Inject constructor(
         
         private const val KEY_QUEUE_IDS = "queue_ids"
         private const val KEY_CURRENT_SONG_INDEX = "current_song_index"
+        private const val KEY_CURRENT_SONG_ID = "current_song_id"
         private const val KEY_CURRENT_POSITION = "current_position"
         private const val KEY_REPEAT_MODE = "repeat_mode"
         private const val KEY_SHUFFLE_MODE_ENABLED = "shuffle_mode_enabled"
@@ -85,6 +86,23 @@ class PlaybackPreferences @Inject constructor(
         val index = prefs.getInt(KEY_CURRENT_SONG_INDEX, 0)
         Log.d(TAG, "getCurrentSongIndex: $index")
         return index
+    }
+    
+    /**
+     * Save the current song ID. This is more reliable than index when shuffle mode is enabled.
+     */
+    fun saveCurrentSongId(songId: Long) {
+        prefs.edit().putLong(KEY_CURRENT_SONG_ID, songId).apply()
+        Log.d(TAG, "saveCurrentSongId: $songId")
+    }
+    
+    /**
+     * Get the saved current song ID.
+     */
+    fun getCurrentSongId(): Long {
+        val id = prefs.getLong(KEY_CURRENT_SONG_ID, -1L)
+        Log.d(TAG, "getCurrentSongId: $id")
+        return id
     }
 
     fun saveCurrentPosition(position: Long) {
