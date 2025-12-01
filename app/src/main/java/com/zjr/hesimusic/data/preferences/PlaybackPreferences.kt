@@ -2,6 +2,7 @@ package com.zjr.hesimusic.data.preferences
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.media3.common.Player
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -53,7 +54,7 @@ class PlaybackPreferences @Inject constructor(
     }
 
     fun getRepeatMode(): Int {
-        return prefs.getInt("repeat_mode", 2) // Default: REPEAT_MODE_ALL (list repeat)
+        return prefs.getInt("repeat_mode", Player.REPEAT_MODE_ALL)
     }
 
     fun saveShuffleModeEnabled(shuffleModeEnabled: Boolean) {
