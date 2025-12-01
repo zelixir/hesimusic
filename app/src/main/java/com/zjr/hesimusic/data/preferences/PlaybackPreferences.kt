@@ -91,11 +91,9 @@ class PlaybackPreferences @Inject constructor(
         prefs.edit().putLong(KEY_CURRENT_POSITION, position).apply()
     }
 
-    fun getCurrentPosition(): Long {
-        return prefs.getInt(KEY_CURRENT_POSITION, 0).toLong() // Stored as Long but getInt used? No, putLong used.
-    }
-    
-    // Fix for getCurrentPosition using getLong
+    /**
+     * Get the saved playback position. Uses getLong to correctly read the Long value.
+     */
     fun getLastPosition(): Long {
         val position = prefs.getLong(KEY_CURRENT_POSITION, 0L)
         Log.d(TAG, "getLastPosition: $position")

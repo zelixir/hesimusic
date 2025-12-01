@@ -32,10 +32,25 @@ fun FolderList(
     onSongClick: (List<Song>, Int, String) -> Unit  // Added folderPath parameter
 ) {
     // Start from saved path if available, otherwise use initial path
-    val startPath = remember(savedFolderPath) {
-        if (savedFolderPath != null && savedFolderPath.startsWith(initialPath)) {
-            Log.d(TAG, "FolderList: starting from saved path: $savedFolderPath")
-            savedFolderPath
+    // Use canonical path to prevent path traversal attacks
+    val startPath = remember(savedFolderPath, initialPath) {
+        if (savedFolderPath != null) {
+            try {
+                val savedFile = File(savedFolderPath).canonicalFile
+                val initialFile = File(initialPath).canonicalFile
+                // Verify the saved path is actually under the initial path (no path traversal)
+                if (savedFile.absolutePath.startsWith(initialFile.absolutePath + File.separator) ||
+                    savedFile.absolutePath == initialFile.absolutePath) {
+                    Log.d(TAG, "FolderList: starting from saved path: ${savedFile.absolutePath}")
+                    savedFile.absolutePath
+                } else {
+                    Log.w(TAG, "FolderList: saved path '$savedFolderPath' is outside initial path, ignoring")
+                    initialPath
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "FolderList: error validating saved path", e)
+                initialPath
+            }
         } else {
             Log.d(TAG, "FolderList: starting from initial path: $initialPath")
             initialPath
