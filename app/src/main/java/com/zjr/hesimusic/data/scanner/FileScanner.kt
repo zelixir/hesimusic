@@ -11,16 +11,28 @@ class FileScanner @Inject constructor(
 ) {
     private val supportedExtensions = setOf("mp3", "flac", "wav", "m4a", "aac", "ogg")
 
-    suspend fun scan(onProgress: suspend (String, Int) -> Unit): List<Song> {
-        val root = Environment.getExternalStorageDirectory()
+    suspend fun scan(
+        scanFolders: Set<String> = emptySet(),
+        excludedFolders: Set<String> = emptySet(),
+        onProgress: suspend (String, Int) -> Unit
+    ): List<Song> {
         val songs = mutableListOf<Song>()
         val cueReferencedFiles = mutableSetOf<String>() // Absolute paths
+
+        // Determine root directories to scan
+        val rootDirectories = if (scanFolders.isEmpty()) {
+            listOf(Environment.getExternalStorageDirectory())
+        } else {
+            scanFolders.map { File(it) }.filter { it.exists() && it.isDirectory }
+        }
 
         // 1. Find all CUE files first
         val cueFiles = mutableListOf<File>()
         val audioFiles = mutableListOf<File>()
 
-        scanDirectory(root, cueFiles, audioFiles, songs.size, onProgress)
+        for (rootDir in rootDirectories) {
+            scanDirectory(rootDir, cueFiles, audioFiles, songs.size, excludedFolders, onProgress)
+        }
 
         // 2. Process CUE files
         cueFiles.forEach { cueFile ->
@@ -122,16 +134,25 @@ class FileScanner @Inject constructor(
         cueFiles: MutableList<File>,
         audioFiles: MutableList<File>,
         currentSongCount: Int,
+        excludedFolders: Set<String>,
         onProgress: suspend (String, Int) -> Unit
     ) {
         val files = dir.listFiles() ?: return
 
         for (file in files) {
             if (file.isDirectory) {
-                val shouldEnter = !file.path.contains("/Recordings/", ignoreCase = true) && !file.path.contains("/sound_recorder/")
+                // Check if this directory should be excluded
+                val isExcluded = excludedFolders.any { excluded ->
+                    file.absolutePath == excluded || file.absolutePath.startsWith("$excluded/")
+                }
+                
+                val shouldEnter = !isExcluded &&
+                    !file.path.contains("/Recordings/", ignoreCase = true) && 
+                    !file.path.contains("/sound_recorder/")
+                    
                 if (shouldEnter) {
                     onProgress(file.absolutePath, currentSongCount)
-                    scanDirectory(file, cueFiles, audioFiles, currentSongCount, onProgress)
+                    scanDirectory(file, cueFiles, audioFiles, currentSongCount, excludedFolders, onProgress)
                 }
             } else {
                 val ext = file.extension.lowercase()
