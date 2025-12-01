@@ -13,7 +13,9 @@ import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.data.preferences.PlaybackContext
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
+import com.zjr.hesimusic.data.preferences.PlaylistType
 import com.zjr.hesimusic.data.repository.SongRepository
 import com.zjr.hesimusic.service.MusicService
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -42,6 +44,10 @@ class MusicViewModel @Inject constructor(
 
     private val _sleepTimerState = MutableStateFlow<Long?>(null)
     val sleepTimerState: StateFlow<Long?> = _sleepTimerState.asStateFlow()
+    
+    // Track the current playback context
+    private var currentPlaylistType: PlaylistType = PlaylistType.ALL_SONGS
+    private var currentPlaylistIdentifier: String = ""
 
     private var sleepTimer: CountDownTimer? = null
 
@@ -66,6 +72,12 @@ class MusicViewModel @Inject constructor(
                     }
                 }
             }
+            
+            // Restore the playback context (playlist type and identifier)
+            playbackPreferences.getPlaybackContext()?.let { context ->
+                currentPlaylistType = context.playlistType
+                currentPlaylistIdentifier = context.identifier
+            }
         }
 
         val sessionToken = SessionToken(context, ComponentName(context, MusicService::class.java))
@@ -83,6 +95,8 @@ class MusicViewModel @Inject constructor(
 
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                     updateState()
+                    // Update the playback context when track changes
+                    saveCurrentPlaybackContext()
                 }
 
                 override fun onRepeatModeChanged(repeatMode: Int) {
@@ -133,6 +147,19 @@ class MusicViewModel @Inject constructor(
             }
         }
     }
+    
+    /**
+     * Save the current playback context (current song ID) when track changes
+     */
+    private fun saveCurrentPlaybackContext() {
+        mediaController?.currentMediaItem?.mediaId?.toLongOrNull()?.let { songId ->
+            playbackPreferences.savePlaybackContext(
+                currentPlaylistType,
+                currentPlaylistIdentifier,
+                songId
+            )
+        }
+    }
 
     fun play(song: Song) {
         mediaController?.let { controller ->
@@ -143,13 +170,37 @@ class MusicViewModel @Inject constructor(
         }
     }
     
-    fun playList(songs: List<Song>, startIndex: Int = 0) {
-         mediaController?.let { controller ->
+    /**
+     * Play a list of songs from a specific playlist context.
+     * Saves the context for restoration when the app restarts.
+     */
+    fun playList(
+        songs: List<Song>, 
+        startIndex: Int = 0,
+        playlistType: PlaylistType = PlaylistType.ALL_SONGS,
+        playlistIdentifier: String = ""
+    ) {
+        if (songs.isEmpty()) return
+        
+        mediaController?.let { controller ->
             val mediaItems = songs.map { it.toMediaItem() }
             controller.setMediaItems(mediaItems, startIndex, 0)
             controller.prepare()
             controller.play()
+            
+            // Save the playback context
+            currentPlaylistType = playlistType
+            currentPlaylistIdentifier = playlistIdentifier
+            val songId = songs.getOrNull(startIndex)?.id ?: -1L
+            playbackPreferences.savePlaybackContext(playlistType, playlistIdentifier, songId)
         }
+    }
+    
+    /**
+     * Get the saved playback context for restoring the playlist view on app startup
+     */
+    fun getPlaybackContext(): PlaybackContext? {
+        return playbackPreferences.getPlaybackContext()
     }
 
     fun pause() {

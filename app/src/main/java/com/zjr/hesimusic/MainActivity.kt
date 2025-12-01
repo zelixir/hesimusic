@@ -6,13 +6,22 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Scaffold
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.zjr.hesimusic.data.preferences.PlaylistType
 import com.zjr.hesimusic.ui.about.AboutScreen
+import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.ui.debug.TagDebugScreen
 import com.zjr.hesimusic.ui.equalizer.EqualizerScreen
 import com.zjr.hesimusic.ui.library.SongListScreen
@@ -36,6 +45,43 @@ class MainActivity : ComponentActivity() {
         setContent {
             HesimusicTheme {
                 val navController = rememberNavController()
+                val musicViewModel: MusicViewModel = hiltViewModel()
+                
+                // Remember initial navigation state
+                var initialTab by remember { mutableIntStateOf(0) }
+                var initialFolderPath by remember { mutableStateOf<String?>(null) }
+                var hasRestoredContext by remember { mutableStateOf(false) }
+
+                // Restore playback context on first launch
+                LaunchedEffect(Unit) {
+                    if (!hasRestoredContext) {
+                        hasRestoredContext = true
+                        val context = musicViewModel.getPlaybackContext()
+                        if (context != null) {
+                            when (context.playlistType) {
+                                PlaylistType.ALL_SONGS -> {
+                                    // Stay on songs tab (index 0)
+                                    initialTab = 0
+                                }
+                                PlaylistType.ARTIST -> {
+                                    // Navigate to artist details
+                                    val encodedName = URLEncoder.encode(context.identifier, StandardCharsets.UTF_8.toString()).replace("+", "%20")
+                                    navController.navigate("details/artist/$encodedName")
+                                }
+                                PlaylistType.ALBUM -> {
+                                    // Navigate to album details
+                                    val encodedName = URLEncoder.encode(context.identifier, StandardCharsets.UTF_8.toString()).replace("+", "%20")
+                                    navController.navigate("details/album/$encodedName")
+                                }
+                                PlaylistType.FOLDER -> {
+                                    // Switch to folder tab and navigate to the specific folder
+                                    initialTab = 3
+                                    initialFolderPath = context.identifier
+                                }
+                            }
+                        }
+                    }
+                }
                 
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     // We ignore innerPadding here because each screen handles its own Scaffold/Padding
@@ -55,6 +101,9 @@ class MainActivity : ComponentActivity() {
                         
                         composable("home") {
                             MainScreen(
+                                musicViewModel = musicViewModel,
+                                initialTab = initialTab,
+                                initialFolderPath = initialFolderPath,
                                 onArtistClick = { artist ->
                                     val encodedName = URLEncoder.encode(artist.name, StandardCharsets.UTF_8.toString()).replace("+", "%20")
                                     navController.navigate("details/artist/$encodedName")
@@ -114,6 +163,7 @@ class MainActivity : ComponentActivity() {
                             SongListScreen(
                                 type = type,
                                 value = value,
+                                musicViewModel = musicViewModel,
                                 onBack = { navController.popBackStack() },
                                 onSongClick = { /* TODO: Play */ },
                                 onScanClick = { navController.navigate("scan") },

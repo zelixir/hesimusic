@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.Player
 import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.data.preferences.PlaylistType
 import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.ui.main.BottomPlayerBar
 
@@ -46,8 +47,22 @@ fun SongListScreen(
     val songs by songsFlow.collectAsState(initial = emptyList())
     val musicUiState by musicViewModel.uiState.collectAsState()
 
-    val handleSongClick = remember(musicViewModel) {
-        { list: List<Song>, index: Int -> musicViewModel.playList(list, index) }
+    // Determine the playlist type based on the type parameter
+    val playlistType = when (type) {
+        "artist" -> PlaylistType.ARTIST
+        "album" -> PlaylistType.ALBUM
+        else -> PlaylistType.ALL_SONGS
+    }
+
+    val handleSongClick = remember(musicViewModel, type, value) {
+        { list: List<Song>, index: Int -> 
+            musicViewModel.playList(
+                songs = list, 
+                startIndex = index,
+                playlistType = playlistType,
+                playlistIdentifier = value
+            )
+        }
     }
 
     Scaffold(

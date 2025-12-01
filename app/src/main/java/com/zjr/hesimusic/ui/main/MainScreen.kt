@@ -12,6 +12,7 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
@@ -21,6 +22,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.Player
 import com.zjr.hesimusic.data.model.Album
 import com.zjr.hesimusic.data.model.Artist
+import com.zjr.hesimusic.data.preferences.PlaylistType
 import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.ui.library.AlbumList
 import com.zjr.hesimusic.ui.library.ArtistList
@@ -41,12 +43,21 @@ fun MainScreen(
     onSettingsClick: () -> Unit,
     onEqualizerClick: () -> Unit,
     onAboutClick: () -> Unit,
-    onSleepTimerClick: () -> Unit
+    onSleepTimerClick: () -> Unit,
+    initialTab: Int = 0,
+    initialFolderPath: String? = null
 ) {
-    val pagerState = rememberPagerState(pageCount = { 4 })
+    val pagerState = rememberPagerState(initialPage = initialTab, pageCount = { 4 })
     val scope = rememberCoroutineScope()
     val titles = listOf("歌曲", "歌手", "专辑", "文件夹")
     val musicUiState by musicViewModel.uiState.collectAsState()
+
+    // Navigate to the initial tab if it's different from 0
+    LaunchedEffect(initialTab) {
+        if (initialTab != 0) {
+            pagerState.scrollToPage(initialTab)
+        }
+    }
 
     Scaffold(
         bottomBar = {
@@ -110,7 +121,14 @@ fun MainScreen(
                         SongList(
                             songs = songs,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
-                            onSongClick = { list, index -> musicViewModel.playList(list, index) }
+                            onSongClick = { list, index -> 
+                                musicViewModel.playList(
+                                    songs = list, 
+                                    startIndex = index,
+                                    playlistType = PlaylistType.ALL_SONGS,
+                                    playlistIdentifier = ""
+                                ) 
+                            }
                         )
                     }
                     1 -> {
@@ -125,7 +143,15 @@ fun MainScreen(
                         FolderList(
                             viewModel = viewModel,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
-                            onSongClick = { list, index -> musicViewModel.playList(list, index) }
+                            initialPath = initialFolderPath ?: "/storage/emulated/0",
+                            onSongClick = { list, index, folderPath -> 
+                                musicViewModel.playList(
+                                    songs = list, 
+                                    startIndex = index,
+                                    playlistType = PlaylistType.FOLDER,
+                                    playlistIdentifier = folderPath
+                                ) 
+                            }
                         )
                     }
                 }

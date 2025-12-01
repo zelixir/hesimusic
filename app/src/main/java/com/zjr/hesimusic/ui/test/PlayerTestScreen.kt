@@ -12,6 +12,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.data.preferences.PlaylistType
 import com.zjr.hesimusic.ui.common.MusicViewModel
 
 @Composable
@@ -28,7 +29,12 @@ fun PlayerTestScreen(
         ) {
             itemsIndexed(songs) { index, song ->
                 SongItem(song = song, onClick = {
-                    musicViewModel.playList(songs, index)
+                    musicViewModel.playList(
+                        songs = songs, 
+                        startIndex = index,
+                        playlistType = PlaylistType.ALL_SONGS,
+                        playlistIdentifier = ""
+                    )
                 })
             }
         }
