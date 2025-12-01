@@ -8,6 +8,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -17,6 +18,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.Player
 import com.zjr.hesimusic.data.model.Album
@@ -43,9 +45,9 @@ fun MainScreen(
     onAboutClick: () -> Unit,
     onSleepTimerClick: () -> Unit
 ) {
-    val pagerState = rememberPagerState(pageCount = { 4 })
+    val pagerState = rememberPagerState(pageCount = { 5 })
     val scope = rememberCoroutineScope()
-    val titles = listOf("歌曲", "歌手", "专辑", "文件夹")
+    val titles = listOf("歌曲", "收藏", "歌手", "专辑", "文件夹")
     val musicUiState by musicViewModel.uiState.collectAsState()
 
     Scaffold(
@@ -85,7 +87,10 @@ fun MainScreen(
         }
     ) { innerPadding ->
         Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
-            TabRow(selectedTabIndex = pagerState.currentPage) {
+            ScrollableTabRow(
+                selectedTabIndex = pagerState.currentPage,
+                edgePadding = 0.dp
+            ) {
                 titles.forEachIndexed { index, title ->
                     Tab(
                         selected = pagerState.currentPage == index,
@@ -114,14 +119,22 @@ fun MainScreen(
                         )
                     }
                     1 -> {
+                        val favoriteSongs by viewModel.favoriteSongs.collectAsState()
+                        SongList(
+                            songs = favoriteSongs,
+                            currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
+                            onSongClick = { list, index -> musicViewModel.playList(list, index) }
+                        )
+                    }
+                    2 -> {
                         val artists by viewModel.artists.collectAsState()
                         ArtistList(artists = artists, onArtistClick = onArtistClick)
                     }
-                    2 -> {
+                    3 -> {
                         val albums by viewModel.albums.collectAsState()
                         AlbumList(albums = albums, onAlbumClick = onAlbumClick)
                     }
-                    3 -> {
+                    4 -> {
                         FolderList(
                             viewModel = viewModel,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,

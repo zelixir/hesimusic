@@ -14,6 +14,7 @@ import com.google.common.util.concurrent.MoreExecutors
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
+import com.zjr.hesimusic.data.repository.FavoriteRepository
 import com.zjr.hesimusic.data.repository.SongRepository
 import com.zjr.hesimusic.service.MusicService
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -31,7 +32,8 @@ import javax.inject.Inject
 class MusicViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val playbackPreferences: PlaybackPreferences,
-    private val songRepository: SongRepository
+    private val songRepository: SongRepository,
+    private val favoriteRepository: FavoriteRepository
 ) : ViewModel() {
 
     private var mediaControllerFuture: ListenableFuture<MediaController>? = null
@@ -57,11 +59,14 @@ class MusicViewModel @Inject constructor(
                 if (song != null) {
                     val mediaItem = song.toMediaItem()
                     val position = playbackPreferences.getLastPosition()
+                    val isFavorite = favoriteRepository.isFavoriteSync(song.filePath)
                     _uiState.update {
                         it.copy(
                             currentMediaItem = mediaItem,
                             currentPosition = position,
-                            duration = song.duration
+                            duration = song.duration,
+                            currentSongFilePath = song.filePath,
+                            isCurrentSongFavorite = isFavorite
                         )
                     }
                 }
@@ -83,6 +88,8 @@ class MusicViewModel @Inject constructor(
 
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                     updateState()
+                    // Update favorite status when song changes
+                    updateCurrentSongFavoriteStatus()
                 }
 
                 override fun onRepeatModeChanged(repeatMode: Int) {
@@ -98,8 +105,19 @@ class MusicViewModel @Inject constructor(
                 }
             })
             updateState()
+            updateCurrentSongFavoriteStatus()
             startProgressUpdateLoop()
         }, MoreExecutors.directExecutor())
+    }
+
+    private fun updateCurrentSongFavoriteStatus() {
+        viewModelScope.launch {
+            val currentFilePath = _uiState.value.currentSongFilePath
+            if (currentFilePath != null) {
+                val isFavorite = favoriteRepository.isFavoriteSync(currentFilePath)
+                _uiState.update { it.copy(isCurrentSongFavorite = isFavorite) }
+            }
+        }
     }
 
     private fun startProgressUpdateLoop() {
@@ -117,6 +135,8 @@ class MusicViewModel @Inject constructor(
         mediaController?.let { controller ->
             val playlist = List(controller.mediaItemCount) { i -> controller.getMediaItemAt(i) }
             val audioSessionId = controller.sessionExtras.getInt("AUDIO_SESSION_ID", 0)
+            // Extract file path from current media item URI
+            val currentFilePath = controller.currentMediaItem?.localConfiguration?.uri?.path
             _uiState.update {
                 it.copy(
                     isPlaying = controller.isPlaying,
@@ -128,7 +148,8 @@ class MusicViewModel @Inject constructor(
                     duration = controller.duration,
                     bufferedPosition = controller.bufferedPosition,
                     playlist = playlist,
-                    audioSessionId = audioSessionId
+                    audioSessionId = audioSessionId,
+                    currentSongFilePath = currentFilePath
                 )
             }
         }
@@ -202,6 +223,14 @@ class MusicViewModel @Inject constructor(
         mediaController?.clearMediaItems()
     }
 
+    fun toggleCurrentSongFavorite() {
+        val filePath = _uiState.value.currentSongFilePath ?: return
+        viewModelScope.launch {
+            val newFavoriteState = favoriteRepository.toggleFavorite(filePath)
+            _uiState.update { it.copy(isCurrentSongFavorite = newFavoriteState) }
+        }
+    }
+
     fun startSleepTimer(minutes: Int) {
         sleepTimer?.cancel()
         sleepTimer = object : CountDownTimer(minutes * 60 * 1000L, 1000) {
@@ -239,5 +268,7 @@ data class MusicUiState(
     val duration: Long = 0L,
     val bufferedPosition: Long = 0L,
     val playlist: List<MediaItem> = emptyList(),
-    val audioSessionId: Int = 0
+    val audioSessionId: Int = 0,
+    val currentSongFilePath: String? = null,
+    val isCurrentSongFavorite: Boolean = false
 )
