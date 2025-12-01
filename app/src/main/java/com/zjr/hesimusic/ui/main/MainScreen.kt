@@ -64,44 +64,46 @@ fun MainScreen(
     var savedFolderPath by remember { mutableStateOf<String?>(null) }
     
     // Handle restoring tab position based on saved playlist context
-    // Only execute once when savedPlaylistContext is available
+    // Only handles GLOBAL, FAVORITES, and FOLDER types here
+    // ARTIST and ALBUM types are handled by MainActivity navigation
     LaunchedEffect(savedPlaylistContext) {
         savedPlaylistContext?.let { context ->
-            Log.d(TAG, "LaunchedEffect: restoring tab for context type=${context.type}, value=${context.value}")
-            val targetPage = when (context.type) {
-                PlaylistType.GLOBAL -> 0
-                PlaylistType.FAVORITES -> 1
-                PlaylistType.ARTIST -> 2  // Artist tab - but will need to navigate to detail
-                PlaylistType.ALBUM -> 3   // Album tab - but will need to navigate to detail
-                PlaylistType.FOLDER -> 4  // Folder tab
-            }
+            Log.d(TAG, "LaunchedEffect: checking context type=${context.type}, value=${context.value}")
             
-            // Navigate to the correct tab
-            if (pagerState.currentPage != targetPage) {
-                Log.d(TAG, "LaunchedEffect: scrolling from ${pagerState.currentPage} to $targetPage")
-                pagerState.scrollToPage(targetPage)
-            }
-            
-            // Handle different context types
+            // Only handle types that need tab switching here
+            // ARTIST and ALBUM are handled by MainActivity's LaunchedEffect
             when (context.type) {
-                PlaylistType.ARTIST -> {
-                    Log.d(TAG, "LaunchedEffect: should navigate to artist detail: ${context.value}")
-                    // The navigation to artist detail will be handled by MainActivity
+                PlaylistType.GLOBAL -> {
+                    val targetPage = 0
+                    if (pagerState.currentPage != targetPage) {
+                        Log.d(TAG, "LaunchedEffect: scrolling to GLOBAL tab (0)")
+                        pagerState.scrollToPage(targetPage)
+                    }
+                    musicViewModel.consumeSavedPlaylistContext()
                 }
-                PlaylistType.ALBUM -> {
-                    Log.d(TAG, "LaunchedEffect: should navigate to album detail: ${context.value}")
-                    // The navigation to album detail will be handled by MainActivity
+                PlaylistType.FAVORITES -> {
+                    val targetPage = 1
+                    if (pagerState.currentPage != targetPage) {
+                        Log.d(TAG, "LaunchedEffect: scrolling to FAVORITES tab (1)")
+                        pagerState.scrollToPage(targetPage)
+                    }
+                    musicViewModel.consumeSavedPlaylistContext()
                 }
                 PlaylistType.FOLDER -> {
+                    val targetPage = 4
+                    if (pagerState.currentPage != targetPage) {
+                        Log.d(TAG, "LaunchedEffect: scrolling to FOLDER tab (4)")
+                        pagerState.scrollToPage(targetPage)
+                    }
                     // Save the folder path for FolderList to use
                     Log.d(TAG, "LaunchedEffect: saving folder path for FolderList: ${context.value}")
                     savedFolderPath = context.value
-                    // Consume the context here
                     musicViewModel.consumeSavedPlaylistContext()
                 }
-                else -> {
-                    // For GLOBAL, FAVORITES - just stay on the tab and consume context
-                    musicViewModel.consumeSavedPlaylistContext()
+                PlaylistType.ARTIST, PlaylistType.ALBUM -> {
+                    // These are handled by MainActivity's LaunchedEffect
+                    // Don't do anything here to avoid race conditions
+                    Log.d(TAG, "LaunchedEffect: ARTIST/ALBUM will be handled by MainActivity")
                 }
             }
         }
