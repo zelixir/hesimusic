@@ -34,14 +34,33 @@ private const val TAG = "FolderList"
  */
 private fun validateSavedPath(savedPath: String, initialPath: String): String? {
     return try {
+        val initialFile = File(initialPath)
+        val savedFile = File(savedPath)
+        
+        // Check if paths exist before using toRealPath
+        if (!initialFile.exists()) {
+            Log.w(TAG, "validateSavedPath: initial path '$initialPath' does not exist")
+            return null
+        }
+        
         val initialNioPath: Path = Paths.get(initialPath).toRealPath()
         val savedNioPath: Path = Paths.get(savedPath).normalize()
         
         // Resolve the saved path against initial path and normalize it
-        val resolvedPath = if (savedNioPath.isAbsolute) {
+        val resolvedPath: Path = if (savedNioPath.isAbsolute) {
+            // Check if saved path exists before using toRealPath
+            if (!savedFile.exists()) {
+                Log.w(TAG, "validateSavedPath: saved path '$savedPath' does not exist")
+                return null
+            }
             savedNioPath.toRealPath()
         } else {
-            initialNioPath.resolve(savedNioPath).normalize().toRealPath()
+            val resolved = initialNioPath.resolve(savedNioPath).normalize()
+            if (!resolved.toFile().exists()) {
+                Log.w(TAG, "validateSavedPath: resolved path '$resolved' does not exist")
+                return null
+            }
+            resolved.toRealPath()
         }
         
         // Verify the resolved path starts with the initial path
