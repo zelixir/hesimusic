@@ -1,7 +1,6 @@
 package com.zjr.hesimusic.ui.player
 
 import android.media.audiofx.Equalizer
-import android.text.format.DateUtils
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -35,9 +34,6 @@ import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.utils.TimeFormatter
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.util.Formatter
-import java.util.Locale
-import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

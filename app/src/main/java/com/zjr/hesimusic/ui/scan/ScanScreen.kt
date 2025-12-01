@@ -268,6 +268,11 @@ private fun FolderSelectionCard(
     }
 }
 
+/**
+ * Formats elapsed time for scan progress display.
+ * Returns format "MM:SS.T" where T is tenths of a second.
+ * This is different from TimeFormatter.formatTime() which is used for media duration.
+ */
 fun formatTime(ms: Long): String {
     // Handle negative values
     if (ms < 0) {
