@@ -143,6 +143,8 @@ class MusicViewModel @Inject constructor(
             // Extract file path from current media item URI
             val currentFilePath = controller.currentMediaItem?.localConfiguration?.uri?.path
             // Extract start position from clipping configuration (for CUE tracks)
+            // This corresponds to Song.startPosition which is set in SongMapper.toMediaItem()
+            // For non-CUE tracks, clippingConfiguration is not set so we default to 0L
             val currentStartPosition = controller.currentMediaItem?.clippingConfiguration?.startPositionMs ?: 0L
             val safePosition = controller.currentPosition.coerceAtLeast(0L)
             
