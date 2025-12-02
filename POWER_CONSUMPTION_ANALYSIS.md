@@ -6,11 +6,11 @@
 
 ## 二、后台耗电问题分析
 
-### 问题1: MusicService 中的周期性状态保存 (高优先级)
+### 问题1: MusicService 中的周期性状态保存 (高优先级) ✅ 已修复
 
 **文件**: `app/src/main/java/com/zjr/hesimusic/service/MusicService.kt`
 
-**问题代码** (第138-147行):
+**原问题代码**:
 ```kotlin
 private fun startPeriodicSave() {
     serviceScope.launch {
@@ -32,7 +32,7 @@ private fun startPeriodicSave() {
   - 磁盘 I/O 开销
   - 电池消耗
 
-**优化方案**:
+**已实施的修复**:
 ```kotlin
 private fun startPeriodicSave() {
     serviceScope.launch {
@@ -40,28 +40,7 @@ private fun startPeriodicSave() {
             if (player.isPlaying) {
                 saveCurrentState()
             }
-            delay(30000) // 优化: 改为每30秒保存一次
-        }
-    }
-}
-```
-
-或者更进一步的优化：
-```kotlin
-private var lastSavedPosition: Long = 0
-
-private fun startPeriodicSave() {
-    serviceScope.launch {
-        while (isActive) {
-            if (player.isPlaying) {
-                val currentPosition = player.currentPosition
-                // 仅当播放位置变化超过30秒才保存
-                if (currentPosition - lastSavedPosition > 30000) {
-                    saveCurrentState()
-                    lastSavedPosition = currentPosition
-                }
-            }
-            delay(30000)
+            delay(30000) // Save every 30 seconds to reduce battery consumption
         }
     }
 }
@@ -69,11 +48,11 @@ private fun startPeriodicSave() {
 
 ---
 
-### 问题2: MusicViewModel 中的进度更新循环 (高优先级)
+### 问题2: MusicViewModel 中的进度更新循环 (高优先级) ✅ 已修复
 
 **文件**: `app/src/main/java/com/zjr/hesimusic/ui/common/MusicViewModel.kt`
 
-**问题代码** (第105-114行):
+**原问题代码**:
 ```kotlin
 private fun startProgressUpdateLoop() {
     viewModelScope.launch {
@@ -92,11 +71,10 @@ private fun startProgressUpdateLoop() {
 - 即使应用在后台，该循环仍然运行
 - `updateState()` 涉及多次 MediaController 的属性读取和 StateFlow 更新
 
-**优化方案**:
+**已实施的修复**:
 
-方案A - 使用 ProcessLifecycleOwner 实现生命周期感知:
+1. 在 `HesiMusicApplication.kt` 中添加了 `AppLifecycleObserver`:
 ```kotlin
-// 在 Application 或 ViewModel 中添加前台检测
 class AppLifecycleObserver : DefaultLifecycleObserver {
     var isAppInForeground = false
         private set
@@ -109,44 +87,19 @@ class AppLifecycleObserver : DefaultLifecycleObserver {
         isAppInForeground = false
     }
 }
+```
 
-// 在 HesiMusicApplication 中注册
-class HesiMusicApplication : Application() {
-    val lifecycleObserver = AppLifecycleObserver()
-    
-    override fun onCreate() {
-        super.onCreate()
-        ProcessLifecycleOwner.get().lifecycle.addObserver(lifecycleObserver)
-    }
-}
-
-// 在 MusicViewModel 中使用
+2. 在 `MusicViewModel.kt` 中使用生命周期感知:
+```kotlin
 private fun startProgressUpdateLoop() {
     viewModelScope.launch {
+        val app = context.applicationContext as HesiMusicApplication
         while (isActive) {
-            val app = context.applicationContext as HesiMusicApplication
+            // Only update UI when app is in foreground and music is playing
             if (mediaController?.isPlaying == true && app.lifecycleObserver.isAppInForeground) {
                 updateState()
             }
             delay(1000)
-        }
-    }
-}
-```
-
-方案B - 使用 Handler 配合 Lifecycle:
-```kotlin
-// 更简单的方案：在 Compose 中使用 LaunchedEffect 配合 lifecycle
-@Composable
-fun PlayerProgressTracker(viewModel: MusicViewModel) {
-    val lifecycleOwner = LocalLifecycleOwner.current
-    
-    LaunchedEffect(lifecycleOwner) {
-        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            while (true) {
-                viewModel.updateProgressIfPlaying()
-                delay(1000)
-            }
         }
     }
 }
@@ -449,20 +402,20 @@ val songs: StateFlow<List<Song>> = repository.getAllSongs()
 
 ## 三、优化优先级总结
 
-| 优先级 | 问题 | 预期改善 |
-|--------|------|----------|
-| 🔴 高 | 周期性状态保存 (5秒) | 减少80%的磁盘I/O |
-| 🔴 高 | 进度更新循环 (1秒) | 减少后台CPU唤醒 |
-| 🟡 中 | SharedPreferences 多次写入 | 减少50%的磁盘I/O |
-| 🟡 中 | 事件监听器过度保存 | 减少冗余保存操作 |
-| 🟢 低 | 扫描计时器 (100ms) | UI性能优化 |
-| 🟢 低 | Equalizer 资源管理 | 避免内存泄漏 |
+| 优先级 | 问题 | 状态 | 预期改善 |
+|--------|------|------|----------|
+| 🔴 高 | 周期性状态保存 (5秒→30秒) | ✅ 已修复 | 减少80%的磁盘I/O |
+| 🔴 高 | 进度更新循环 (后台检测) | ✅ 已修复 | 减少后台CPU唤醒 |
+| 🟡 中 | SharedPreferences 多次写入 | 待优化 | 减少50%的磁盘I/O |
+| 🟡 中 | 事件监听器过度保存 | 待优化 | 减少冗余保存操作 |
+| 🟢 低 | 扫描计时器 (100ms) | 待优化 | UI性能优化 |
+| 🟢 低 | Equalizer 资源管理 | 待优化 | 避免内存泄漏 |
 
 ## 四、实施建议
 
-### 第一阶段 - 立即修复 (高优先级)
-1. 将周期性保存间隔从 5秒 改为 30秒
-2. 添加后台检测，在应用后台时暂停进度更新循环
+### 第一阶段 - 立即修复 (高优先级) ✅ 已完成
+1. ✅ 将周期性保存间隔从 5秒 改为 30秒
+2. ✅ 添加后台检测，在应用后台时暂停进度更新循环
 
 ### 第二阶段 - 优化改进 (中优先级)
 1. 合并 PlaybackPreferences 的多次写入操作

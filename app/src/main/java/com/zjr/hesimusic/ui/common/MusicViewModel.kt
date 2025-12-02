@@ -11,6 +11,7 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
+import com.zjr.hesimusic.HesiMusicApplication
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
@@ -125,8 +126,11 @@ class MusicViewModel @Inject constructor(
 
     private fun startProgressUpdateLoop() {
         viewModelScope.launch {
+            val app = context.applicationContext as HesiMusicApplication
             while (isActive) {
-                if (mediaController?.isPlaying == true) {
+                // Only update UI when app is in foreground and music is playing
+                // This reduces battery consumption by avoiding unnecessary updates in background
+                if (mediaController?.isPlaying == true && app.lifecycleObserver.isAppInForeground) {
                     updateState()
                 }
                 delay(1000) // Update every second
