@@ -153,6 +153,13 @@ fun BottomPlayerBar(
                             }
                         )
                         DropdownMenuItem(
+                            text = { Text("扫描音乐") },
+                            onClick = { 
+                                showMenu = false
+                                onScanClick()
+                            }
+                        )
+                        DropdownMenuItem(
                             text = { Text("设置") },
                             onClick = { 
                                 showMenu = false
@@ -167,13 +174,6 @@ fun BottomPlayerBar(
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("关于") },
-                            onClick = { 
-                                showMenu = false
-                                onAboutClick()
-                            }
-                        )
-                        DropdownMenuItem(
                             text = { Text("睡眠定时") },
                             onClick = { 
                                 showMenu = false
@@ -181,10 +181,10 @@ fun BottomPlayerBar(
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("扫描音乐") },
+                            text = { Text("关于") },
                             onClick = { 
                                 showMenu = false
-                                onScanClick()
+                                onAboutClick()
                             }
                         )
                     }

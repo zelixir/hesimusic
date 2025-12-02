@@ -19,10 +19,13 @@ class ScanRepository @Inject constructor(
     private val fileScanner: FileScanner,
     private val songDao: SongDao
 ) {
-    fun scanAndSave(): Flow<ScanStatus> = flow {
+    fun scanAndSave(
+        scanFolders: Set<String> = emptySet(),
+        excludedFolders: Set<String> = emptySet()
+    ): Flow<ScanStatus> = flow {
         emit(ScanStatus.Scanning("Starting...", 0))
         try {
-            val songs = fileScanner.scan { path, count ->
+            val songs = fileScanner.scan(scanFolders, excludedFolders) { path, count ->
                 emit(ScanStatus.Scanning(path, count))
             }
             emit(ScanStatus.Scanning("Saving to database...", songs.size))

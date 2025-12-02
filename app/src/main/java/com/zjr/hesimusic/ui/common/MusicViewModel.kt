@@ -14,6 +14,7 @@ import com.google.common.util.concurrent.MoreExecutors
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
+import com.zjr.hesimusic.data.repository.FavoriteRepository
 import com.zjr.hesimusic.data.repository.SongRepository
 import com.zjr.hesimusic.service.MusicService
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -31,7 +32,8 @@ import javax.inject.Inject
 class MusicViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val playbackPreferences: PlaybackPreferences,
-    private val songRepository: SongRepository
+    private val songRepository: SongRepository,
+    private val favoriteRepository: FavoriteRepository
 ) : ViewModel() {
 
     private var mediaControllerFuture: ListenableFuture<MediaController>? = null
@@ -57,11 +59,17 @@ class MusicViewModel @Inject constructor(
                 if (song != null) {
                     val mediaItem = song.toMediaItem()
                     val position = playbackPreferences.getLastPosition()
+                    val isFavorite = favoriteRepository.isFavoriteSync(song.filePath)
+                    // Ensure duration is valid (not negative)
+                    val safeDuration = song.duration.coerceAtLeast(0L)
+                    val safePosition = position.coerceAtLeast(0L)
                     _uiState.update {
                         it.copy(
                             currentMediaItem = mediaItem,
-                            currentPosition = position,
-                            duration = song.duration
+                            currentPosition = safePosition,
+                            duration = safeDuration,
+                            currentSongFilePath = song.filePath,
+                            isCurrentSongFavorite = isFavorite
                         )
                     }
                 }
@@ -83,6 +91,8 @@ class MusicViewModel @Inject constructor(
 
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                     updateState()
+                    // Update favorite status when song changes
+                    updateCurrentSongFavoriteStatus()
                 }
 
                 override fun onRepeatModeChanged(repeatMode: Int) {
@@ -98,8 +108,19 @@ class MusicViewModel @Inject constructor(
                 }
             })
             updateState()
+            updateCurrentSongFavoriteStatus()
             startProgressUpdateLoop()
         }, MoreExecutors.directExecutor())
+    }
+
+    private fun updateCurrentSongFavoriteStatus() {
+        viewModelScope.launch {
+            val currentFilePath = _uiState.value.currentSongFilePath
+            if (currentFilePath != null) {
+                val isFavorite = favoriteRepository.isFavoriteSync(currentFilePath)
+                _uiState.update { it.copy(isCurrentSongFavorite = isFavorite) }
+            }
+        }
     }
 
     private fun startProgressUpdateLoop() {
@@ -117,19 +138,47 @@ class MusicViewModel @Inject constructor(
         mediaController?.let { controller ->
             val playlist = List(controller.mediaItemCount) { i -> controller.getMediaItemAt(i) }
             val audioSessionId = controller.sessionExtras.getInt("AUDIO_SESSION_ID", 0)
-            _uiState.update {
-                it.copy(
-                    isPlaying = controller.isPlaying,
-                    currentMediaItem = controller.currentMediaItem,
-                    playbackState = controller.playbackState,
-                    repeatMode = controller.repeatMode,
-                    shuffleModeEnabled = controller.shuffleModeEnabled,
-                    currentPosition = controller.currentPosition,
-                    duration = controller.duration,
-                    bufferedPosition = controller.bufferedPosition,
-                    playlist = playlist,
-                    audioSessionId = audioSessionId
-                )
+            // Extract file path from current media item URI
+            val currentFilePath = controller.currentMediaItem?.localConfiguration?.uri?.path
+            val safePosition = controller.currentPosition.coerceAtLeast(0L)
+            
+            // Capture all controller state before any async operation
+            val isPlaying = controller.isPlaying
+            val currentMediaItem = controller.currentMediaItem
+            val playbackState = controller.playbackState
+            val repeatMode = controller.repeatMode
+            val shuffleModeEnabled = controller.shuffleModeEnabled
+            val bufferedPosition = controller.bufferedPosition
+            val controllerDuration = controller.duration
+            
+            // Helper function to update UI state with given duration
+            fun performStateUpdate(duration: Long) {
+                _uiState.update {
+                    it.copy(
+                        isPlaying = isPlaying,
+                        currentMediaItem = currentMediaItem,
+                        playbackState = playbackState,
+                        repeatMode = repeatMode,
+                        shuffleModeEnabled = shuffleModeEnabled,
+                        currentPosition = safePosition,
+                        duration = duration,
+                        bufferedPosition = bufferedPosition,
+                        playlist = playlist,
+                        audioSessionId = audioSessionId,
+                        currentSongFilePath = currentFilePath
+                    )
+                }
+            }
+            
+            // If controller.duration is negative (C.TIME_UNSET), get duration from database
+            if (controllerDuration < 0 && currentFilePath != null) {
+                viewModelScope.launch {
+                    val song = songRepository.getSongByFilePath(currentFilePath)
+                    val correctDuration = song?.duration?.coerceAtLeast(0L) ?: 0L
+                    performStateUpdate(correctDuration)
+                }
+            } else {
+                performStateUpdate(controllerDuration.coerceAtLeast(0L))
             }
         }
     }
@@ -184,10 +233,12 @@ class MusicViewModel @Inject constructor(
 
     fun setRepeatMode(repeatMode: Int) {
         mediaController?.repeatMode = repeatMode
+        playbackPreferences.saveRepeatMode(repeatMode)
     }
 
     fun setShuffleModeEnabled(shuffleModeEnabled: Boolean) {
         mediaController?.shuffleModeEnabled = shuffleModeEnabled
+        playbackPreferences.saveShuffleModeEnabled(shuffleModeEnabled)
     }
 
     fun removeMediaItem(index: Int) {
@@ -200,6 +251,14 @@ class MusicViewModel @Inject constructor(
     
     fun clearPlaylist() {
         mediaController?.clearMediaItems()
+    }
+
+    fun toggleCurrentSongFavorite() {
+        val filePath = _uiState.value.currentSongFilePath ?: return
+        viewModelScope.launch {
+            val newFavoriteState = favoriteRepository.toggleFavorite(filePath)
+            _uiState.update { it.copy(isCurrentSongFavorite = newFavoriteState) }
+        }
     }
 
     fun startSleepTimer(minutes: Int) {
@@ -239,5 +298,7 @@ data class MusicUiState(
     val duration: Long = 0L,
     val bufferedPosition: Long = 0L,
     val playlist: List<MediaItem> = emptyList(),
-    val audioSessionId: Int = 0
+    val audioSessionId: Int = 0,
+    val currentSongFilePath: String? = null,
+    val isCurrentSongFavorite: Boolean = false
 )

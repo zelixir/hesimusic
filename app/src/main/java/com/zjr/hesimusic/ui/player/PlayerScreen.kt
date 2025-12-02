@@ -1,7 +1,6 @@
 package com.zjr.hesimusic.ui.player
 
 import android.media.audiofx.Equalizer
-import android.text.format.DateUtils
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -10,6 +9,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.rounded.Favorite
+import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Timer
@@ -30,11 +31,9 @@ import androidx.media3.common.Player
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.zjr.hesimusic.ui.common.MusicViewModel
+import com.zjr.hesimusic.utils.TimeFormatter
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.util.Formatter
-import java.util.Locale
-import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -61,6 +60,13 @@ fun PlayerScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = { viewModel.toggleCurrentSongFavorite() }) {
+                        Icon(
+                            imageVector = if (uiState.isCurrentSongFavorite) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                            contentDescription = if (uiState.isCurrentSongFavorite) "取消收藏" else "收藏",
+                            tint = if (uiState.isCurrentSongFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                     IconButton(onClick = { showSleepTimer = true }) {
                         Icon(Icons.Rounded.Timer, contentDescription = "睡眠定时")
                     }
@@ -116,21 +122,24 @@ fun PlayerScreen(
 
             // Progress
             Column {
+                // Ensure valid range for Slider: duration must be positive
+                val safeDuration = if (uiState.duration > 0) uiState.duration else 1L
+                val safePosition = uiState.currentPosition.coerceIn(0L, safeDuration)
                 Slider(
-                    value = uiState.currentPosition.toFloat(),
+                    value = safePosition.toFloat(),
                     onValueChange = { viewModel.seekTo(it.toLong()) },
-                    valueRange = 0f..uiState.duration.coerceAtLeast(1L).toFloat()
+                    valueRange = 0f..safeDuration.toFloat()
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = formatTime(uiState.currentPosition),
+                        text = TimeFormatter.formatTime(uiState.currentPosition),
                         style = MaterialTheme.typography.bodySmall
                     )
                     Text(
-                        text = formatTime(uiState.duration),
+                        text = TimeFormatter.formatTime(uiState.duration),
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
@@ -142,17 +151,28 @@ fun PlayerScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // Three-state playback mode button: 列表循环 -> 随机播放 -> 单曲循环
                 IconButton(onClick = {
-                    val nextMode = when (uiState.shuffleModeEnabled) {
-                        true -> false
-                        false -> true
+                    val (newShuffle, newRepeat) = when {
+                        uiState.shuffleModeEnabled -> false to Player.REPEAT_MODE_ONE // Random -> Single Loop
+                        uiState.repeatMode == Player.REPEAT_MODE_ONE -> false to Player.REPEAT_MODE_ALL // Single Loop -> List Loop
+                        else -> true to Player.REPEAT_MODE_ALL // List Loop -> Random
                     }
-                    viewModel.setShuffleModeEnabled(nextMode)
+                    viewModel.setShuffleModeEnabled(newShuffle)
+                    viewModel.setRepeatMode(newRepeat)
                 }) {
                     Icon(
-                        imageVector = if (uiState.shuffleModeEnabled) Icons.Default.Shuffle else Icons.Default.ArrowRightAlt, // Placeholder for Shuffle Off
-                        contentDescription = "随机播放",
-                        tint = if (uiState.shuffleModeEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                        imageVector = when {
+                            uiState.shuffleModeEnabled -> Icons.Default.Shuffle
+                            uiState.repeatMode == Player.REPEAT_MODE_ONE -> Icons.Default.RepeatOne
+                            else -> Icons.Default.Repeat
+                        },
+                        contentDescription = when {
+                            uiState.shuffleModeEnabled -> "随机播放"
+                            uiState.repeatMode == Player.REPEAT_MODE_ONE -> "单曲循环"
+                            else -> "列表循环"
+                        },
+                        tint = MaterialTheme.colorScheme.primary
                     )
                 }
 
@@ -177,24 +197,8 @@ fun PlayerScreen(
                     Icon(Icons.Default.SkipNext, contentDescription = "下一首", modifier = Modifier.size(32.dp))
                 }
 
-                IconButton(onClick = {
-                    val nextMode = when (uiState.repeatMode) {
-                        Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
-                        Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
-                        else -> Player.REPEAT_MODE_OFF
-                    }
-                    viewModel.setRepeatMode(nextMode)
-                }) {
-                    Icon(
-                        imageVector = when (uiState.repeatMode) {
-                            Player.REPEAT_MODE_ONE -> Icons.Default.RepeatOne
-                            Player.REPEAT_MODE_ALL -> Icons.Default.Repeat
-                            else -> Icons.Default.Repeat // Placeholder for Off
-                        },
-                        contentDescription = "循环播放",
-                        tint = if (uiState.repeatMode != Player.REPEAT_MODE_OFF) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                    )
-                }
+                // Placeholder for balanced layout
+                Spacer(modifier = Modifier.size(48.dp))
             }
         }
     }
@@ -313,7 +317,7 @@ fun SleepTimerDialog(
         text = {
             Column {
                 if (remainingTime != null) {
-                    Text("剩余时间: ${formatTime(remainingTime)}")
+                    Text("剩余时间: ${TimeFormatter.formatTime(remainingTime)}")
                     Spacer(modifier = Modifier.height(16.dp))
                     Button(onClick = onCancelTimer) {
                         Text("取消定时")
@@ -423,11 +427,4 @@ fun EqualizerDialog(
             }
         }
     )
-}
-
-private fun formatTime(millis: Long): String {
-    val totalSeconds = millis / 1000
-    val minutes = totalSeconds / 60
-    val seconds = totalSeconds % 60
-    return String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
 }

@@ -2,6 +2,7 @@ package com.zjr.hesimusic.ui.scan
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.zjr.hesimusic.data.preferences.ScanPreferences
 import com.zjr.hesimusic.data.repository.ScanRepository
 import com.zjr.hesimusic.data.repository.ScanStatus
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -15,7 +16,8 @@ import javax.inject.Inject
 
 @HiltViewModel
 class ScanViewModel @Inject constructor(
-    private val repository: ScanRepository
+    private val repository: ScanRepository,
+    private val scanPreferences: ScanPreferences
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ScanUiState())
@@ -24,15 +26,49 @@ class ScanViewModel @Inject constructor(
     private var timerJob: Job? = null
     private var startTime: Long = 0
 
+    init {
+        loadFolderSettings()
+    }
+
+    private fun loadFolderSettings() {
+        _uiState.value = _uiState.value.copy(
+            scanFolders = scanPreferences.getScanFolders(),
+            excludedFolders = scanPreferences.getExcludedFolders()
+        )
+    }
+
+    fun updateScanFolders(folders: Set<String>) {
+        scanPreferences.saveScanFolders(folders)
+        _uiState.value = _uiState.value.copy(scanFolders = folders)
+    }
+
+    fun updateExcludedFolders(folders: Set<String>) {
+        scanPreferences.saveExcludedFolders(folders)
+        _uiState.value = _uiState.value.copy(excludedFolders = folders)
+    }
+
     fun startScan() {
         if (_uiState.value.isScanning) return
+        
+        val scanFolders = _uiState.value.scanFolders
+        if (scanFolders.isEmpty()) {
+            _uiState.value = _uiState.value.copy(
+                statusMessage = "请先选择要扫描的文件夹"
+            )
+            return
+        }
 
-        _uiState.value = ScanUiState(isScanning = true, statusMessage = "Starting...")
+        _uiState.value = _uiState.value.copy(
+            isScanning = true, 
+            statusMessage = "Starting..."
+        )
         startTime = System.currentTimeMillis()
         startTimer()
 
+        val excludedFolders = _uiState.value.excludedFolders
+
         viewModelScope.launch {
-            repository.scanAndSave().collect { status ->
+            repository.scanAndSave(scanFolders, excludedFolders).collect { status ->
                 when (status) {
                     is ScanStatus.Idle -> {
                         // Should not happen during scan
@@ -97,5 +133,7 @@ data class ScanUiState(
     val statusMessage: String = "Ready to scan",
     val scannedCount: Int = 0,
     val currentPath: String = "",
-    val elapsedTimeMs: Long = 0
+    val elapsedTimeMs: Long = 0,
+    val scanFolders: Set<String> = emptySet(),
+    val excludedFolders: Set<String> = emptySet()
 )

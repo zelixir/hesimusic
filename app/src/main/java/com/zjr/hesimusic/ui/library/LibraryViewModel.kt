@@ -27,6 +27,9 @@ class LibraryViewModel @Inject constructor(
     val albums: StateFlow<List<Album>> = repository.getAlbums()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val favoriteSongs: StateFlow<List<Song>> = repository.getFavoriteSongs()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     fun getFolderContents(path: String) = repository.getFolderContents(path)
     
     fun getSongsByArtist(artist: String) = repository.getSongsByArtist(artist)
