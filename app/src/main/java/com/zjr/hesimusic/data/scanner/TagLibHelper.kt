@@ -13,4 +13,6 @@ class TagLibHelper @Inject constructor() {
     }
 
     external fun extractMetadata(path: String): HashMap<String, String>?
+    
+    external fun extractArtwork(path: String): ByteArray?
 }
