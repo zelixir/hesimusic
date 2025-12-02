@@ -16,18 +16,18 @@ interface FavoriteDao {
     @Delete
     suspend fun delete(favorite: Favorite)
 
-    @Query("DELETE FROM favorites WHERE filePath = :filePath")
-    suspend fun deleteByFilePath(filePath: String)
+    @Query("DELETE FROM favorites WHERE filePath = :filePath AND startPosition = :startPosition")
+    suspend fun deleteByFilePathAndStartPosition(filePath: String, startPosition: Long)
 
     @Query("SELECT * FROM favorites ORDER BY dateAdded DESC")
     fun getAllFavorites(): Flow<List<Favorite>>
 
-    @Query("SELECT filePath FROM favorites")
-    fun getAllFavoritePaths(): Flow<List<String>>
+    @Query("SELECT * FROM favorites")
+    fun getAllFavoritesAsList(): Flow<List<Favorite>>
 
-    @Query("SELECT EXISTS(SELECT 1 FROM favorites WHERE filePath = :filePath)")
-    fun isFavorite(filePath: String): Flow<Boolean>
+    @Query("SELECT EXISTS(SELECT 1 FROM favorites WHERE filePath = :filePath AND startPosition = :startPosition)")
+    fun isFavorite(filePath: String, startPosition: Long): Flow<Boolean>
 
-    @Query("SELECT EXISTS(SELECT 1 FROM favorites WHERE filePath = :filePath)")
-    suspend fun isFavoriteSync(filePath: String): Boolean
+    @Query("SELECT EXISTS(SELECT 1 FROM favorites WHERE filePath = :filePath AND startPosition = :startPosition)")
+    suspend fun isFavoriteSync(filePath: String, startPosition: Long): Boolean
 }

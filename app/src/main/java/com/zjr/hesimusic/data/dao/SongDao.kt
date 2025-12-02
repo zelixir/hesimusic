@@ -22,6 +22,9 @@ interface SongDao {
     
     @Query("SELECT * FROM songs WHERE filePath = :path")
     suspend fun getSongsByPath(path: String): List<Song>
+    
+    @Query("SELECT * FROM songs WHERE filePath = :path AND startPosition = :startPosition LIMIT 1")
+    suspend fun getSongByPathAndStartPosition(path: String, startPosition: Long): Song?
 
     @Query("SELECT artist as name, COUNT(*) as songCount FROM songs GROUP BY artist ORDER BY artist ASC")
     fun getArtists(): Flow<List<Artist>>

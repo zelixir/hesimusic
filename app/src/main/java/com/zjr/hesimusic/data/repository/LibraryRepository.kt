@@ -27,9 +27,10 @@ class LibraryRepository @Inject constructor(
     fun getSongsByAlbum(album: String): Flow<List<Song>> = songDao.getSongsByAlbum(album)
 
     fun getFavoriteSongs(): Flow<List<Song>> {
-        return favoriteDao.getAllFavoritePaths().combine(songDao.getAllSongs()) { favoritePaths, allSongs ->
-            val favoritePathSet = favoritePaths.toSet()
-            allSongs.filter { it.filePath in favoritePathSet }
+        return favoriteDao.getAllFavoritesAsList().combine(songDao.getAllSongs()) { favorites, allSongs ->
+            // Create a set of (filePath, startPosition) pairs for efficient lookup
+            val favoriteKeys = favorites.map { it.filePath to it.startPosition }.toSet()
+            allSongs.filter { (it.filePath to it.startPosition) in favoriteKeys }
         }
     }
 

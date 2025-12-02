@@ -59,7 +59,7 @@ class MusicViewModel @Inject constructor(
                 if (song != null) {
                     val mediaItem = song.toMediaItem()
                     val position = playbackPreferences.getLastPosition()
-                    val isFavorite = favoriteRepository.isFavoriteSync(song.filePath)
+                    val isFavorite = favoriteRepository.isFavoriteSync(song.filePath, song.startPosition)
                     // Ensure duration is valid (not negative)
                     val safeDuration = song.duration.coerceAtLeast(0L)
                     val safePosition = position.coerceAtLeast(0L)
@@ -69,6 +69,7 @@ class MusicViewModel @Inject constructor(
                             currentPosition = safePosition,
                             duration = safeDuration,
                             currentSongFilePath = song.filePath,
+                            currentSongStartPosition = song.startPosition,
                             isCurrentSongFavorite = isFavorite
                         )
                     }
@@ -116,8 +117,9 @@ class MusicViewModel @Inject constructor(
     private fun updateCurrentSongFavoriteStatus() {
         viewModelScope.launch {
             val currentFilePath = _uiState.value.currentSongFilePath
+            val currentStartPosition = _uiState.value.currentSongStartPosition
             if (currentFilePath != null) {
-                val isFavorite = favoriteRepository.isFavoriteSync(currentFilePath)
+                val isFavorite = favoriteRepository.isFavoriteSync(currentFilePath, currentStartPosition)
                 _uiState.update { it.copy(isCurrentSongFavorite = isFavorite) }
             }
         }
@@ -140,6 +142,8 @@ class MusicViewModel @Inject constructor(
             val audioSessionId = controller.sessionExtras.getInt("AUDIO_SESSION_ID", 0)
             // Extract file path from current media item URI
             val currentFilePath = controller.currentMediaItem?.localConfiguration?.uri?.path
+            // Extract start position from clipping configuration (for CUE tracks)
+            val currentStartPosition = controller.currentMediaItem?.clippingConfiguration?.startPositionMs ?: 0L
             val safePosition = controller.currentPosition.coerceAtLeast(0L)
             
             // Capture all controller state before any async operation
@@ -165,7 +169,8 @@ class MusicViewModel @Inject constructor(
                         bufferedPosition = bufferedPosition,
                         playlist = playlist,
                         audioSessionId = audioSessionId,
-                        currentSongFilePath = currentFilePath
+                        currentSongFilePath = currentFilePath,
+                        currentSongStartPosition = currentStartPosition
                     )
                 }
             }
@@ -173,7 +178,7 @@ class MusicViewModel @Inject constructor(
             // If controller.duration is negative (C.TIME_UNSET), get duration from database
             if (controllerDuration < 0 && currentFilePath != null) {
                 viewModelScope.launch {
-                    val song = songRepository.getSongByFilePath(currentFilePath)
+                    val song = songRepository.getSongByFilePathAndStartPosition(currentFilePath, currentStartPosition)
                     val correctDuration = song?.duration?.coerceAtLeast(0L) ?: 0L
                     performStateUpdate(correctDuration)
                 }
@@ -255,8 +260,9 @@ class MusicViewModel @Inject constructor(
 
     fun toggleCurrentSongFavorite() {
         val filePath = _uiState.value.currentSongFilePath ?: return
+        val startPosition = _uiState.value.currentSongStartPosition
         viewModelScope.launch {
-            val newFavoriteState = favoriteRepository.toggleFavorite(filePath)
+            val newFavoriteState = favoriteRepository.toggleFavorite(filePath, startPosition)
             _uiState.update { it.copy(isCurrentSongFavorite = newFavoriteState) }
         }
     }
@@ -300,5 +306,6 @@ data class MusicUiState(
     val playlist: List<MediaItem> = emptyList(),
     val audioSessionId: Int = 0,
     val currentSongFilePath: String? = null,
+    val currentSongStartPosition: Long = 0L,
     val isCurrentSongFavorite: Boolean = false
 )

@@ -8,26 +8,28 @@ import javax.inject.Inject
 class FavoriteRepository @Inject constructor(
     private val favoriteDao: FavoriteDao
 ) {
-    fun getAllFavoritePaths(): Flow<List<String>> = favoriteDao.getAllFavoritePaths()
+    fun getAllFavorites(): Flow<List<Favorite>> = favoriteDao.getAllFavoritesAsList()
 
-    fun isFavorite(filePath: String): Flow<Boolean> = favoriteDao.isFavorite(filePath)
+    fun isFavorite(filePath: String, startPosition: Long): Flow<Boolean> = 
+        favoriteDao.isFavorite(filePath, startPosition)
 
-    suspend fun isFavoriteSync(filePath: String): Boolean = favoriteDao.isFavoriteSync(filePath)
+    suspend fun isFavoriteSync(filePath: String, startPosition: Long): Boolean = 
+        favoriteDao.isFavoriteSync(filePath, startPosition)
 
-    suspend fun addFavorite(filePath: String) {
-        favoriteDao.insert(Favorite(filePath = filePath))
+    suspend fun addFavorite(filePath: String, startPosition: Long) {
+        favoriteDao.insert(Favorite(filePath = filePath, startPosition = startPosition))
     }
 
-    suspend fun removeFavorite(filePath: String) {
-        favoriteDao.deleteByFilePath(filePath)
+    suspend fun removeFavorite(filePath: String, startPosition: Long) {
+        favoriteDao.deleteByFilePathAndStartPosition(filePath, startPosition)
     }
 
-    suspend fun toggleFavorite(filePath: String): Boolean {
-        return if (favoriteDao.isFavoriteSync(filePath)) {
-            favoriteDao.deleteByFilePath(filePath)
+    suspend fun toggleFavorite(filePath: String, startPosition: Long): Boolean {
+        return if (favoriteDao.isFavoriteSync(filePath, startPosition)) {
+            favoriteDao.deleteByFilePathAndStartPosition(filePath, startPosition)
             false
         } else {
-            favoriteDao.insert(Favorite(filePath = filePath))
+            favoriteDao.insert(Favorite(filePath = filePath, startPosition = startPosition))
             true
         }
     }
