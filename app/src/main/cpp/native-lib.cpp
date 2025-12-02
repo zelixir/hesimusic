@@ -2,6 +2,8 @@
 #include <string>
 #include <android/log.h>
 #include <map>
+#include <algorithm>
+#include <cctype>
 
 // TagLib headers
 #include "fileref.h"
@@ -128,7 +130,7 @@ static std::string getExtension(const std::string& path) {
     size_t pos = path.rfind('.');
     if (pos == std::string::npos) return "";
     std::string ext = path.substr(pos + 1);
-    for (char& c : ext) c = std::tolower(c);
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
     return ext;
 }
 
@@ -232,7 +234,7 @@ Java_com_zjr_hesimusic_data_scanner_TagLibHelper_extractArtwork(
                     TagLib::ByteVector data = items["COVER ART (FRONT)"].binaryData();
                     // APE cover art has a null-terminated description before the image data
                     int pos = data.find('\0');
-                    if (pos != -1 && pos < (int)data.size() - 1) {
+                    if (pos != -1 && static_cast<size_t>(pos) < data.size() - 1) {
                         imageData = data.mid(pos + 1);
                         found = true;
                     }
@@ -248,7 +250,7 @@ Java_com_zjr_hesimusic_data_scanner_TagLibHelper_extractArtwork(
                 if (items.contains("COVER ART (FRONT)")) {
                     TagLib::ByteVector data = items["COVER ART (FRONT)"].binaryData();
                     int pos = data.find('\0');
-                    if (pos != -1 && pos < (int)data.size() - 1) {
+                    if (pos != -1 && static_cast<size_t>(pos) < data.size() - 1) {
                         imageData = data.mid(pos + 1);
                         found = true;
                     }
