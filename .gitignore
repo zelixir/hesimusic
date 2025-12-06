@@ -9,3 +9,4 @@
 .externalNativeBuild
 .cxx
 local.properties
+_codeql_detected_source_root

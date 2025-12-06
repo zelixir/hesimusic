@@ -88,10 +88,10 @@ fun PlayerScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceEvenly
         ) {
-            // Cover Art
+            // Cover Art - use artwork bytes from taglib if available
             AsyncImage(
                 model = ImageRequest.Builder(context)
-                    .data(uiState.currentMediaItem?.mediaMetadata?.artworkUri)
+                    .data(uiState.artworkBytes ?: uiState.currentMediaItem?.mediaMetadata?.artworkUri)
                     .crossfade(true)
                     .build(),
                 contentDescription = "封面",
