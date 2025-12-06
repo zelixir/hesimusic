@@ -2,11 +2,13 @@ package com.zjr.hesimusic.ui.main
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
@@ -19,6 +21,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
+import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
@@ -129,27 +132,32 @@ fun MainScreen(
                     }
                 }
             } else {
-                // Tab row with search button
-                ScrollableTabRow(
-                    selectedTabIndex = pagerState.currentPage,
-                    edgePadding = 0.dp
-                ) {
-                    titles.forEachIndexed { index, title ->
-                        Tab(
-                            selected = pagerState.currentPage == index,
-                            onClick = {
-                                scope.launch {
-                                    pagerState.animateScrollToPage(index)
-                                }
-                            },
-                            text = { Text(text = title) }
-                        )
+                // Tab row with search button fixed on right
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    ScrollableTabRow(
+                        selectedTabIndex = pagerState.currentPage,
+                        modifier = Modifier.weight(1f),
+                        edgePadding = 0.dp
+                    ) {
+                        titles.forEachIndexed { index, title ->
+                            Tab(
+                                selected = pagerState.currentPage == index,
+                                onClick = {
+                                    scope.launch {
+                                        pagerState.animateScrollToPage(index)
+                                    }
+                                },
+                                text = { Text(text = title) }
+                            )
+                        }
                     }
-                    Tab(
-                        selected = false,
+                    // Fixed search button on the right
+                    IconButton(
                         onClick = { viewModel.setSearchActive(true) },
-                        icon = { Icon(Icons.Default.Search, contentDescription = "搜索") }
-                    )
+                        modifier = Modifier.align(Alignment.CenterVertically)
+                    ) {
+                        Icon(Icons.Default.Search, contentDescription = "搜索")
+                    }
                 }
             }
 
