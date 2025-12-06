@@ -93,8 +93,8 @@ fun SongList(
                 val scrollIndex = calculateScrollIndex(grouped, currentSong)
                 
                 if (scrollIndex != null) {
-                    // Scroll to the item, centered if possible
-                    listState.animateScrollToItem(scrollIndex, scrollOffset = SCROLL_OFFSET_TO_CENTER_ITEM)
+                    // Scroll to the item instantly (no animation), centered if possible
+                    listState.scrollToItem(scrollIndex, scrollOffset = SCROLL_OFFSET_TO_CENTER_ITEM)
                 }
             }
         }
