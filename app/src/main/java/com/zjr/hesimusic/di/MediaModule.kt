@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.extractor.DefaultExtractorsFactory
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -25,11 +27,21 @@ object MediaModule {
 
     @Provides
     @Singleton
+    fun provideDefaultExtractorsFactory(): DefaultExtractorsFactory =
+        DefaultExtractorsFactory()
+            .setConstantBitrateSeekingEnabled(true)
+
+    @Provides
+    @Singleton
     fun provideExoPlayer(
         @ApplicationContext context: Context,
-        audioAttributes: AudioAttributes
+        audioAttributes: AudioAttributes,
+        extractorsFactory: DefaultExtractorsFactory
     ): ExoPlayer =
         ExoPlayer.Builder(context)
+            .setMediaSourceFactory(
+                DefaultMediaSourceFactory(context, extractorsFactory)
+            )
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .build()
