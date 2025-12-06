@@ -13,6 +13,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -26,6 +27,12 @@ import androidx.compose.runtime.produceState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/**
+ * Scroll offset in pixels to center the currently playing item on screen.
+ * Negative value scrolls upward, positioning the item away from the top edge.
+ */
+private const val SCROLL_OFFSET_TO_CENTER_ITEM = -200
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -72,6 +79,26 @@ fun SongList(
     }
 
     val sections = remember(grouped) { grouped.keys.toList() }
+
+    // Auto-scroll to currently playing song when list initializes or when search closes
+    // Only triggers when grouped changes (not when currentPlayingSongId changes)
+    // to avoid scrolling when user manually switches songs
+    LaunchedEffect(grouped) {
+        if (currentPlayingSongId != null && grouped.isNotEmpty()) {
+            // Find the song in the flattened list
+            // Note: MediaItem.mediaId is set as song.id.toString() in SongMapper.toMediaItem()
+            val currentSong = flattenedSongs.find { it.id.toString() == currentPlayingSongId }
+            if (currentSong != null) {
+                // Calculate scroll index by finding which group contains the song
+                val scrollIndex = calculateScrollIndex(grouped, currentSong)
+                
+                if (scrollIndex != null) {
+                    // Scroll to the item instantly (no animation), centered if possible
+                    listState.scrollToItem(scrollIndex, scrollOffset = SCROLL_OFFSET_TO_CENTER_ITEM)
+                }
+            }
+        }
+    }
 
     Box(modifier = modifier.fillMaxSize()) {
         LazyColumn(
@@ -128,4 +155,23 @@ fun SongList(
             )
         }
     }
+}
+
+/**
+ * Calculates the scroll index for a song in a grouped LazyColumn.
+ * Accounts for sticky headers (1 per group) and items within each group.
+ * Returns null if the song is not found in any group.
+ */
+private fun calculateScrollIndex(grouped: Map<Char, List<Song>>, targetSong: Song): Int? {
+    var scrollIndex = 0
+    for ((_, songsInGroup) in grouped) {
+        val indexInGroup = songsInGroup.indexOf(targetSong)
+        if (indexInGroup != -1) {
+            // Found the song: add 1 for the header, then add the index within the group
+            return scrollIndex + 1 + indexInGroup
+        }
+        // Not in this group: add 1 for header + all songs in this group
+        scrollIndex += 1 + songsInGroup.size
+    }
+    return null
 }
