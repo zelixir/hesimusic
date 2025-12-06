@@ -57,6 +57,9 @@ abstract class AppDatabase : RoomDatabase() {
          * Migration from version 3 to 4:
          * - Add titleInitial and folderPath columns to songs table for performance optimization
          * - Add indices on title, artist, album, filePath, titleInitial, and folderPath
+         * 
+         * Note: After migration, titleInitial and folderPath will be empty for existing songs.
+         * Users should re-scan their music library to populate these fields and get full performance benefits.
          */
         val MIGRATION_3_4 = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {

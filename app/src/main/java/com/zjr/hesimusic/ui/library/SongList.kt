@@ -50,8 +50,9 @@ fun SongList(
         value = withContext(Dispatchers.Default) {
             songs.groupBy { 
                 // Use pre-computed titleInitial field
-                // Fallback to '#' for empty strings (consistent with AlphabetIndexer behavior)
-                it.titleInitial.firstOrNull()?.takeIf { it.isLetterOrDigit() } ?: '#'
+                // If empty or invalid, return '#' (consistent with AlphabetIndexer behavior)
+                val initial = it.titleInitial.firstOrNull() ?: '#'
+                if (initial.isLetter() || initial == '#') initial else '#'
             }.toSortedMap()
         }
     }.value
