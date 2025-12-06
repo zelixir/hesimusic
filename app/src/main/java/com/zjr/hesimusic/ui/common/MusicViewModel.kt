@@ -253,12 +253,20 @@ class MusicViewModel @Inject constructor(
     
     fun skipToNext() {
         mediaController?.let { controller ->
+            val wasPlaying = controller.isPlaying
             if (controller.hasNextMediaItem()) {
                 controller.seekToNext()
+                // Auto-play if was paused
+                if (!wasPlaying) {
+                    controller.play()
+                }
             } else {
                 if (controller.mediaItemCount > 0) {
                     controller.seekToDefaultPosition(0)
-                    controller.play()
+                    // Auto-play if was paused
+                    if (!wasPlaying) {
+                        controller.play()
+                    }
                 }
             }
         }
