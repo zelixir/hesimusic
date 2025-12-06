@@ -80,8 +80,10 @@ fun SongList(
 
     val sections = remember(grouped) { grouped.keys.toList() }
 
-    // Auto-scroll to currently playing song when list initializes or when switching back
-    LaunchedEffect(currentPlayingSongId, grouped) {
+    // Auto-scroll to currently playing song when list initializes or when search closes
+    // Only triggers when grouped changes (not when currentPlayingSongId changes)
+    // to avoid scrolling when user manually switches songs
+    LaunchedEffect(grouped) {
         if (currentPlayingSongId != null && grouped.isNotEmpty()) {
             // Find the song in the flattened list
             // Note: MediaItem.mediaId is set as song.id.toString() in SongMapper.toMediaItem()
