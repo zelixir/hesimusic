@@ -45,10 +45,13 @@ fun SongList(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
+    // Since songs are already sorted by titleInitial from database, we can group directly
     val grouped = produceState<Map<Char, List<Song>>>(initialValue = emptyMap(), key1 = songs) {
         value = withContext(Dispatchers.Default) {
-            songs.groupBy { AlphabetIndexer.getInitial(it.title) }
-                .toSortedMap()
+            songs.groupBy { 
+                // Use pre-computed titleInitial field
+                it.titleInitial.firstOrNull() ?: '#'
+            }.toSortedMap()
         }
     }.value
     

@@ -13,7 +13,7 @@ import com.zjr.hesimusic.data.model.Song
 
 @Database(
     entities = [Song::class, Playlist::class, PlaylistEntry::class, Favorite::class],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -50,6 +50,27 @@ abstract class AppDatabase : RoomDatabase() {
                 
                 // Rename new table to original name
                 db.execSQL("ALTER TABLE favorites_new RENAME TO favorites")
+            }
+        }
+        
+        /**
+         * Migration from version 3 to 4:
+         * - Add titleInitial and folderPath columns to songs table for performance optimization
+         * - Add indices on title, artist, album, filePath, titleInitial, and folderPath
+         */
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Add new columns
+                db.execSQL("ALTER TABLE songs ADD COLUMN titleInitial TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE songs ADD COLUMN folderPath TEXT NOT NULL DEFAULT ''")
+                
+                // Create indices for performance
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_songs_title ON songs(title)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_songs_artist ON songs(artist)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_songs_album ON songs(album)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_songs_filePath ON songs(filePath)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_songs_titleInitial ON songs(titleInitial)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_songs_folderPath ON songs(folderPath)")
             }
         }
     }

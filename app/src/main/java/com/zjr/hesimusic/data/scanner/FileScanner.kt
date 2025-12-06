@@ -2,6 +2,7 @@ package com.zjr.hesimusic.data.scanner
 
 import android.os.Environment
 import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.utils.AlphabetIndexer
 import java.io.File
 import javax.inject.Inject
 
@@ -70,7 +71,9 @@ class FileScanner @Inject constructor(
                                 isCue = true,
                                 cueFilePath = cueFile.absolutePath,
                                 startPosition = track.startMs,
-                                endPosition = endMs
+                                endPosition = endMs,
+                                titleInitial = AlphabetIndexer.getInitial(track.title).toString(),
+                                folderPath = audioFile.parent ?: ""
                             ))
                             onProgress(cueFile.parent ?: cueFile.absolutePath, songs.size)
                         }
@@ -91,9 +94,10 @@ class FileScanner @Inject constructor(
                         val artist = cleanTag(metadata["ARTIST"])
                         val album = cleanTag(metadata["ALBUM"])
                         val duration = metadata["DURATION"]?.toDoubleOrNull()?.toLong() ?: 0L // TagLib returns ms as string from double? No, I cast to long in C++ but let's be safe. C++ code: std::to_string(properties->length() * 1000) which is int/long.
+                        val finalTitle = title.ifEmpty { file.nameWithoutExtension }
 
                         songs.add(Song(
-                            title = title.ifEmpty { file.nameWithoutExtension },
+                            title = finalTitle,
                             artist = artist.ifEmpty { "Unknown Artist" },
                             album = album.ifEmpty { "Unknown Album" },
                             filePath = file.absolutePath,
@@ -103,11 +107,14 @@ class FileScanner @Inject constructor(
                             genre = cleanTag(metadata["GENRE"]),
                             mimeType = "audio/${file.extension}",
                             size = file.length(),
-                            dateAdded = file.lastModified()
+                            dateAdded = file.lastModified(),
+                            titleInitial = AlphabetIndexer.getInitial(finalTitle).toString(),
+                            folderPath = file.parent ?: ""
                         ))
                     } else {
+                         val title = file.nameWithoutExtension
                          songs.add(Song(
-                            title = file.nameWithoutExtension,
+                            title = title,
                             artist = "Unknown Artist",
                             album = "Unknown Album",
                             filePath = file.absolutePath,
@@ -115,7 +122,9 @@ class FileScanner @Inject constructor(
                             trackNumber = 0,
                             mimeType = "audio/${file.extension}",
                             size = file.length(),
-                            dateAdded = file.lastModified()
+                            dateAdded = file.lastModified(),
+                            titleInitial = AlphabetIndexer.getInitial(title).toString(),
+                            folderPath = file.parent ?: ""
                         ))
                     }
                     onProgress(file.parent ?: file.absolutePath, songs.size)
