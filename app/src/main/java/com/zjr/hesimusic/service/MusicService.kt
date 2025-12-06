@@ -145,7 +145,7 @@ class MusicService : MediaSessionService() {
                 if (player.isPlaying) {
                     saveCurrentState()
                 }
-                delay(30000) // Save every 30 seconds to reduce battery consumption
+                delay(5000) // Save every 5 seconds
             }
         }
     }
