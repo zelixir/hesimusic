@@ -14,12 +14,12 @@ Caused by: androidx.media3.common.ParserException: Searched too many bytes.{cont
 
 ## Root Cause
 
-This is a **known issue in Media3 versions 1.3.x** where the Mp3Extractor has a byte search limit when trying to find valid MP3 frame headers. When MP3 files contain:
+This is a **known issue in Media3 versions 1.3.x** where the Mp3Extractor has a byte search limit (MAX_SYNC_BYTES = 131072 bytes or 128 KB) when trying to find valid MP3 frame headers. When MP3 files contain:
 - Malformed or non-standard encoding at the end
 - Large amounts of padding or trailing data
 - Irregular frame patterns
 
-The extractor hits its maximum search limit (MAX_SYNC_BYTES) and throws a `ParserException`, causing playback to fail.
+The extractor hits its maximum search limit and throws a `ParserException`, causing playback to fail. This limit is defined in the Mp3Extractor source code and cannot be configured through public APIs in versions 1.3.x.
 
 ## Solution
 
@@ -71,7 +71,7 @@ fun provideDefaultExtractorsFactory(): DefaultExtractorsFactory =
 
 ## References
 
-- [Media3 GitHub Issue #1480](https://github.com/androidx/media/issues/1480) - "ExoPlayer still wrongly decode some MP3 file"
+- [Media3 GitHub Issue #1480](https://github.com/androidx/media/issues/1480) - "ExoPlayer still wrongly decodes some MP3 files"
 - [Media3 1.8.0 Release Notes](https://github.com/androidx/media/releases/tag/1.8.0)
 - [Media3 Official Documentation](https://developer.android.com/media/media3/exoplayer)
 
