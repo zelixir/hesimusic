@@ -11,14 +11,17 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
+import com.zjr.hesimusic.HesiMusicApplication
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
 import com.zjr.hesimusic.data.repository.FavoriteRepository
 import com.zjr.hesimusic.data.repository.SongRepository
+import com.zjr.hesimusic.data.scanner.TagLibHelper
 import com.zjr.hesimusic.service.MusicService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -26,6 +29,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @HiltViewModel
@@ -33,7 +37,8 @@ class MusicViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val playbackPreferences: PlaybackPreferences,
     private val songRepository: SongRepository,
-    private val favoriteRepository: FavoriteRepository
+    private val favoriteRepository: FavoriteRepository,
+    private val tagLibHelper: TagLibHelper
 ) : ViewModel() {
 
     private var mediaControllerFuture: ListenableFuture<MediaController>? = null
@@ -46,6 +51,9 @@ class MusicViewModel @Inject constructor(
     val sleepTimerState: StateFlow<Long?> = _sleepTimerState.asStateFlow()
 
     private var sleepTimer: CountDownTimer? = null
+    
+    // Track the file path for which artwork has been loaded to avoid redundant loading
+    private var loadedArtworkPath: String? = null
 
     init {
         // Load last played song for immediate UI update
@@ -94,6 +102,8 @@ class MusicViewModel @Inject constructor(
                     updateState()
                     // Update favorite status when song changes
                     updateCurrentSongFavoriteStatus()
+                    // Load artwork when song changes
+                    loadArtworkForCurrentSong()
                 }
 
                 override fun onRepeatModeChanged(repeatMode: Int) {
@@ -110,6 +120,7 @@ class MusicViewModel @Inject constructor(
             })
             updateState()
             updateCurrentSongFavoriteStatus()
+            loadArtworkForCurrentSong()
             startProgressUpdateLoop()
         }, MoreExecutors.directExecutor())
     }
@@ -124,11 +135,39 @@ class MusicViewModel @Inject constructor(
             }
         }
     }
+    
+    private fun loadArtworkForCurrentSong() {
+        viewModelScope.launch {
+            val currentFilePath = _uiState.value.currentSongFilePath
+            if (currentFilePath != null && currentFilePath != loadedArtworkPath) {
+                // Clear previous artwork immediately when song changes
+                _uiState.update { it.copy(artworkBytes = null) }
+                loadedArtworkPath = currentFilePath
+                
+                // Load artwork asynchronously on IO dispatcher
+                val artworkBytes = withContext(Dispatchers.IO) {
+                    try {
+                        tagLibHelper.extractArtwork(currentFilePath)
+                    } catch (e: Exception) {
+                        null
+                    }
+                }
+                
+                // Only update if the current song hasn't changed while loading
+                if (_uiState.value.currentSongFilePath == currentFilePath) {
+                    _uiState.update { it.copy(artworkBytes = artworkBytes) }
+                }
+            }
+        }
+    }
 
     private fun startProgressUpdateLoop() {
         viewModelScope.launch {
+            val app = context.applicationContext as HesiMusicApplication
             while (isActive) {
-                if (mediaController?.isPlaying == true) {
+                // Only update UI when app is in foreground and music is playing
+                // This reduces battery consumption by avoiding unnecessary updates in background
+                if (mediaController?.isPlaying == true && app.lifecycleObserver.isAppInForeground) {
                     updateState()
                 }
                 delay(1000) // Update every second
@@ -309,5 +348,50 @@ data class MusicUiState(
     val audioSessionId: Int = 0,
     val currentSongFilePath: String? = null,
     val currentSongStartPosition: Long = 0L,
-    val isCurrentSongFavorite: Boolean = false
-)
+    val isCurrentSongFavorite: Boolean = false,
+    val artworkBytes: ByteArray? = null
+) {
+    // Override equals and hashCode to handle ByteArray comparison properly
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+
+        other as MusicUiState
+
+        if (isPlaying != other.isPlaying) return false
+        if (currentMediaItem != other.currentMediaItem) return false
+        if (playbackState != other.playbackState) return false
+        if (repeatMode != other.repeatMode) return false
+        if (shuffleModeEnabled != other.shuffleModeEnabled) return false
+        if (currentPosition != other.currentPosition) return false
+        if (duration != other.duration) return false
+        if (bufferedPosition != other.bufferedPosition) return false
+        if (playlist != other.playlist) return false
+        if (audioSessionId != other.audioSessionId) return false
+        if (currentSongFilePath != other.currentSongFilePath) return false
+        if (isCurrentSongFavorite != other.isCurrentSongFavorite) return false
+        if (artworkBytes != null) {
+            if (other.artworkBytes == null) return false
+            if (!artworkBytes.contentEquals(other.artworkBytes)) return false
+        } else if (other.artworkBytes != null) return false
+
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = isPlaying.hashCode()
+        result = 31 * result + (currentMediaItem?.hashCode() ?: 0)
+        result = 31 * result + playbackState
+        result = 31 * result + repeatMode
+        result = 31 * result + shuffleModeEnabled.hashCode()
+        result = 31 * result + currentPosition.hashCode()
+        result = 31 * result + duration.hashCode()
+        result = 31 * result + bufferedPosition.hashCode()
+        result = 31 * result + playlist.hashCode()
+        result = 31 * result + audioSessionId
+        result = 31 * result + (currentSongFilePath?.hashCode() ?: 0)
+        result = 31 * result + isCurrentSongFavorite.hashCode()
+        result = 31 * result + (artworkBytes?.contentHashCode() ?: 0)
+        return result
+    }
+}
