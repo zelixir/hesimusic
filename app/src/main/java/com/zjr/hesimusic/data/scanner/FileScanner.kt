@@ -112,9 +112,9 @@ class FileScanner @Inject constructor(
                             folderPath = file.parent ?: ""
                         ))
                     } else {
-                         val title = file.nameWithoutExtension
+                         val fallbackTitle = file.nameWithoutExtension
                          songs.add(Song(
-                            title = title,
+                            title = fallbackTitle,
                             artist = "Unknown Artist",
                             album = "Unknown Album",
                             filePath = file.absolutePath,
@@ -123,7 +123,7 @@ class FileScanner @Inject constructor(
                             mimeType = "audio/${file.extension}",
                             size = file.length(),
                             dateAdded = file.lastModified(),
-                            titleInitial = AlphabetIndexer.getInitial(title).toString(),
+                            titleInitial = AlphabetIndexer.getInitial(fallbackTitle).toString(),
                             folderPath = file.parent ?: ""
                         ))
                     }

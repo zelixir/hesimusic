@@ -35,7 +35,7 @@ data class Song(
     val startPosition: Long = 0,
     val endPosition: Long = -1, // -1 means until end of file or next track
     
-    // Performance optimization fields
+    // Performance optimization fields (populated during scan, may be empty for existing records until re-scan)
     val titleInitial: String = "",  // First letter of title for fast grouping
     val folderPath: String = ""     // Parent folder path for fast folder navigation
 )
