@@ -28,6 +28,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+private const val SCROLL_OFFSET_TO_CENTER_ITEM = -200
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun SongList(
@@ -80,24 +82,12 @@ fun SongList(
             // Find the song in the flattened list
             val currentSong = flattenedSongs.find { it.id.toString() == currentPlayingSongId }
             if (currentSong != null) {
-                // Find which group the song belongs to
-                var scrollIndex = 0
-                var found = false
-                for ((initial, songsInGroup) in grouped) {
-                    val indexInGroup = songsInGroup.indexOf(currentSong)
-                    if (indexInGroup != -1) {
-                        // Add 1 for the header, then add the index within the group
-                        scrollIndex += 1 + indexInGroup
-                        found = true
-                        break
-                    }
-                    // Add 1 for header + all songs in this group
-                    scrollIndex += 1 + songsInGroup.size
-                }
+                // Calculate scroll index by finding which group contains the song
+                val scrollIndex = calculateScrollIndex(grouped, currentSong)
                 
-                if (found) {
+                if (scrollIndex != null) {
                     // Scroll to the item, centered if possible
-                    listState.animateScrollToItem(scrollIndex, scrollOffset = -200)
+                    listState.animateScrollToItem(scrollIndex, scrollOffset = SCROLL_OFFSET_TO_CENTER_ITEM)
                 }
             }
         }
@@ -158,4 +148,23 @@ fun SongList(
             )
         }
     }
+}
+
+/**
+ * Calculates the scroll index for a song in a grouped LazyColumn.
+ * Accounts for sticky headers (1 per group) and items within each group.
+ * Returns null if the song is not found in any group.
+ */
+private fun calculateScrollIndex(grouped: Map<Char, List<Song>>, targetSong: Song): Int? {
+    var scrollIndex = 0
+    for ((_, songsInGroup) in grouped) {
+        val indexInGroup = songsInGroup.indexOf(targetSong)
+        if (indexInGroup != -1) {
+            // Found the song: add 1 for the header, then add the index within the group
+            return scrollIndex + 1 + indexInGroup
+        }
+        // Not in this group: add 1 for header + all songs in this group
+        scrollIndex += 1 + songsInGroup.size
+    }
+    return null
 }
