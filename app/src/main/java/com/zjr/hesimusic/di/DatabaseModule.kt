@@ -39,7 +39,7 @@ object DatabaseModule {
             AppDatabase::class.java,
             "hesimusic_db"
         )
-            .addMigrations(MIGRATION_1_2)
+            .addMigrations(MIGRATION_1_2, AppDatabase.MIGRATION_2_3)
             .build()
     }
 

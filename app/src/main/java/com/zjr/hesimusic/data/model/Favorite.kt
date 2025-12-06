@@ -1,15 +1,18 @@
 package com.zjr.hesimusic.data.model
 
 import androidx.room.Entity
-import androidx.room.PrimaryKey
 
 /**
- * Entity to store favorite songs by file path.
- * Using filePath as the primary key ensures favorites survive music rescans,
- * since the songs table is cleared and repopulated during scans.
+ * Entity to store favorite songs by file path and start position.
+ * Using filePath + startPosition as a composite primary key ensures:
+ * 1. Favorites survive music rescans (songs table is cleared during scans)
+ * 2. Individual CUE tracks can be favorited separately (they share the same
+ *    filePath but have different startPosition values)
+ * For non-CUE songs, startPosition is always 0.
  */
-@Entity(tableName = "favorites")
+@Entity(tableName = "favorites", primaryKeys = ["filePath", "startPosition"])
 data class Favorite(
-    @PrimaryKey val filePath: String,
+    val filePath: String,
+    val startPosition: Long = 0,
     val dateAdded: Long = System.currentTimeMillis()
 )
