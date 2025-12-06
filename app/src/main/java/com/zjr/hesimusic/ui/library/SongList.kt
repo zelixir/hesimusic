@@ -28,6 +28,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/**
+ * Scroll offset in pixels to center the currently playing item on screen.
+ * Negative value scrolls upward, positioning the item away from the top edge.
+ */
 private const val SCROLL_OFFSET_TO_CENTER_ITEM = -200
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -80,6 +84,7 @@ fun SongList(
     LaunchedEffect(currentPlayingSongId, grouped) {
         if (currentPlayingSongId != null && grouped.isNotEmpty()) {
             // Find the song in the flattened list
+            // Note: MediaItem.mediaId is set as song.id.toString() in SongMapper.toMediaItem()
             val currentSong = flattenedSongs.find { it.id.toString() == currentPlayingSongId }
             if (currentSong != null) {
                 // Calculate scroll index by finding which group contains the song
