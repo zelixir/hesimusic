@@ -1,23 +1,37 @@
 package com.zjr.hesimusic.ui.main
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
+import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.Player
@@ -49,6 +63,13 @@ fun MainScreen(
     val scope = rememberCoroutineScope()
     val titles = listOf("歌曲", "收藏", "歌手", "专辑", "文件夹")
     val musicUiState by musicViewModel.uiState.collectAsState()
+    val isSearchActive by viewModel.isSearchActive.collectAsState()
+    val searchQuery by viewModel.searchQuery.collectAsState()
+
+    // Handle back button to close search
+    BackHandler(enabled = isSearchActive) {
+        viewModel.setSearchActive(false)
+    }
 
     Scaffold(
         bottomBar = {
@@ -87,20 +108,56 @@ fun MainScreen(
         }
     ) { innerPadding ->
         Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
-            ScrollableTabRow(
-                selectedTabIndex = pagerState.currentPage,
-                edgePadding = 0.dp
-            ) {
-                titles.forEachIndexed { index, title ->
-                    Tab(
-                        selected = pagerState.currentPage == index,
-                        onClick = {
-                            scope.launch {
-                                pagerState.animateScrollToPage(index)
-                            }
-                        },
-                        text = { Text(text = title) }
+            if (isSearchActive) {
+                // Search bar
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextField(
+                        value = searchQuery,
+                        onValueChange = { viewModel.updateSearchQuery(it) },
+                        modifier = Modifier.weight(1f),
+                        placeholder = { Text("搜索...") },
+                        singleLine = true,
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = MaterialTheme.colorScheme.surface,
+                            unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent
+                        )
                     )
+                    IconButton(onClick = { viewModel.setSearchActive(false) }) {
+                        Icon(Icons.Default.Close, contentDescription = "关闭搜索")
+                    }
+                }
+            } else {
+                // Tab row with search button fixed on right
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    ScrollableTabRow(
+                        selectedTabIndex = pagerState.currentPage,
+                        modifier = Modifier.weight(1f),
+                        edgePadding = 0.dp
+                    ) {
+                        titles.forEachIndexed { index, title ->
+                            Tab(
+                                selected = pagerState.currentPage == index,
+                                onClick = {
+                                    scope.launch {
+                                        pagerState.animateScrollToPage(index)
+                                    }
+                                },
+                                text = { Text(text = title) }
+                            )
+                        }
+                    }
+                    // Fixed search button on the right
+                    IconButton(
+                        onClick = { viewModel.setSearchActive(true) },
+                        modifier = Modifier.align(Alignment.CenterVertically)
+                    ) {
+                        Icon(Icons.Default.Search, contentDescription = "搜索")
+                    }
                 }
             }
 
