@@ -13,6 +13,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -72,6 +73,35 @@ fun SongList(
     }
 
     val sections = remember(grouped) { grouped.keys.toList() }
+
+    // Auto-scroll to currently playing song when list initializes or when switching back
+    LaunchedEffect(currentPlayingSongId, grouped) {
+        if (currentPlayingSongId != null && grouped.isNotEmpty()) {
+            // Find the song in the flattened list
+            val currentSong = flattenedSongs.find { it.id.toString() == currentPlayingSongId }
+            if (currentSong != null) {
+                // Find which group the song belongs to
+                var scrollIndex = 0
+                var found = false
+                for ((initial, songsInGroup) in grouped) {
+                    val indexInGroup = songsInGroup.indexOf(currentSong)
+                    if (indexInGroup != -1) {
+                        // Add 1 for the header, then add the index within the group
+                        scrollIndex += 1 + indexInGroup
+                        found = true
+                        break
+                    }
+                    // Add 1 for header + all songs in this group
+                    scrollIndex += 1 + songsInGroup.size
+                }
+                
+                if (found) {
+                    // Scroll to the item, centered if possible
+                    listState.animateScrollToItem(scrollIndex, scrollOffset = -200)
+                }
+            }
+        }
+    }
 
     Box(modifier = modifier.fillMaxSize()) {
         LazyColumn(
