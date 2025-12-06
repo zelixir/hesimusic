@@ -263,7 +263,10 @@ class MusicViewModel @Inject constructor(
             } else {
                 if (controller.mediaItemCount > 0) {
                     controller.seekToDefaultPosition(0)
-                    controller.play()
+                    // Auto-play if was paused
+                    if (!wasPlaying) {
+                        controller.play()
+                    }
                 }
             }
         }
