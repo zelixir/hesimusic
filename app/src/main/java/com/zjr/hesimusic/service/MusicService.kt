@@ -134,6 +134,7 @@ class MusicService : MediaSessionService() {
                         
                         // Set media items
                         player.setMediaItems(mediaItems)
+                        player.prepare()
                         
                         // Find the correct index using song ID (more reliable than saved index when shuffle was enabled)
                         var targetIndex = savedIndex
@@ -154,7 +155,6 @@ class MusicService : MediaSessionService() {
                             Log.w(TAG, "restorePlaybackState: index $targetIndex out of range, mediaItems size=${mediaItems.size}")
                         }
                         
-                        player.prepare()
                         // Do not auto-play
                         player.pause()
                         
