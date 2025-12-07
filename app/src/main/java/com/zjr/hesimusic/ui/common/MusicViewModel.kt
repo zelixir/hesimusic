@@ -3,6 +3,7 @@ package com.zjr.hesimusic.ui.common
 import android.content.ComponentName
 import android.content.Context
 import android.os.CountDownTimer
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
@@ -14,6 +15,7 @@ import com.google.common.util.concurrent.MoreExecutors
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
+import com.zjr.hesimusic.data.preferences.PlaylistContext
 import com.zjr.hesimusic.data.repository.FavoriteRepository
 import com.zjr.hesimusic.data.repository.SongRepository
 import com.zjr.hesimusic.data.scanner.TagLibHelper
@@ -40,6 +42,10 @@ class MusicViewModel @Inject constructor(
     private val tagLibHelper: TagLibHelper
 ) : ViewModel() {
 
+    companion object {
+        private const val TAG = "MusicViewModel"
+    }
+
     private var mediaControllerFuture: ListenableFuture<MediaController>? = null
     private var mediaController: MediaController? = null
 
@@ -48,6 +54,10 @@ class MusicViewModel @Inject constructor(
 
     private val _sleepTimerState = MutableStateFlow<Long?>(null)
     val sleepTimerState: StateFlow<Long?> = _sleepTimerState.asStateFlow()
+    
+    // Expose the saved playlist context for UI to use when restoring state
+    private val _savedPlaylistContext = MutableStateFlow<PlaylistContext?>(null)
+    val savedPlaylistContext: StateFlow<PlaylistContext?> = _savedPlaylistContext.asStateFlow()
 
     private var sleepTimer: CountDownTimer? = null
     
@@ -55,17 +65,36 @@ class MusicViewModel @Inject constructor(
     private var loadedArtworkPath: String? = null
 
     init {
-        // Load last played song for immediate UI update
+        Log.d(TAG, "init: MusicViewModel created")
+        
+        // Load last played song and playlist context for immediate UI update
         viewModelScope.launch {
             val queueIds = playbackPreferences.getQueue()
+            val savedSongId = playbackPreferences.getCurrentSongId()
             val currentIndex = playbackPreferences.getCurrentSongIndex()
-            if (queueIds.isNotEmpty() && currentIndex in queueIds.indices) {
-                val songId = queueIds[currentIndex]
-                val songs = songRepository.getSongsByIds(listOf(songId))
+            val playlistContext = playbackPreferences.getPlaylistContext()
+            
+            Log.d(TAG, "init: restoring state - queueIds=${queueIds.size}, savedSongId=$savedSongId, currentIndex=$currentIndex, playlistContext=$playlistContext")
+            
+            // Update the saved playlist context for UI to use
+            _savedPlaylistContext.value = playlistContext
+            
+            // Prefer song ID over index (more reliable when shuffle was enabled)
+            val songIdToLoad = if (savedSongId > 0) {
+                savedSongId
+            } else if (queueIds.isNotEmpty() && currentIndex in queueIds.indices) {
+                queueIds[currentIndex]
+            } else {
+                null
+            }
+            
+            if (songIdToLoad != null) {
+                val songs = songRepository.getSongsByIds(listOf(songIdToLoad))
                 val song = songs.firstOrNull()
                 if (song != null) {
+                    Log.d(TAG, "init: restored song '${song.title}' (id=$songIdToLoad)")
                     val mediaItem = song.toMediaItem()
-                    val position = playbackPreferences.getLastPosition()
+                    val position = playbackPreferences.getSavedPosition()
                     val isFavorite = favoriteRepository.isFavoriteSync(song.filePath, song.startPosition)
                     // Ensure duration is valid (not negative)
                     val safeDuration = song.duration.coerceAtLeast(0L)
@@ -77,10 +106,15 @@ class MusicViewModel @Inject constructor(
                             duration = safeDuration,
                             currentSongFilePath = song.filePath,
                             currentSongStartPosition = song.startPosition,
-                            isCurrentSongFavorite = isFavorite
+                            isCurrentSongFavorite = isFavorite,
+                            playlistContext = playlistContext
                         )
                     }
+                } else {
+                    Log.w(TAG, "init: could not find song with id $songIdToLoad")
                 }
+            } else {
+                Log.d(TAG, "init: no valid saved state to restore")
             }
         }
 
@@ -98,6 +132,7 @@ class MusicViewModel @Inject constructor(
                 }
 
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                    Log.d(TAG, "onMediaItemTransition: mediaId=${mediaItem?.mediaId}, reason=$reason")
                     updateState()
                     // Update favorite status when song changes
                     updateCurrentSongFavoriteStatus()
@@ -234,12 +269,19 @@ class MusicViewModel @Inject constructor(
         }
     }
     
-    fun playList(songs: List<Song>, startIndex: Int = 0) {
+    fun playList(songs: List<Song>, startIndex: Int = 0, context: PlaylistContext? = null) {
          mediaController?.let { controller ->
+            Log.d(TAG, "playList: ${songs.size} songs, startIndex=$startIndex, context=$context")
             val mediaItems = songs.map { it.toMediaItem() }
             controller.setMediaItems(mediaItems, startIndex, 0)
             controller.prepare()
             controller.play()
+            
+            // Save playlist context if provided
+            context?.let {
+                playbackPreferences.savePlaylistContext(it)
+                Log.d(TAG, "playList: saved context $it")
+            }
         }
     }
 
@@ -353,7 +395,8 @@ data class MusicUiState(
     val currentSongFilePath: String? = null,
     val currentSongStartPosition: Long = 0L,
     val isCurrentSongFavorite: Boolean = false,
-    val artworkBytes: ByteArray? = null
+    val artworkBytes: ByteArray? = null,
+    val playlistContext: PlaylistContext? = null
 ) {
     // Override equals and hashCode to handle ByteArray comparison properly
     override fun equals(other: Any?): Boolean {
@@ -373,7 +416,9 @@ data class MusicUiState(
         if (playlist != other.playlist) return false
         if (audioSessionId != other.audioSessionId) return false
         if (currentSongFilePath != other.currentSongFilePath) return false
+        if (currentSongStartPosition != other.currentSongStartPosition) return false
         if (isCurrentSongFavorite != other.isCurrentSongFavorite) return false
+        if (playlistContext != other.playlistContext) return false
         if (artworkBytes != null) {
             if (other.artworkBytes == null) return false
             if (!artworkBytes.contentEquals(other.artworkBytes)) return false
@@ -394,7 +439,9 @@ data class MusicUiState(
         result = 31 * result + playlist.hashCode()
         result = 31 * result + audioSessionId
         result = 31 * result + (currentSongFilePath?.hashCode() ?: 0)
+        result = 31 * result + currentSongStartPosition.hashCode()
         result = 31 * result + isCurrentSongFavorite.hashCode()
+        result = 31 * result + (playlistContext?.hashCode() ?: 0)
         result = 31 * result + (artworkBytes?.contentHashCode() ?: 0)
         return result
     }

@@ -2,6 +2,7 @@ package com.zjr.hesimusic.service
 
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
@@ -24,6 +25,10 @@ import javax.inject.Inject
 @AndroidEntryPoint
 class MusicService : MediaSessionService() {
 
+    companion object {
+        private const val TAG = "MusicService"
+    }
+
     @Inject
     lateinit var player: ExoPlayer
 
@@ -35,9 +40,14 @@ class MusicService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    
+    // Flag to prevent saving state while restoring it
+    private var isRestoringState = false
 
     override fun onCreate() {
         super.onCreate()
+        Log.d(TAG, "onCreate: MusicService created")
+        
         val forwardingPlayer = object : ForwardingPlayer(player) {
             override fun getAvailableCommands(): Player.Commands {
                 return super.getAvailableCommands().buildUpon()
@@ -91,30 +101,80 @@ class MusicService : MediaSessionService() {
     }
 
     private fun restorePlaybackState() {
+        Log.d(TAG, "restorePlaybackState: starting state restoration")
+        isRestoringState = true  // Prevent saving state during restoration
+        
         serviceScope.launch {
-            // Restore playback mode
-            player.repeatMode = playbackPreferences.getRepeatMode()
-            player.shuffleModeEnabled = playbackPreferences.getShuffleModeEnabled()
-
-            val queueIds = playbackPreferences.getQueue()
-            if (queueIds.isNotEmpty()) {
-                val songs = songRepository.getSongsByIds(queueIds)
-                // Maintain order based on IDs
-                val sortedSongs = queueIds.mapNotNull { id -> songs.find { it.id == id } }
-                val mediaItems = sortedSongs.map { it.toMediaItem() }
+            try {
+                // Get saved state first
+                val repeatMode = playbackPreferences.getRepeatMode()
+                val savedShuffleMode = playbackPreferences.getShuffleModeEnabled()
+                val savedSongId = playbackPreferences.getCurrentSongId()
+                val savedIndex = playbackPreferences.getCurrentSongIndex()
+                val savedPosition = playbackPreferences.getSavedPosition()
+                val playlistContext = playbackPreferences.getPlaylistContext()
                 
-                if (mediaItems.isNotEmpty()) {
-                    player.setMediaItems(mediaItems)
-                    val index = playbackPreferences.getCurrentSongIndex()
-                    val position = playbackPreferences.getLastPosition()
+                Log.d(TAG, "restorePlaybackState: repeatMode=$repeatMode, shuffleMode=$savedShuffleMode")
+                Log.d(TAG, "restorePlaybackState: songId=$savedSongId, index=$savedIndex, playlistContext=$playlistContext")
+
+                val queueIds = playbackPreferences.getQueue()
+                
+                if (queueIds.isNotEmpty()) {
+                    val songs = songRepository.getSongsByIds(queueIds)
+                    Log.d(TAG, "restorePlaybackState: found ${songs.size} songs for ${queueIds.size} queue IDs")
                     
-                    if (index in mediaItems.indices) {
-                        player.seekTo(index, position)
+                    // Maintain order based on IDs
+                    val sortedSongs = queueIds.mapNotNull { id -> songs.find { it.id == id } }
+                    val mediaItems = sortedSongs.map { it.toMediaItem() }
+                    
+                    if (mediaItems.isNotEmpty()) {
+                        // Set repeat mode but NOT shuffle mode yet (to avoid shuffling the queue)
+                        player.repeatMode = repeatMode
+                        player.shuffleModeEnabled = false
+                        
+                        // Set media items
+                        player.setMediaItems(mediaItems)
+                        player.prepare()
+                        
+                        // Find the correct index using song ID (more reliable than saved index when shuffle was enabled)
+                        var targetIndex = savedIndex
+                        if (savedSongId > 0) {
+                            val foundIndex = mediaItems.indexOfFirst { it.mediaId == savedSongId.toString() }
+                            if (foundIndex >= 0) {
+                                targetIndex = foundIndex
+                                Log.d(TAG, "restorePlaybackState: found song by ID at index $foundIndex")
+                            } else {
+                                Log.w(TAG, "restorePlaybackState: song ID $savedSongId not found, using saved index $savedIndex")
+                            }
+                        }
+                        
+                        // Validate and clamp targetIndex to valid range
+                        if (targetIndex !in mediaItems.indices) {
+                            Log.w(TAG, "restorePlaybackState: index $targetIndex out of range, mediaItems size=${mediaItems.size}, using index 0")
+                            targetIndex = 0
+                        }
+                        
+                        Log.d(TAG, "restorePlaybackState: seeking to index=$targetIndex, position=$savedPosition")
+                        player.seekTo(targetIndex, savedPosition)
+                        
+                        // Do not auto-play
+                        player.pause()
+                        
+                        // Now enable shuffle mode if it was enabled (after seeking to the correct song)
+                        if (savedShuffleMode) {
+                            player.shuffleModeEnabled = true
+                            Log.d(TAG, "restorePlaybackState: enabled shuffle mode after restoration")
+                        }
+                        
+                        Log.d(TAG, "restorePlaybackState: state restored successfully")
+                    } else {
+                        Log.w(TAG, "restorePlaybackState: no media items to restore")
                     }
-                    player.prepare()
-                    // Do not auto-play
-                    player.pause()
+                } else {
+                    Log.d(TAG, "restorePlaybackState: no saved queue to restore")
                 }
+            } finally {
+                isRestoringState = false  // Allow saving state again
             }
         }
     }
@@ -122,19 +182,25 @@ class MusicService : MediaSessionService() {
     private fun setupPlayerListeners() {
         player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                Log.d(TAG, "onMediaItemTransition: mediaId=${mediaItem?.mediaId}, reason=$reason")
                 saveCurrentState()
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
+                Log.d(TAG, "onPlaybackStateChanged: state=$playbackState")
                 saveCurrentState()
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                Log.d(TAG, "onIsPlayingChanged: isPlaying=$isPlaying")
                 saveCurrentState()
             }
             
             override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
-                 saveQueueState()
+                Log.d(TAG, "onTimelineChanged: windowCount=${timeline.windowCount}, reason=$reason")
+                if (!isRestoringState) {
+                    saveQueueState()
+                }
             }
         })
     }
@@ -142,7 +208,7 @@ class MusicService : MediaSessionService() {
     private fun startPeriodicSave() {
         serviceScope.launch {
             while (isActive) {
-                if (player.isPlaying) {
+                if (player.isPlaying && !isRestoringState) {
                     saveCurrentState()
                 }
                 delay(5000) // Save every 5 seconds
@@ -151,11 +217,27 @@ class MusicService : MediaSessionService() {
     }
 
     private fun saveCurrentState() {
-        playbackPreferences.saveCurrentSongIndex(player.currentMediaItemIndex)
-        playbackPreferences.saveCurrentPosition(player.currentPosition)
+        if (isRestoringState) {
+            Log.d(TAG, "saveCurrentState: skipped (restoring state)")
+            return
+        }
+        
+        val index = player.currentMediaItemIndex
+        val position = player.currentPosition
+        val mediaItem = player.currentMediaItem
+        val songId = mediaItem?.mediaId?.toLongOrNull() ?: -1L
+        
+        playbackPreferences.saveCurrentSongIndex(index)
+        playbackPreferences.saveCurrentSongId(songId)
+        playbackPreferences.saveCurrentPosition(position)
     }
     
     private fun saveQueueState() {
+        if (isRestoringState) {
+            Log.d(TAG, "saveQueueState: skipped (restoring state)")
+            return
+        }
+        
         val mediaItems = List(player.mediaItemCount) { i -> player.getMediaItemAt(i) }
         val ids = mediaItems.mapNotNull { it.mediaId.toLongOrNull() }
         playbackPreferences.saveQueue(ids)
@@ -166,7 +248,9 @@ class MusicService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        Log.d(TAG, "onDestroy: MusicService destroyed, saving final state")
         saveCurrentState() // Save one last time
+        saveQueueState()   // Also save queue state
         serviceScope.cancel()
         mediaSession?.run {
             player.release()
@@ -182,12 +266,13 @@ class MusicService : MediaSessionService() {
             session: MediaSession,
             controller: MediaSession.ControllerInfo
         ): MediaSession.ConnectionResult {
+            Log.d(TAG, "MusicSessionCallback.onConnect: controller=${controller.packageName}")
             val sessionExtras = Bundle()
             // Use try-catch to prevent crashes if player is not ready or other issues
             try {
                 sessionExtras.putInt("AUDIO_SESSION_ID", player.audioSessionId)
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.e(TAG, "MusicSessionCallback.onConnect: error getting audio session ID", e)
             }
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                 .setSessionExtras(sessionExtras)

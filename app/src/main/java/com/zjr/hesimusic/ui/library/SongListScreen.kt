@@ -1,5 +1,6 @@
 package com.zjr.hesimusic.ui.library
 
+import android.util.Log
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -19,6 +20,8 @@ import androidx.compose.ui.Modifier
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.Player
 import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.data.preferences.PlaylistContext
+import com.zjr.hesimusic.data.preferences.PlaylistType
 import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.ui.main.BottomPlayerBar
 
@@ -46,8 +49,16 @@ fun SongListScreen(
     val songs by songsFlow.collectAsState(initial = emptyList())
     val musicUiState by musicViewModel.uiState.collectAsState()
 
-    val handleSongClick = remember(musicViewModel) {
-        { list: List<Song>, index: Int -> musicViewModel.playList(list, index) }
+    val handleSongClick = remember(musicViewModel, type, value) {
+        { list: List<Song>, index: Int ->
+            val context = when (type) {
+                "artist" -> PlaylistContext(PlaylistType.ARTIST, value)
+                "album" -> PlaylistContext(PlaylistType.ALBUM, value)
+                else -> PlaylistContext.GLOBAL
+            }
+            Log.d("SongListScreen", "Playing song at index $index with context: $context")
+            musicViewModel.playList(list, index, context)
+        }
     }
 
     Scaffold(
