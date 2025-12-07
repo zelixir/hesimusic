@@ -1,9 +1,20 @@
 package com.zjr.hesimusic.data.model
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
-@Entity(tableName = "songs")
+@Entity(
+    tableName = "songs",
+    indices = [
+        Index(value = ["title"]),
+        Index(value = ["artist"]),
+        Index(value = ["album"]),
+        Index(value = ["filePath"]),
+        Index(value = ["titleInitial"]),
+        Index(value = ["folderPath"])
+    ]
+)
 data class Song(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val title: String,
@@ -22,5 +33,9 @@ data class Song(
     val isCue: Boolean = false,
     val cueFilePath: String? = null,
     val startPosition: Long = 0,
-    val endPosition: Long = -1 // -1 means until end of file or next track
+    val endPosition: Long = -1, // -1 means until end of file or next track
+    
+    // Performance optimization fields (populated during scan, may be empty for existing records until re-scan)
+    val titleInitial: String = "",  // First letter of title for fast grouping
+    val folderPath: String = ""     // Parent folder path for fast folder navigation
 )

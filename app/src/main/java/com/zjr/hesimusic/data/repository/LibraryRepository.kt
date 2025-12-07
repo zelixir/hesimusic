@@ -40,26 +40,19 @@ class LibraryRepository @Inject constructor(
             val folders = mutableMapOf<String, Int>() // path -> count
 
             songs.forEach { song ->
-                val songFile = File(song.filePath)
-                val songParent = songFile.parentFile?.absolutePath ?: ""
-                
-                if (songParent == parentPath) {
+                // Use pre-computed folderPath for faster filtering
+                if (song.folderPath == parentPath) {
                     items.add(FileSystemItem.MusicFile(song))
-                } else if (songParent.startsWith(parentPath)) {
-                    // Check if it is a direct subfolder or deeper
-                    // Ensure we match directory boundary
-                    // If parentPath is "/a/b", and songParent is "/a/b/c", relative is "c"
-                    // If parentPath is "/a/b", and songParent is "/a/bc", relative is "c" (Wait, startsWith is true)
-                    // So we need to ensure boundary.
-                    
+                } else if (song.folderPath.startsWith(parentPath)) {
+                    // Check if it is a direct subfolder
                     val validSub = if (parentPath.endsWith(File.separator)) {
-                        songParent.startsWith(parentPath)
+                        song.folderPath.startsWith(parentPath)
                     } else {
-                        songParent.startsWith(parentPath + File.separator)
+                        song.folderPath.startsWith(parentPath + File.separator)
                     }
 
                     if (validSub) {
-                        val relative = songParent.removePrefix(parentPath).trimStart(File.separatorChar)
+                        val relative = song.folderPath.removePrefix(parentPath).trimStart(File.separatorChar)
                         if (relative.isNotEmpty()) {
                             val firstPart = relative.split(File.separatorChar).first()
                             val folderPath = if (parentPath.endsWith(File.separator)) "$parentPath$firstPart" else "$parentPath${File.separator}$firstPart"
