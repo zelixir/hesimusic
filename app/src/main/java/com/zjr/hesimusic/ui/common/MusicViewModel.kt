@@ -441,7 +441,6 @@ data class MusicUiState(
         result = 31 * result + isCurrentSongFavorite.hashCode()
         result = 31 * result + (playlistContext?.hashCode() ?: 0)
         result = 31 * result + (artworkBytes?.contentHashCode() ?: 0)
-        result = 31 * result + (artworkBytes?.contentHashCode() ?: 0)
         return result
     }
 }
