@@ -148,12 +148,14 @@ class MusicService : MediaSessionService() {
                             }
                         }
                         
-                        Log.d(TAG, "restorePlaybackState: seeking to index=$targetIndex, position=$savedPosition")
-                        if (targetIndex in mediaItems.indices) {
-                            player.seekTo(targetIndex, savedPosition)
-                        } else {
-                            Log.w(TAG, "restorePlaybackState: index $targetIndex out of range, mediaItems size=${mediaItems.size}")
+                        // Validate and clamp targetIndex to valid range
+                        if (targetIndex !in mediaItems.indices) {
+                            Log.w(TAG, "restorePlaybackState: index $targetIndex out of range, mediaItems size=${mediaItems.size}, using index 0")
+                            targetIndex = 0
                         }
+                        
+                        Log.d(TAG, "restorePlaybackState: seeking to index=$targetIndex, position=$savedPosition")
+                        player.seekTo(targetIndex, savedPosition)
                         
                         // Do not auto-play
                         player.pause()

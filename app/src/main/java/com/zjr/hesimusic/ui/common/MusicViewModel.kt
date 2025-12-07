@@ -416,6 +416,7 @@ data class MusicUiState(
         if (playlist != other.playlist) return false
         if (audioSessionId != other.audioSessionId) return false
         if (currentSongFilePath != other.currentSongFilePath) return false
+        if (currentSongStartPosition != other.currentSongStartPosition) return false
         if (isCurrentSongFavorite != other.isCurrentSongFavorite) return false
         if (playlistContext != other.playlistContext) return false
         if (artworkBytes != null) {
@@ -438,6 +439,7 @@ data class MusicUiState(
         result = 31 * result + playlist.hashCode()
         result = 31 * result + audioSessionId
         result = 31 * result + (currentSongFilePath?.hashCode() ?: 0)
+        result = 31 * result + currentSongStartPosition.hashCode()
         result = 31 * result + isCurrentSongFavorite.hashCode()
         result = 31 * result + (playlistContext?.hashCode() ?: 0)
         result = 31 * result + (artworkBytes?.contentHashCode() ?: 0)
