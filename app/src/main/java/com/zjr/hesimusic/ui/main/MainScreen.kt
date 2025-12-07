@@ -1,5 +1,6 @@
 package com.zjr.hesimusic.ui.main
 
+import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Box
@@ -41,6 +42,8 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.Player
 import com.zjr.hesimusic.data.model.Album
 import com.zjr.hesimusic.data.model.Artist
+import com.zjr.hesimusic.data.preferences.PlaylistContext
+import com.zjr.hesimusic.data.preferences.PlaylistType
 import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.ui.library.AlbumList
 import com.zjr.hesimusic.ui.library.ArtistList
@@ -183,18 +186,26 @@ fun MainScreen(
                 when (page) {
                     0 -> {
                         val songs by viewModel.songs.collectAsState()
+                        Log.d("MainScreen", "SongList (Global): displaying ${songs.size} songs")
                         SongList(
                             songs = songs,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
-                            onSongClick = { list, index -> musicViewModel.playList(list, index) }
+                            onSongClick = { list, index -> 
+                                Log.d("MainScreen", "SongList (Global): playing song at index $index")
+                                musicViewModel.playList(list, index, PlaylistContext.GLOBAL)
+                            }
                         )
                     }
                     1 -> {
                         val favoriteSongs by viewModel.favoriteSongs.collectAsState()
+                        Log.d("MainScreen", "SongList (Favorites): displaying ${favoriteSongs.size} songs")
                         SongList(
                             songs = favoriteSongs,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
-                            onSongClick = { list, index -> musicViewModel.playList(list, index) }
+                            onSongClick = { list, index -> 
+                                Log.d("MainScreen", "SongList (Favorites): playing song at index $index")
+                                musicViewModel.playList(list, index, PlaylistContext.FAVORITES)
+                            }
                         )
                     }
                     2 -> {
@@ -209,7 +220,10 @@ fun MainScreen(
                         FolderList(
                             viewModel = viewModel,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
-                            onSongClick = { list, index -> musicViewModel.playList(list, index) }
+                            onSongClick = { list, index, folderPath -> 
+                                Log.d("MainScreen", "FolderList: playing song at index $index in folder $folderPath")
+                                musicViewModel.playList(list, index, PlaylistContext(PlaylistType.FOLDER, folderPath))
+                            }
                         )
                     }
                 }
