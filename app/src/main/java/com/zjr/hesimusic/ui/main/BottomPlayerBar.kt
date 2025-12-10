@@ -54,6 +54,7 @@ fun BottomPlayerBar(
     onEqualizerClick: () -> Unit,
     onAboutClick: () -> Unit,
     onSleepTimerClick: () -> Unit,
+    onLogsClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -178,6 +179,13 @@ fun BottomPlayerBar(
                             onClick = { 
                                 showMenu = false
                                 onSleepTimerClick()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("日志") },
+                            onClick = { 
+                                showMenu = false
+                                onLogsClick()
                             }
                         )
                         DropdownMenuItem(

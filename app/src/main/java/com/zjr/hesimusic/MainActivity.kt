@@ -1,6 +1,7 @@
 package com.zjr.hesimusic
 
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -16,6 +17,7 @@ import com.zjr.hesimusic.ui.about.AboutScreen
 import com.zjr.hesimusic.ui.debug.TagDebugScreen
 import com.zjr.hesimusic.ui.equalizer.EqualizerScreen
 import com.zjr.hesimusic.ui.library.SongListScreen
+import com.zjr.hesimusic.ui.logs.LogScreen
 import com.zjr.hesimusic.ui.main.MainScreen
 import com.zjr.hesimusic.ui.player.PlayerScreen
 import com.zjr.hesimusic.ui.scan.ScanScreen
@@ -23,16 +25,36 @@ import com.zjr.hesimusic.ui.settings.SettingsScreen
 import com.zjr.hesimusic.ui.sleeptimer.SleepTimerScreen
 import com.zjr.hesimusic.ui.test.PlayerTestScreen
 import com.zjr.hesimusic.ui.theme.HesimusicTheme
+import com.zjr.hesimusic.utils.AppLogger
 import dagger.hilt.android.AndroidEntryPoint
 
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import javax.inject.Inject
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+    
+    @Inject
+    lateinit var appLogger: AppLogger
+    
+    private val TAG = "MainActivity"
+    
     override fun onCreate(savedInstanceState: Bundle?) {
+        val activityStartTime = System.currentTimeMillis()
+        Log.i(TAG, "MainActivity onCreate started")
+        
+        val superStartTime = System.currentTimeMillis()
         super.onCreate(savedInstanceState)
+        val superDuration = System.currentTimeMillis() - superStartTime
+        appLogger.timing(TAG, "Activity super.onCreate (Hilt injection)", superDuration)
+        
+        val edgeToEdgeStartTime = System.currentTimeMillis()
         enableEdgeToEdge()
+        val edgeToEdgeDuration = System.currentTimeMillis() - edgeToEdgeStartTime
+        appLogger.timing(TAG, "enableEdgeToEdge", edgeToEdgeDuration)
+        
+        val uiStartTime = System.currentTimeMillis()
         setContent {
             HesimusicTheme {
                 val navController = rememberNavController()
@@ -70,7 +92,8 @@ class MainActivity : ComponentActivity() {
                                 onSettingsClick = { navController.navigate("settings") },
                                 onEqualizerClick = { navController.navigate("equalizer") },
                                 onAboutClick = { navController.navigate("about") },
-                                onSleepTimerClick = { navController.navigate("sleep_timer") }
+                                onSleepTimerClick = { navController.navigate("sleep_timer") },
+                                onLogsClick = { navController.navigate("logs") }
                             )
                         }
 
@@ -92,6 +115,10 @@ class MainActivity : ComponentActivity() {
 
                         composable("sleep_timer") {
                             SleepTimerScreen(onBackClick = { navController.popBackStack() })
+                        }
+
+                        composable("logs") {
+                            LogScreen(onBackClick = { navController.popBackStack() })
                         }
 
                         composable("debug") {
@@ -120,12 +147,19 @@ class MainActivity : ComponentActivity() {
                                 onSettingsClick = { navController.navigate("settings") },
                                 onEqualizerClick = { navController.navigate("equalizer") },
                                 onAboutClick = { navController.navigate("about") },
-                                onSleepTimerClick = { navController.navigate("sleep_timer") }
+                                onSleepTimerClick = { navController.navigate("sleep_timer") },
+                                onLogsClick = { navController.navigate("logs") }
                             )
                         }
                     }
                 }
             }
         }
+        val uiDuration = System.currentTimeMillis() - uiStartTime
+        appLogger.timing(TAG, "UI composition (Compose + Navigation setup)", uiDuration)
+        
+        val totalDuration = System.currentTimeMillis() - activityStartTime
+        appLogger.timing(TAG, "Total MainActivity onCreate", totalDuration)
+        appLogger.info(TAG, "MainActivity initialized successfully")
     }
 }

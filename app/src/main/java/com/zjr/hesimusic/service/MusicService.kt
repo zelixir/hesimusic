@@ -12,6 +12,7 @@ import androidx.media3.session.MediaSessionService
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
 import com.zjr.hesimusic.data.repository.SongRepository
+import com.zjr.hesimusic.utils.AppLogger
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +39,9 @@ class MusicService : MediaSessionService() {
     @Inject
     lateinit var songRepository: SongRepository
 
+    @Inject
+    lateinit var appLogger: AppLogger
+
     private var mediaSession: MediaSession? = null
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     
@@ -45,8 +49,10 @@ class MusicService : MediaSessionService() {
     private var isRestoringState = false
 
     override fun onCreate() {
+        val startTime = System.currentTimeMillis()
         super.onCreate()
         Log.d(TAG, "onCreate: MusicService created")
+        appLogger.info(TAG, "MusicService onCreate started")
         
         val forwardingPlayer = object : ForwardingPlayer(player) {
             override fun getAvailableCommands(): Player.Commands {
@@ -98,6 +104,9 @@ class MusicService : MediaSessionService() {
         restorePlaybackState()
         setupPlayerListeners()
         startPeriodicSave()
+        
+        val duration = System.currentTimeMillis() - startTime
+        appLogger.timing(TAG, "MusicService onCreate", duration)
     }
 
     private fun restorePlaybackState() {
@@ -273,6 +282,7 @@ class MusicService : MediaSessionService() {
                 sessionExtras.putInt("AUDIO_SESSION_ID", player.audioSessionId)
             } catch (e: Exception) {
                 Log.e(TAG, "MusicSessionCallback.onConnect: error getting audio session ID", e)
+                appLogger.error(TAG, "Error getting audio session ID in onConnect", e)
             }
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                 .setSessionExtras(sessionExtras)

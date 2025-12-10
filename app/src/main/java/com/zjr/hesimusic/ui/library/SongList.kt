@@ -1,5 +1,6 @@
 package com.zjr.hesimusic.ui.library
 
+import android.util.Log
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,6 +24,7 @@ import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.ui.common.FastScrollbar
 import com.zjr.hesimusic.ui.common.MusicListItem
 import com.zjr.hesimusic.utils.AlphabetIndexer
+import com.zjr.hesimusic.utils.AppLogger
 import androidx.compose.runtime.produceState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -33,6 +35,7 @@ import kotlinx.coroutines.withContext
  * Negative value scrolls upward, positioning the item away from the top edge.
  */
 private const val SCROLL_OFFSET_TO_CENTER_ITEM = -200
+private const val TAG = "SongList"
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -40,13 +43,21 @@ fun SongList(
     songs: List<Song>,
     currentPlayingSongId: String? = null,
     onSongClick: (List<Song>, Int) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    appLogger: AppLogger? = null
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
+    // Log list size for performance tracking
+    LaunchedEffect(songs.size) {
+        Log.d(TAG, "SongList rendering with ${songs.size} songs")
+        appLogger?.info(TAG, "SongList rendering with ${songs.size} songs")
+    }
+
     // Since songs are already sorted by titleInitial from database, we can group directly
     val grouped = produceState<Map<Char, List<Song>>>(initialValue = emptyMap(), key1 = songs) {
+        val groupingStartTime = System.currentTimeMillis()
         value = withContext(Dispatchers.Default) {
             songs.groupBy { 
                 // Use pre-computed titleInitial field
@@ -55,10 +66,18 @@ fun SongList(
                 if (initial.isLetter() || initial == '#') initial else '#'
             }.toSortedMap()
         }
+        val groupingDuration = System.currentTimeMillis() - groupingStartTime
+        Log.d(TAG, "Song grouping completed in ${groupingDuration}ms, ${value.size} groups")
+        appLogger?.timing(TAG, "Song grouping (${value.size} groups)", groupingDuration)
     }.value
     
     val flattenedSongs = remember(grouped) {
-        grouped.values.flatten()
+        val flattenStartTime = System.currentTimeMillis()
+        val result = grouped.values.flatten()
+        val flattenDuration = System.currentTimeMillis() - flattenStartTime
+        Log.d(TAG, "Song flattening completed in ${flattenDuration}ms")
+        appLogger?.timing(TAG, "Song flattening", flattenDuration)
+        result
     }
 
     // Calculate the starting index for each group for display
@@ -100,6 +119,7 @@ fun SongList(
                 if (scrollIndex != null) {
                     // Scroll to the item instantly (no animation), centered if possible
                     listState.scrollToItem(scrollIndex, scrollOffset = SCROLL_OFFSET_TO_CENTER_ITEM)
+                    Log.d(TAG, "Auto-scrolled to current song at index $scrollIndex")
                 }
             }
         }

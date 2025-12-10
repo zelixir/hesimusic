@@ -37,6 +37,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.Player
@@ -64,8 +65,15 @@ fun MainScreen(
     onSettingsClick: () -> Unit,
     onEqualizerClick: () -> Unit,
     onAboutClick: () -> Unit,
-    onSleepTimerClick: () -> Unit
+    onSleepTimerClick: () -> Unit,
+    onLogsClick: () -> Unit
 ) {
+    // Get AppLogger from Application context
+    val context = LocalContext.current
+    val appLogger = remember {
+        (context.applicationContext as? com.zjr.hesimusic.HesiMusicApplication)?.appLogger
+    }
+    
     val pagerState = rememberPagerState(pageCount = { 5 })
     val scope = rememberCoroutineScope()
     val titles = listOf("歌曲", "收藏", "歌手", "专辑", "文件夹")
@@ -118,7 +126,8 @@ fun MainScreen(
                 onSettingsClick = onSettingsClick,
                 onEqualizerClick = onEqualizerClick,
                 onAboutClick = onAboutClick,
-                onSleepTimerClick = onSleepTimerClick
+                onSleepTimerClick = onSleepTimerClick,
+                onLogsClick = onLogsClick
             )
         }
     ) { innerPadding ->
@@ -183,47 +192,65 @@ fun MainScreen(
                 modifier = Modifier.weight(1f),
                 verticalAlignment = Alignment.Top
             ) { page ->
+                // Log when switching tabs
+                LaunchedEffect(page) {
+                    val tabName = titles.getOrNull(page) ?: "Unknown"
+                    Log.d("MainScreen", "Tab switched to: $tabName (index: $page)")
+                    appLogger?.info("MainScreen", "Tab switched to: $tabName (index: $page)")
+                }
+                
                 when (page) {
                     0 -> {
                         val songs by viewModel.songs.collectAsState()
                         Log.d("MainScreen", "SongList (Global): displaying ${songs.size} songs")
+                        appLogger?.info("MainScreen", "SongList (Global): displaying ${songs.size} songs")
                         SongList(
                             songs = songs,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
                             onSongClick = { list, index -> 
                                 Log.d("MainScreen", "SongList (Global): playing song at index $index")
                                 musicViewModel.playList(list, index, PlaylistContext.GLOBAL)
-                            }
+                            },
+                            appLogger = appLogger
                         )
                     }
                     1 -> {
                         val favoriteSongs by viewModel.favoriteSongs.collectAsState()
                         Log.d("MainScreen", "SongList (Favorites): displaying ${favoriteSongs.size} songs")
+                        appLogger?.info("MainScreen", "SongList (Favorites): displaying ${favoriteSongs.size} songs")
                         SongList(
                             songs = favoriteSongs,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
                             onSongClick = { list, index -> 
                                 Log.d("MainScreen", "SongList (Favorites): playing song at index $index")
                                 musicViewModel.playList(list, index, PlaylistContext.FAVORITES)
-                            }
+                            },
+                            appLogger = appLogger
                         )
                     }
                     2 -> {
                         val artists by viewModel.artists.collectAsState()
-                        ArtistList(artists = artists, onArtistClick = onArtistClick)
+                        Log.d("MainScreen", "ArtistList: displaying ${artists.size} artists")
+                        appLogger?.info("MainScreen", "ArtistList: displaying ${artists.size} artists")
+                        ArtistList(artists = artists, onArtistClick = onArtistClick, appLogger = appLogger)
                     }
                     3 -> {
                         val albums by viewModel.albums.collectAsState()
-                        AlbumList(albums = albums, onAlbumClick = onAlbumClick)
+                        Log.d("MainScreen", "AlbumList: displaying ${albums.size} albums")
+                        appLogger?.info("MainScreen", "AlbumList: displaying ${albums.size} albums")
+                        AlbumList(albums = albums, onAlbumClick = onAlbumClick, appLogger = appLogger)
                     }
                     4 -> {
+                        Log.d("MainScreen", "FolderList view activated")
+                        appLogger?.info("MainScreen", "FolderList view activated")
                         FolderList(
                             viewModel = viewModel,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
                             onSongClick = { list, index, folderPath -> 
                                 Log.d("MainScreen", "FolderList: playing song at index $index in folder $folderPath")
                                 musicViewModel.playList(list, index, PlaylistContext(PlaylistType.FOLDER, folderPath))
-                            }
+                            },
+                            appLogger = appLogger
                         )
                     }
                 }
