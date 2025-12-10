@@ -64,7 +64,8 @@ fun MainScreen(
     onSettingsClick: () -> Unit,
     onEqualizerClick: () -> Unit,
     onAboutClick: () -> Unit,
-    onSleepTimerClick: () -> Unit
+    onSleepTimerClick: () -> Unit,
+    onLogsClick: () -> Unit
 ) {
     val pagerState = rememberPagerState(pageCount = { 5 })
     val scope = rememberCoroutineScope()
@@ -118,7 +119,8 @@ fun MainScreen(
                 onSettingsClick = onSettingsClick,
                 onEqualizerClick = onEqualizerClick,
                 onAboutClick = onAboutClick,
-                onSleepTimerClick = onSleepTimerClick
+                onSleepTimerClick = onSleepTimerClick,
+                onLogsClick = onLogsClick
             )
         }
     ) { innerPadding ->

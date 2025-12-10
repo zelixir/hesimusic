@@ -38,7 +38,8 @@ fun SongListScreen(
     onSettingsClick: () -> Unit,
     onEqualizerClick: () -> Unit,
     onAboutClick: () -> Unit,
-    onSleepTimerClick: () -> Unit
+    onSleepTimerClick: () -> Unit,
+    onLogsClick: () -> Unit
 ) {
     val songsFlow = when (type) {
         "artist" -> viewModel.getSongsByArtist(value)
@@ -103,7 +104,8 @@ fun SongListScreen(
                 onSettingsClick = onSettingsClick,
                 onEqualizerClick = onEqualizerClick,
                 onAboutClick = onAboutClick,
-                onSleepTimerClick = onSleepTimerClick
+                onSleepTimerClick = onSleepTimerClick,
+                onLogsClick = onLogsClick
             )
         }
     ) { innerPadding ->

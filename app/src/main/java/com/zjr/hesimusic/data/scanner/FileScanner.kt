@@ -3,12 +3,14 @@ package com.zjr.hesimusic.data.scanner
 import android.os.Environment
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.utils.AlphabetIndexer
+import com.zjr.hesimusic.utils.AppLogger
 import java.io.File
 import javax.inject.Inject
 
 class FileScanner @Inject constructor(
     private val cueParser: CueParser,
-    private val tagLibHelper: TagLibHelper
+    private val tagLibHelper: TagLibHelper,
+    private val appLogger: AppLogger
 ) {
     private val supportedExtensions = setOf("mp3", "flac", "wav", "m4a", "aac", "ogg")
 
@@ -17,6 +19,8 @@ class FileScanner @Inject constructor(
         excludedFolders: Set<String> = emptySet(),
         onProgress: suspend (String, Int) -> Unit
     ): List<Song> {
+        val startTime = System.currentTimeMillis()
+        appLogger.info("FileScanner", "Starting music scan")
         val songs = mutableListOf<Song>()
         val cueReferencedFiles = mutableSetOf<String>() // Absolute paths
 
@@ -129,12 +133,15 @@ class FileScanner @Inject constructor(
                     }
                     onProgress(file.parent ?: file.absolutePath, songs.size)
                 } catch (e: Exception) {
-                    // Log error or skip
+                    // Log error and skip file
+                    appLogger.error("FileScanner", "Failed to scan file: ${file.absolutePath}", e)
                     e.printStackTrace()
                 }
             }
         }
 
+        val duration = System.currentTimeMillis() - startTime
+        appLogger.timing("FileScanner", "Music scan completed, found ${songs.size} songs", duration)
         return songs
     }
 
