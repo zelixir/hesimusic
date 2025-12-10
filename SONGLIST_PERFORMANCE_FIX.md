@@ -87,16 +87,9 @@ val grouped by remember(songs) {
    - 对于 2844 首歌，分组操作通常在 20-50ms 内完成
    - 比异步方案更快
 
-### 2. 优化分组算法
-
-**原来：**
-```kotlin
-songs.groupBy { /* ... */ }.toSortedMap()
-```
-
 ### 2. 简化分组逻辑
 
-分组逻辑现在使用标准库优化的 `groupBy` 函数：
+分组逻辑使用标准库优化的 `groupBy` 函数：
 
 ```kotlin
 val result = songs.groupBy { song ->

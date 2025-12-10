@@ -59,7 +59,7 @@ fun SongList(
     val grouped by remember(songs) {
         derivedStateOf {
             val groupingStartTime = System.currentTimeMillis()
-            // Group songs by titleInitial - data is already sorted from DB
+            // Group songs by titleInitial, then sort groups alphabetically
             val result = songs.groupBy { song ->
                 // Use pre-computed titleInitial field
                 val initial = song.titleInitial.firstOrNull() ?: '#'
