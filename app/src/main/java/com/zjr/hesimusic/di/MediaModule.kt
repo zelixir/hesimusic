@@ -1,6 +1,7 @@
 package com.zjr.hesimusic.di
 
 import android.content.Context
+import android.util.Log
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.exoplayer.ExoPlayer
@@ -17,19 +18,25 @@ import javax.inject.Singleton
 @InstallIn(SingletonComponent::class)
 object MediaModule {
 
-    @Provides
-    @Singleton
-    fun provideAudioAttributes(): AudioAttributes =
-        AudioAttributes.Builder()
-            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
-            .setUsage(C.USAGE_MEDIA)
-            .build()
+    private const val TAG = "MediaModule"
 
     @Provides
     @Singleton
-    fun provideDefaultExtractorsFactory(): DefaultExtractorsFactory =
-        DefaultExtractorsFactory()
+    fun provideAudioAttributes(): AudioAttributes {
+        Log.d(TAG, "Creating AudioAttributes")
+        return AudioAttributes.Builder()
+            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+            .setUsage(C.USAGE_MEDIA)
+            .build()
+    }
+
+    @Provides
+    @Singleton
+    fun provideDefaultExtractorsFactory(): DefaultExtractorsFactory {
+        Log.d(TAG, "Creating DefaultExtractorsFactory")
+        return DefaultExtractorsFactory()
             .setConstantBitrateSeekingEnabled(true)
+    }
 
     @Provides
     @Singleton
@@ -37,12 +44,21 @@ object MediaModule {
         @ApplicationContext context: Context,
         audioAttributes: AudioAttributes,
         extractorsFactory: DefaultExtractorsFactory
-    ): ExoPlayer =
-        ExoPlayer.Builder(context)
+    ): ExoPlayer {
+        Log.i(TAG, "Building ExoPlayer")
+        val startTime = System.currentTimeMillis()
+        
+        val player = ExoPlayer.Builder(context)
             .setMediaSourceFactory(
                 DefaultMediaSourceFactory(context, extractorsFactory)
             )
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .build()
+        
+        val duration = System.currentTimeMillis() - startTime
+        Log.i(TAG, "ExoPlayer created in ${duration}ms")
+        
+        return player
+    }
 }
