@@ -24,6 +24,7 @@ import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.ui.common.FastScrollbar
 import com.zjr.hesimusic.ui.common.MusicListItem
 import com.zjr.hesimusic.utils.AlphabetIndexer
+import com.zjr.hesimusic.utils.AppLogger
 import androidx.compose.runtime.produceState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -42,7 +43,8 @@ fun SongList(
     songs: List<Song>,
     currentPlayingSongId: String? = null,
     onSongClick: (List<Song>, Int) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    appLogger: AppLogger? = null
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -50,6 +52,7 @@ fun SongList(
     // Log list size for performance tracking
     LaunchedEffect(songs.size) {
         Log.d(TAG, "SongList rendering with ${songs.size} songs")
+        appLogger?.info(TAG, "SongList rendering with ${songs.size} songs")
     }
 
     // Since songs are already sorted by titleInitial from database, we can group directly
@@ -65,6 +68,7 @@ fun SongList(
         }
         val groupingDuration = System.currentTimeMillis() - groupingStartTime
         Log.d(TAG, "Song grouping completed in ${groupingDuration}ms, ${value.size} groups")
+        appLogger?.timing(TAG, "Song grouping (${value.size} groups)", groupingDuration)
     }.value
     
     val flattenedSongs = remember(grouped) {
@@ -72,6 +76,7 @@ fun SongList(
         val result = grouped.values.flatten()
         val flattenDuration = System.currentTimeMillis() - flattenStartTime
         Log.d(TAG, "Song flattening completed in ${flattenDuration}ms")
+        appLogger?.timing(TAG, "Song flattening", flattenDuration)
         result
     }
 

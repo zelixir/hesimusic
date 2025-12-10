@@ -10,6 +10,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import com.zjr.hesimusic.data.model.Album
 import com.zjr.hesimusic.ui.common.MusicListItem
+import com.zjr.hesimusic.utils.AppLogger
 
 private const val TAG = "AlbumList"
 
@@ -17,11 +18,13 @@ private const val TAG = "AlbumList"
 fun AlbumList(
     albums: List<Album>,
     onAlbumClick: (Album) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    appLogger: AppLogger? = null
 ) {
     // Log list size for performance tracking
     LaunchedEffect(albums.size) {
         Log.d(TAG, "AlbumList rendering with ${albums.size} albums")
+        appLogger?.info(TAG, "AlbumList rendering with ${albums.size} albums")
     }
     
     LazyColumn(modifier = modifier) {
