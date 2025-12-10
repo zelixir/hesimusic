@@ -17,7 +17,14 @@ interface LogDao {
     @Query("SELECT COUNT(*) FROM logs")
     suspend fun getLogCount(): Int
     
-    @Query("DELETE FROM logs WHERE id IN (SELECT id FROM logs ORDER BY timestamp ASC, id ASC LIMIT :count)")
+    @Query("""
+        DELETE FROM logs 
+        WHERE id IN (
+            SELECT id FROM logs 
+            ORDER BY timestamp ASC, id ASC 
+            LIMIT :count
+        )
+    """)
     suspend fun deleteOldestLogs(count: Int)
     
     @Query("DELETE FROM logs")

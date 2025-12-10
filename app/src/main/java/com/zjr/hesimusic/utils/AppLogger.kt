@@ -65,7 +65,7 @@ class AppLogger @Inject constructor(
     /**
      * Execute a suspend block and log its execution time
      */
-    suspend inline fun <T> measureTimeSuspend(tag: String, operation: String, crossinline block: suspend () -> T): T {
+    suspend inline fun <T> measureTimeSuspend(tag: String, operation: String, noinline block: suspend () -> T): T {
         val startTime = System.currentTimeMillis()
         return try {
             block()

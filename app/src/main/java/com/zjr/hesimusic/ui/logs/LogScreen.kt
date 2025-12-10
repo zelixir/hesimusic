@@ -113,7 +113,7 @@ fun LogScreen(
                 contentPadding = PaddingValues(8.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                items(logs, key = { it.id }) { log ->
+                items(logs, key = { "${it.timestamp}-${it.id}" }) { log ->
                     LogItem(log = log)
                 }
             }
