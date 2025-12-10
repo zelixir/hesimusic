@@ -185,6 +185,12 @@ fun MainScreen(
                 modifier = Modifier.weight(1f),
                 verticalAlignment = Alignment.Top
             ) { page ->
+                // Log when switching tabs
+                LaunchedEffect(page) {
+                    val tabName = titles.getOrNull(page) ?: "Unknown"
+                    Log.d("MainScreen", "Tab switched to: $tabName (index: $page)")
+                }
+                
                 when (page) {
                     0 -> {
                         val songs by viewModel.songs.collectAsState()
@@ -212,13 +218,16 @@ fun MainScreen(
                     }
                     2 -> {
                         val artists by viewModel.artists.collectAsState()
+                        Log.d("MainScreen", "ArtistList: displaying ${artists.size} artists")
                         ArtistList(artists = artists, onArtistClick = onArtistClick)
                     }
                     3 -> {
                         val albums by viewModel.albums.collectAsState()
+                        Log.d("MainScreen", "AlbumList: displaying ${albums.size} albums")
                         AlbumList(albums = albums, onAlbumClick = onAlbumClick)
                     }
                     4 -> {
+                        Log.d("MainScreen", "FolderList view activated")
                         FolderList(
                             viewModel = viewModel,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,

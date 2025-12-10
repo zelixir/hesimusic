@@ -1,5 +1,6 @@
 package com.zjr.hesimusic.ui.library
 
+import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -7,6 +8,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -18,6 +20,8 @@ import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.ui.common.MusicListItem
 import java.io.File
 
+private const val TAG = "FolderList"
+
 @Composable
 fun FolderList(
     viewModel: LibraryViewModel,
@@ -28,6 +32,13 @@ fun FolderList(
 ) {
     var currentPath by remember { mutableStateOf(initialPath) }
     val items by viewModel.getFolderContents(currentPath).collectAsState(initial = emptyList())
+
+    // Log list size for performance tracking
+    LaunchedEffect(items.size, currentPath) {
+        val folderCount = items.count { it is FileSystemItem.Folder }
+        val fileCount = items.count { it is FileSystemItem.MusicFile }
+        Log.d(TAG, "FolderList rendering path: $currentPath with $folderCount folders and $fileCount files")
+    }
 
     // Handle back press to go up directory
     // Only enable if we are not at the initial path
