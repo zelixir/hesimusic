@@ -94,20 +94,22 @@ val grouped by remember(songs) {
 songs.groupBy { /* ... */ }.toSortedMap()
 ```
 
-**现在：**
+### 2. 简化分组逻辑
+
+分组逻辑现在使用标准库优化的 `groupBy` 函数：
+
 ```kotlin
-val result = mutableMapOf<Char, MutableList<Song>>()
-songs.forEach { song ->
-    val key = /* ... */
-    result.getOrPut(key) { mutableListOf() }.add(song)
-}
-result.toSortedMap()
+val result = songs.groupBy { song ->
+    val initial = song.titleInitial.firstOrNull() ?: '#'
+    if (initial.isLetter() || initial == '#') initial else '#'
+}.toSortedMap()
 ```
 
-**改进：**
-- 减少了中间对象的创建
-- 更直接的内存使用
-- 对于大数据集稍微更高效
+**优势：**
+- 更符合 Kotlin 惯用写法
+- 利用标准库优化
+- 代码更简洁易维护
+- 对于这个数据规模仍然非常高效
 
 ## 性能提升
 

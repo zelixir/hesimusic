@@ -60,19 +60,15 @@ fun SongList(
         derivedStateOf {
             val groupingStartTime = System.currentTimeMillis()
             // Group songs by titleInitial - data is already sorted from DB
-            val result = mutableMapOf<Char, MutableList<Song>>()
-            songs.forEach { song ->
+            val result = songs.groupBy { song ->
                 // Use pre-computed titleInitial field
                 val initial = song.titleInitial.firstOrNull() ?: '#'
-                val key = if (initial.isLetter() || initial == '#') initial else '#'
-                result.getOrPut(key) { mutableListOf() }.add(song)
-            }
-            // Convert to sorted map - maintains alphabetical order
-            val sortedResult = result.toSortedMap()
+                if (initial.isLetter() || initial == '#') initial else '#'
+            }.toSortedMap()
             val groupingDuration = System.currentTimeMillis() - groupingStartTime
-            Log.d(TAG, "Song grouping completed in ${groupingDuration}ms, ${sortedResult.size} groups")
-            appLogger?.timing(TAG, "Song grouping (${sortedResult.size} groups)", groupingDuration)
-            sortedResult as Map<Char, List<Song>>
+            Log.d(TAG, "Song grouping completed in ${groupingDuration}ms, ${result.size} groups")
+            appLogger?.timing(TAG, "Song grouping (${result.size} groups)", groupingDuration)
+            result
         }
     }
     

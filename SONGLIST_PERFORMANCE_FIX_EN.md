@@ -87,27 +87,23 @@ val grouped by remember(songs) {
    - For 2844 songs, grouping typically completes in 20-50ms
    - Faster than the async approach
 
-### 2. Optimized Grouping Algorithm
+### 2. Simplified Grouping Logic
 
-**Before:**
+The grouping logic now uses the standard library's optimized `groupBy` function:
+
+**Implementation:**
 ```kotlin
-songs.groupBy { /* ... */ }.toSortedMap()
+val result = songs.groupBy { song ->
+    val initial = song.titleInitial.firstOrNull() ?: '#'
+    if (initial.isLetter() || initial == '#') initial else '#'
+}.toSortedMap()
 ```
 
-**After:**
-```kotlin
-val result = mutableMapOf<Char, MutableList<Song>>()
-songs.forEach { song ->
-    val key = /* ... */
-    result.getOrPut(key) { mutableListOf() }.add(song)
-}
-result.toSortedMap()
-```
-
-**Improvements:**
-- Reduced intermediate object creation
-- More direct memory usage
-- Slightly more efficient for large datasets
+**Benefits:**
+- More idiomatic Kotlin code
+- Leverages standard library optimizations
+- Cleaner and more maintainable
+- Still very efficient for datasets of this size
 
 ## Performance Improvements
 
