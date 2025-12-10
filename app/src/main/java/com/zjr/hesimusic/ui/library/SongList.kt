@@ -25,10 +25,9 @@ import com.zjr.hesimusic.ui.common.FastScrollbar
 import com.zjr.hesimusic.ui.common.MusicListItem
 import com.zjr.hesimusic.utils.AlphabetIndexer
 import com.zjr.hesimusic.utils.AppLogger
-import androidx.compose.runtime.produceState
-import kotlinx.coroutines.Dispatchers
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
  * Scroll offset in pixels to center the currently playing item on screen.
@@ -56,20 +55,26 @@ fun SongList(
     }
 
     // Since songs are already sorted by titleInitial from database, we can group directly
-    val grouped = produceState<Map<Char, List<Song>>>(initialValue = emptyMap(), key1 = songs) {
-        val groupingStartTime = System.currentTimeMillis()
-        value = withContext(Dispatchers.Default) {
-            songs.groupBy { 
+    // Using remember + derivedStateOf for synchronous computation during composition
+    val grouped by remember(songs) {
+        derivedStateOf {
+            val groupingStartTime = System.currentTimeMillis()
+            // Group songs by titleInitial - data is already sorted from DB
+            val result = mutableMapOf<Char, MutableList<Song>>()
+            songs.forEach { song ->
                 // Use pre-computed titleInitial field
-                // If empty or invalid, return '#' (consistent with AlphabetIndexer behavior)
-                val initial = it.titleInitial.firstOrNull() ?: '#'
-                if (initial.isLetter() || initial == '#') initial else '#'
-            }.toSortedMap()
+                val initial = song.titleInitial.firstOrNull() ?: '#'
+                val key = if (initial.isLetter() || initial == '#') initial else '#'
+                result.getOrPut(key) { mutableListOf() }.add(song)
+            }
+            // Convert to sorted map - maintains alphabetical order
+            val sortedResult = result.toSortedMap()
+            val groupingDuration = System.currentTimeMillis() - groupingStartTime
+            Log.d(TAG, "Song grouping completed in ${groupingDuration}ms, ${sortedResult.size} groups")
+            appLogger?.timing(TAG, "Song grouping (${sortedResult.size} groups)", groupingDuration)
+            sortedResult as Map<Char, List<Song>>
         }
-        val groupingDuration = System.currentTimeMillis() - groupingStartTime
-        Log.d(TAG, "Song grouping completed in ${groupingDuration}ms, ${value.size} groups")
-        appLogger?.timing(TAG, "Song grouping (${value.size} groups)", groupingDuration)
-    }.value
+    }
     
     val flattenedSongs = remember(grouped) {
         val flattenStartTime = System.currentTimeMillis()
