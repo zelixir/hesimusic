@@ -54,8 +54,7 @@ fun SongList(
         appLogger?.info(TAG, "SongList rendering with ${songs.size} songs")
     }
 
-    // Since songs are already sorted by titleInitial from database, we can group directly
-    // Using remember + derivedStateOf for synchronous computation during composition
+    // Synchronous grouping to avoid initial empty state
     val grouped by remember(songs) {
         derivedStateOf {
             val groupingStartTime = System.currentTimeMillis()
