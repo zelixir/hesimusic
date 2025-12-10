@@ -51,14 +51,14 @@ class LibraryViewModel @Inject constructor(
 
     val songs: StateFlow<List<Song>> = combine(allSongs, debouncedSearchQuery) { songs, query ->
         filterSongs(songs, query)
-    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val artists: StateFlow<List<Artist>> = combine(allArtists, debouncedSearchQuery) { artists, query ->
         if (query.isBlank()) artists
         else artists.filter { artist ->
             artist.name.contains(query, ignoreCase = true)
         }
-    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val albums: StateFlow<List<Album>> = combine(allAlbums, debouncedSearchQuery) { albums, query ->
         if (query.isBlank()) albums
@@ -66,11 +66,11 @@ class LibraryViewModel @Inject constructor(
             album.name.contains(query, ignoreCase = true) ||
             album.artist.contains(query, ignoreCase = true)
         }
-    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val favoriteSongs: StateFlow<List<Song>> = combine(allFavoriteSongs, debouncedSearchQuery) { songs, query ->
         filterSongs(songs, query)
-    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     private fun filterSongs(songs: List<Song>, query: String): List<Song> {
         if (query.isBlank()) return songs
