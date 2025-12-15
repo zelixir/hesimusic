@@ -17,7 +17,7 @@ object AlphabetIndexer {
     private val cache = android.util.LruCache<Char, Char>(1000)
     
     // Pattern to match track numbers at the start of a string: \d+\.\s+
-    private val trackNumberPattern = Regex("""^\d+\.\s+""")
+    private val trackNumberPattern = Regex("""^\d+\.\s*""")
 
     private fun isChinese(c: Char): Boolean {
         return (c.code in 0x4E00..0x9FA5) || c.code == 0x3007
