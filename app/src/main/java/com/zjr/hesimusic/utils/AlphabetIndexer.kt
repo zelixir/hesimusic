@@ -15,6 +15,9 @@ object AlphabetIndexer {
     }
 
     private val cache = android.util.LruCache<Char, Char>(1000)
+    
+    // Pattern to match track numbers at the start of a string: \d+\.\s+
+    private val trackNumberPattern = Regex("""^\d+\.\s+""")
 
     private fun isChinese(c: Char): Boolean {
         return (c.code in 0x4E00..0x9FA5) || c.code == 0x3007
@@ -62,9 +65,20 @@ object AlphabetIndexer {
         return '#'
     }
 
+    /**
+     * Strip track number prefix from text if present.
+     * Track number pattern: \d+\.\s+ (e.g., "01. ", "2. ", "123. ")
+     */
+    fun stripTrackNumber(text: String): String {
+        return trackNumberPattern.replace(text, "")
+    }
+
     fun getInitial(text: String?): Char {
         if (text.isNullOrEmpty()) return '#'
-        return getInitial(text[0])
+        // Strip track number before getting initial
+        val cleanedText = stripTrackNumber(text)
+        if (cleanedText.isEmpty()) return '#'
+        return getInitial(cleanedText[0])
     }
 
     private fun getKanaInitial(c: Char): Char? {

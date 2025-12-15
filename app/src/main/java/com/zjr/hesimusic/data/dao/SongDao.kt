@@ -14,7 +14,7 @@ interface SongDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(songs: List<Song>)
 
-    @Query("SELECT * FROM songs ORDER BY titleInitial ASC, title ASC")
+    @Query("SELECT * FROM songs ORDER BY titleInitial COLLATE NOCASE ASC, title COLLATE NOCASE ASC")
     fun getAllSongs(): Flow<List<Song>>
 
     @Query("DELETE FROM songs")
@@ -26,13 +26,13 @@ interface SongDao {
     @Query("SELECT * FROM songs WHERE filePath = :path AND startPosition = :startPosition LIMIT 1")
     suspend fun getSongByPathAndStartPosition(path: String, startPosition: Long): Song?
 
-    @Query("SELECT artist as name, COUNT(*) as songCount FROM songs GROUP BY artist ORDER BY artist ASC")
+    @Query("SELECT artist as name, COUNT(*) as songCount FROM songs GROUP BY artist ORDER BY artist COLLATE NOCASE ASC")
     fun getArtists(): Flow<List<Artist>>
 
-    @Query("SELECT album as name, artist, COUNT(*) as songCount FROM songs GROUP BY album ORDER BY album ASC")
+    @Query("SELECT album as name, artist, COUNT(*) as songCount FROM songs GROUP BY album ORDER BY album COLLATE NOCASE ASC")
     fun getAlbums(): Flow<List<Album>>
 
-    @Query("SELECT * FROM songs WHERE artist = :artist ORDER BY title ASC")
+    @Query("SELECT * FROM songs WHERE artist = :artist ORDER BY title COLLATE NOCASE ASC")
     fun getSongsByArtist(artist: String): Flow<List<Song>>
 
     @Query("SELECT * FROM songs WHERE album = :album ORDER BY trackNumber ASC")
