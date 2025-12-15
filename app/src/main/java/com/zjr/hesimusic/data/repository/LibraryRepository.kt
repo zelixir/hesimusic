@@ -69,8 +69,8 @@ class LibraryRepository @Inject constructor(
             
             items.sortedWith(compareBy({ it is FileSystemItem.MusicFile }, { 
                 when(it) {
-                    is FileSystemItem.Folder -> it.name
-                    is FileSystemItem.MusicFile -> it.song.title
+                    is FileSystemItem.Folder -> it.name.lowercase()
+                    is FileSystemItem.MusicFile -> it.song.title.lowercase()
                 }
             }))
         }
