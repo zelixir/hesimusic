@@ -187,20 +187,3 @@ internal fun filterAlbums(albums: List<Album>, query: String, minAlbumTrackCount
         album.artist.contains(query, ignoreCase = true)
     }
 }
-
-internal fun filterArtists(artists: List<Artist>, query: String, minArtistTrackCount: Int): List<Artist> {
-    val artistsWithEnoughSongs = artists.filter { artist -> artist.songCount >= minArtistTrackCount }
-    if (query.isBlank()) return artistsWithEnoughSongs
-    return artistsWithEnoughSongs.filter { artist ->
-        artist.name.contains(query, ignoreCase = true)
-    }
-}
-
-internal fun filterAlbums(albums: List<Album>, query: String, minAlbumTrackCount: Int): List<Album> {
-    val albumsWithEnoughSongs = albums.filter { album -> album.songCount >= minAlbumTrackCount }
-    if (query.isBlank()) return albumsWithEnoughSongs
-    return albumsWithEnoughSongs.filter { album ->
-        album.name.contains(query, ignoreCase = true) ||
-        album.artist.contains(query, ignoreCase = true)
-    }
-}
