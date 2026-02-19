@@ -54,7 +54,7 @@ fun EqualizerScreen(
 
         val eq = try {
             Equalizer(0, uiState.audioSessionId).apply { enabled = true }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             Toast.makeText(context, "初始化均衡器失败", Toast.LENGTH_SHORT).show()
             null
         }

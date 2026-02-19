@@ -53,7 +53,7 @@ fun SleepTimerScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             if (remainingTime != null) {
-                Text("剩余时间: ${TimeFormatter.formatTime(remainingTime)}")
+                Text("剩余时间: ${TimeFormatter.formatTime(remainingTime!!)}")
                 Button(
                     onClick = { viewModel.cancelSleepTimer() },
                     modifier = Modifier.fillMaxWidth()
