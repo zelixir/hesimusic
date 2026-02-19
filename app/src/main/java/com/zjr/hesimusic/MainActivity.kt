@@ -8,6 +8,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Scaffold
 import androidx.compose.ui.Modifier
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -25,6 +26,7 @@ import com.zjr.hesimusic.ui.settings.SettingsScreen
 import com.zjr.hesimusic.ui.sleeptimer.SleepTimerScreen
 import com.zjr.hesimusic.ui.test.PlayerTestScreen
 import com.zjr.hesimusic.ui.theme.HesimusicTheme
+import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.utils.AppLogger
 import dagger.hilt.android.AndroidEntryPoint
 
@@ -98,7 +100,16 @@ class MainActivity : ComponentActivity() {
                         }
 
                         composable("player") {
-                            PlayerScreen(onBackClick = { navController.popBackStack() })
+                            val homeEntry = runCatching { navController.getBackStackEntry("home") }.getOrNull()
+                            val sharedMusicViewModel: MusicViewModel = if (homeEntry != null) {
+                                hiltViewModel(homeEntry)
+                            } else {
+                                hiltViewModel()
+                            }
+                            PlayerScreen(
+                                onBackClick = { navController.popBackStack() },
+                                viewModel = sharedMusicViewModel
+                            )
                         }
 
                         composable("settings") {
@@ -114,7 +125,16 @@ class MainActivity : ComponentActivity() {
                         }
 
                         composable("sleep_timer") {
-                            SleepTimerScreen(onBackClick = { navController.popBackStack() })
+                            val homeEntry = runCatching { navController.getBackStackEntry("home") }.getOrNull()
+                            val sharedMusicViewModel: MusicViewModel = if (homeEntry != null) {
+                                hiltViewModel(homeEntry)
+                            } else {
+                                hiltViewModel()
+                            }
+                            SleepTimerScreen(
+                                onBackClick = { navController.popBackStack() },
+                                viewModel = sharedMusicViewModel
+                            )
                         }
 
                         composable("logs") {
