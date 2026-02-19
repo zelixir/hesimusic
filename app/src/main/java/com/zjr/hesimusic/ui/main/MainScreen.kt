@@ -30,8 +30,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -43,6 +45,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.Player
 import com.zjr.hesimusic.data.model.Album
 import com.zjr.hesimusic.data.model.Artist
+import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.preferences.PlaylistContext
 import com.zjr.hesimusic.data.preferences.PlaylistType
 import com.zjr.hesimusic.ui.common.MusicViewModel
@@ -51,6 +54,7 @@ import com.zjr.hesimusic.ui.library.ArtistList
 import com.zjr.hesimusic.ui.library.FolderList
 import com.zjr.hesimusic.ui.library.LibraryViewModel
 import com.zjr.hesimusic.ui.library.SongList
+import com.zjr.hesimusic.ui.library.SongActionHost
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -62,6 +66,7 @@ fun MainScreen(
     onAlbumClick: (Album) -> Unit,
     onPlayerClick: () -> Unit,
     onScanClick: () -> Unit,
+    onBackupRestoreClick: () -> Unit,
     onSettingsClick: () -> Unit,
     onEqualizerClick: () -> Unit,
     onAboutClick: () -> Unit,
@@ -74,14 +79,19 @@ fun MainScreen(
         (context.applicationContext as? com.zjr.hesimusic.HesiMusicApplication)?.appLogger
     }
     
-    val pagerState = rememberPagerState(pageCount = { 5 })
+    val pagerState = rememberPagerState(pageCount = { 6 })
     val scope = rememberCoroutineScope()
-    val titles = listOf("歌曲", "收藏", "歌手", "专辑", "文件夹")
+    val titles = listOf("歌曲", "歌单", "收藏", "文件夹", "歌手", "专辑")
     val musicUiState by musicViewModel.uiState.collectAsState()
     val sleepTimerState by musicViewModel.sleepTimerState.collectAsState()
+    val savedPlaylistContext by musicViewModel.savedPlaylistContext.collectAsState()
     val isSearchActive by viewModel.isSearchActive.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     val focusRequester = remember { FocusRequester() }
+    val playlists by viewModel.playlists.collectAsState()
+    var selectedSongForActions by remember { mutableStateOf<Song?>(null) }
+    var hasRestoredLibraryContext by remember { mutableStateOf(false) }
+    var restoredFolderPath by remember { mutableStateOf<String?>(null) }
 
     // Request focus when search becomes active
     LaunchedEffect(isSearchActive) {
@@ -93,6 +103,33 @@ fun MainScreen(
     // Handle back button to close search
     BackHandler(enabled = isSearchActive) {
         viewModel.setSearchActive(false)
+    }
+    
+    LaunchedEffect(savedPlaylistContext, hasRestoredLibraryContext) {
+        if (hasRestoredLibraryContext) return@LaunchedEffect
+        val playlistContext = savedPlaylistContext ?: return@LaunchedEffect
+        val targetPage = playlistTypeToTabIndex(playlistContext.type)
+        if (pagerState.currentPage != targetPage) {
+            pagerState.scrollToPage(targetPage)
+        }
+        when (playlistContext.type) {
+            PlaylistType.ARTIST -> {
+                if (playlistContext.value.isNotBlank()) {
+                    onArtistClick(Artist(name = playlistContext.value, songCount = 0))
+                }
+            }
+            PlaylistType.ALBUM -> {
+                if (playlistContext.value.isNotBlank()) {
+                    onAlbumClick(Album(name = playlistContext.value, artist = "", songCount = 0))
+                }
+            }
+            PlaylistType.FOLDER -> {
+                restoredFolderPath = playlistContext.value.takeIf { it.isNotBlank() }
+            }
+            else -> Unit
+        }
+        hasRestoredLibraryContext = true
+        musicViewModel.clearSavedPlaylistContext()
     }
 
     Scaffold(
@@ -124,6 +161,7 @@ fun MainScreen(
                 },
                 onClick = onPlayerClick,
                 onScanClick = onScanClick,
+                onBackupRestoreClick = onBackupRestoreClick,
                 onSettingsClick = onSettingsClick,
                 onEqualizerClick = onEqualizerClick,
                 onAboutClick = onAboutClick,
@@ -213,10 +251,19 @@ fun MainScreen(
                                 Log.d("MainScreen", "SongList (Global): playing song at index $index")
                                 musicViewModel.playList(list, index, PlaylistContext.GLOBAL)
                             },
+                            onSongLongClick = { selectedSongForActions = it },
                             appLogger = appLogger
                         )
                     }
                     1 -> {
+                        com.zjr.hesimusic.ui.library.PlaylistTabScreen(
+                            viewModel = viewModel,
+                            musicViewModel = musicViewModel,
+                            currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
+                            onSongLongClick = { selectedSongForActions = it }
+                        )
+                    }
+                    2 -> {
                         val favoriteSongs by viewModel.favoriteSongs.collectAsState()
                         Log.d("MainScreen", "SongList (Favorites): displaying ${favoriteSongs.size} songs")
                         appLogger?.info("MainScreen", "SongList (Favorites): displaying ${favoriteSongs.size} songs")
@@ -227,26 +274,16 @@ fun MainScreen(
                                 Log.d("MainScreen", "SongList (Favorites): playing song at index $index")
                                 musicViewModel.playList(list, index, PlaylistContext.FAVORITES)
                             },
+                            onSongLongClick = { selectedSongForActions = it },
                             appLogger = appLogger
                         )
                     }
-                    2 -> {
-                        val artists by viewModel.artists.collectAsState()
-                        Log.d("MainScreen", "ArtistList: displaying ${artists.size} artists")
-                        appLogger?.info("MainScreen", "ArtistList: displaying ${artists.size} artists")
-                        ArtistList(artists = artists, onArtistClick = onArtistClick, appLogger = appLogger)
-                    }
                     3 -> {
-                        val albums by viewModel.albums.collectAsState()
-                        Log.d("MainScreen", "AlbumList: displaying ${albums.size} albums")
-                        appLogger?.info("MainScreen", "AlbumList: displaying ${albums.size} albums")
-                        AlbumList(albums = albums, onAlbumClick = onAlbumClick, appLogger = appLogger)
-                    }
-                    4 -> {
                         Log.d("MainScreen", "FolderList view activated")
                         appLogger?.info("MainScreen", "FolderList view activated")
                         FolderList(
                             viewModel = viewModel,
+                            initialPath = restoredFolderPath ?: "/storage/emulated/0",
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
                             onSongClick = { list, index, folderPath -> 
                                 Log.d("MainScreen", "FolderList: playing song at index $index in folder $folderPath")
@@ -255,8 +292,40 @@ fun MainScreen(
                             appLogger = appLogger
                         )
                     }
+                    4 -> {
+                        val artists by viewModel.artists.collectAsState()
+                        Log.d("MainScreen", "ArtistList: displaying ${artists.size} artists")
+                        appLogger?.info("MainScreen", "ArtistList: displaying ${artists.size} artists")
+                        ArtistList(artists = artists, onArtistClick = onArtistClick, appLogger = appLogger)
+                    }
+                    5 -> {
+                        val albums by viewModel.albums.collectAsState()
+                        Log.d("MainScreen", "AlbumList: displaying ${albums.size} albums")
+                        appLogger?.info("MainScreen", "AlbumList: displaying ${albums.size} albums")
+                        AlbumList(albums = albums, onAlbumClick = onAlbumClick, appLogger = appLogger)
+                    }
                 }
             }
+
+            SongActionHost(
+                selectedSong = selectedSongForActions,
+                playlists = playlists,
+                onDismiss = { selectedSongForActions = null },
+                onAddToPlaylist = { song, playlistId -> viewModel.addSongToPlaylist(song, playlistId) },
+                onCreatePlaylist = { name, onCreated -> viewModel.createPlaylist(name, onCreated) },
+                onHideSong = { song -> viewModel.hideSong(song) },
+                onDeleteSong = { song, onResult -> viewModel.deleteSongFile(song, onResult) },
+                onLoadMetadata = { song, onLoaded -> viewModel.loadSongMetadata(song, onLoaded) }
+            )
         }
     }
+}
+
+internal fun playlistTypeToTabIndex(type: PlaylistType): Int = when (type) {
+    PlaylistType.GLOBAL -> 0
+    PlaylistType.PLAYLIST -> 1
+    PlaylistType.FAVORITES -> 2
+    PlaylistType.FOLDER -> 3
+    PlaylistType.ARTIST -> 4
+    PlaylistType.ALBUM -> 5
 }

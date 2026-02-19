@@ -8,7 +8,9 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.zjr.hesimusic.data.AppDatabase
 import com.zjr.hesimusic.data.dao.FavoriteDao
+import com.zjr.hesimusic.data.dao.HiddenSongDao
 import com.zjr.hesimusic.data.dao.LogDao
+import com.zjr.hesimusic.data.dao.PlaylistDao
 import com.zjr.hesimusic.data.dao.SongDao
 import dagger.Module
 import dagger.Provides
@@ -51,7 +53,13 @@ object DatabaseModule {
             AppDatabase::class.java,
             "hesimusic_db"
         )
-            .addMigrations(MIGRATION_1_2, AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4, AppDatabase.MIGRATION_4_5)
+            .addMigrations(
+                MIGRATION_1_2,
+                AppDatabase.MIGRATION_2_3,
+                AppDatabase.MIGRATION_3_4,
+                AppDatabase.MIGRATION_4_5,
+                AppDatabase.MIGRATION_5_6
+            )
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onCreate(db: SupportSQLiteDatabase) {
                     super.onCreate(db)
@@ -85,5 +93,15 @@ object DatabaseModule {
     @Provides
     fun provideLogDao(database: AppDatabase): LogDao {
         return database.logDao()
+    }
+
+    @Provides
+    fun providePlaylistDao(database: AppDatabase): PlaylistDao {
+        return database.playlistDao()
+    }
+
+    @Provides
+    fun provideHiddenSongDao(database: AppDatabase): HiddenSongDao {
+        return database.hiddenSongDao()
     }
 }

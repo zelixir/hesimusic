@@ -332,6 +332,10 @@ class MusicViewModel @Inject constructor(
         mediaController?.shuffleModeEnabled = shuffleModeEnabled
         playbackPreferences.saveShuffleModeEnabled(shuffleModeEnabled)
     }
+    
+    fun clearSavedPlaylistContext() {
+        _savedPlaylistContext.value = null
+    }
 
     fun removeMediaItem(index: Int) {
         mediaController?.removeMediaItem(index)

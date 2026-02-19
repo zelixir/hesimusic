@@ -1,6 +1,6 @@
 package com.zjr.hesimusic.ui.common
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,9 +18,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun MusicListItem(
     title: String,
@@ -29,6 +31,9 @@ fun MusicListItem(
     icon: ImageVector = Icons.Default.MusicNote,
     isCurrent: Boolean = false,
     index: Int? = null,
+    titleTextStyle: TextStyle = MaterialTheme.typography.bodyLarge,
+    subtitleTextStyle: TextStyle = MaterialTheme.typography.bodyMedium,
+    onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit
 ) {
     val backgroundColor = if (isCurrent) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
@@ -38,7 +43,10 @@ fun MusicListItem(
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            ),
         color = backgroundColor
     ) {
         Row(
@@ -78,14 +86,14 @@ fun MusicListItem(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = title,
-                    style = MaterialTheme.typography.bodyLarge,
+                    style = titleTextStyle,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     color = contentColor
                 )
                 Text(
                     text = subtitle,
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = subtitleTextStyle,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     color = subtitleColor
