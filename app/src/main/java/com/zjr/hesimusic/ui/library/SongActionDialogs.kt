@@ -120,6 +120,7 @@ fun SongActionHost(
     if (selectedSong != null && showAddDialog) {
         AddToPlaylistDialog(
             playlists = playlists,
+            resetKey = selectedSong.id,
             onDismiss = { showAddDialog = false },
             onAdd = { playlistId ->
                 onAddToPlaylist(selectedSong, playlistId)
@@ -202,11 +203,12 @@ fun SongActionHost(
 @Composable
 fun AddToPlaylistDialog(
     playlists: List<Playlist>,
+    resetKey: Any? = null,
     onDismiss: () -> Unit,
     onAdd: (Long) -> Unit,
     onCreate: (String) -> Unit
 ) {
-    var newPlaylistName by remember { mutableStateOf("") }
+    var newPlaylistName by remember(resetKey) { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,

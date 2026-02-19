@@ -78,10 +78,10 @@ fun PlaylistTabScreen(
         }
     }
 
-    if (selectedPlaylistForAction != null) {
+    selectedPlaylistForAction?.let { playlist ->
         AlertDialog(
             onDismissRequest = { selectedPlaylistForAction = null },
-            title = { Text(selectedPlaylistForAction!!.name) },
+            title = { Text(playlist.name) },
             text = {
                 Text(
                     text = "删除歌单",
@@ -90,7 +90,7 @@ fun PlaylistTabScreen(
                         .fillMaxWidth()
                         .padding(vertical = 8.dp)
                         .clickable {
-                            viewModel.deletePlaylist(selectedPlaylistForAction!!.id)
+                            viewModel.deletePlaylist(playlist.id)
                             selectedPlaylistForAction = null
                         }
                 )

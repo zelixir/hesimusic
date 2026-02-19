@@ -169,6 +169,7 @@ fun SongListScreen(
             if (showBatchAddDialog) {
                 AddToPlaylistDialog(
                     playlists = playlists,
+                    resetKey = batchSelectedSongIds,
                     onDismiss = { showBatchAddDialog = false },
                     onAdd = { playlistId ->
                         val selectedSongs = songs.filter { it.id in batchSelectedSongIds }

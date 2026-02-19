@@ -13,6 +13,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
+private val BatchActionBarHeight = 64.dp
+
 @Composable
 fun BatchActionBar(
     showRemoveFromPlaylist: Boolean,
@@ -25,7 +27,7 @@ fun BatchActionBar(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .height(64.dp),
+            .height(BatchActionBarHeight),
         color = MaterialTheme.colorScheme.surfaceVariant,
         tonalElevation = 8.dp
     ) {

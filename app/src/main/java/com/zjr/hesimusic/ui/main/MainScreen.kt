@@ -143,8 +143,9 @@ fun MainScreen(
     Scaffold(
         bottomBar = {
             if (isBatchMode) {
+                val playlistId = batchModePlaylistId
                 BatchActionBar(
-                    showRemoveFromPlaylist = batchModePlaylistId != null,
+                    showRemoveFromPlaylist = playlistId != null,
                     favoriteActionText = batchFavoriteActionText,
                     onAddToPlaylist = { showBatchAddDialog = true },
                     onFavoriteAction = {
@@ -162,12 +163,12 @@ fun MainScreen(
                         batchModePlaylistId = null
                         batchFavoriteActionText = "加入收藏"
                     },
-                    onRemoveFromPlaylist = if (batchModePlaylistId != null) {
+                    onRemoveFromPlaylist = if (playlistId == null) null else {
                         {
                             val selectedSongs = batchModeSongs.filter { it.id in batchSelectedSongIds }
-                            viewModel.removeSongsFromPlaylist(selectedSongs, batchModePlaylistId!!)
+                            viewModel.removeSongsFromPlaylist(selectedSongs, playlistId)
                         }
-                    } else null
+                    }
                 )
             } else {
                 BottomPlayerBar(
@@ -403,6 +404,7 @@ fun MainScreen(
             if (showBatchAddDialog) {
                 AddToPlaylistDialog(
                     playlists = playlists,
+                    resetKey = batchSelectedSongIds,
                     onDismiss = { showBatchAddDialog = false },
                     onAdd = { playlistId ->
                         val selectedSongs = batchModeSongs.filter { it.id in batchSelectedSongIds }

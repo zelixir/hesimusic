@@ -35,6 +35,7 @@ import kotlinx.coroutines.launch
  */
 private const val SCROLL_OFFSET_TO_CENTER_ITEM = -200
 private const val TAG = "SongList"
+private const val BATCH_SELECTED_PREFIX = "✓ "
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -156,7 +157,7 @@ fun SongList(
                     val globalIndex = (groupStartingIndices[initial] ?: 0) + index + 1
                     val isSelectedInBatch = song.id in selectedSongIds
                     MusicListItem(
-                        title = if (isBatchMode && isSelectedInBatch) "✓ ${song.title}" else song.title,
+                        title = if (isBatchMode && isSelectedInBatch) "$BATCH_SELECTED_PREFIX${song.title}" else song.title,
                         subtitle = "${song.artist} - ${song.album}",
                         isCurrent = if (isBatchMode) isSelectedInBatch else song.id.toString() == currentPlayingSongId,
                         index = if (isBatchMode) null else globalIndex,
