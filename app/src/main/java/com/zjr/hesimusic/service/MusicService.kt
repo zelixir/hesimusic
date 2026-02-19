@@ -28,6 +28,7 @@ class MusicService : MediaSessionService() {
 
     companion object {
         private const val TAG = "MusicService"
+        const val KEY_AUDIO_SESSION_ID = "AUDIO_SESSION_ID"
     }
 
     @Inject
@@ -47,6 +48,7 @@ class MusicService : MediaSessionService() {
     
     // Flag to prevent saving state while restoring it
     private var isRestoringState = false
+    private var lastAudioSessionId: Int? = null
 
     override fun onCreate() {
         val startTime = System.currentTimeMillis()
@@ -100,6 +102,7 @@ class MusicService : MediaSessionService() {
         mediaSession = MediaSession.Builder(this, forwardingPlayer)
             .setCallback(MusicSessionCallback())
             .build()
+        updateSessionAudioSessionId()
 
         restorePlaybackState()
         setupPlayerListeners()
@@ -190,6 +193,11 @@ class MusicService : MediaSessionService() {
 
     private fun setupPlayerListeners() {
         player.addListener(object : Player.Listener {
+            override fun onAudioSessionIdChanged(audioSessionId: Int) {
+                Log.d(TAG, "onAudioSessionIdChanged: audioSessionId=$audioSessionId")
+                updateSessionAudioSessionId(audioSessionId)
+            }
+
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 Log.d(TAG, "onMediaItemTransition: mediaId=${mediaItem?.mediaId}, reason=$reason")
                 saveCurrentState()
@@ -212,6 +220,20 @@ class MusicService : MediaSessionService() {
                 }
             }
         })
+    }
+
+    private fun updateSessionAudioSessionId(audioSessionId: Int = player.audioSessionId) {
+        val session = mediaSession
+        if (session == null) {
+            Log.w(TAG, "updateSessionAudioSessionId: mediaSession is null")
+            return
+        }
+        if (lastAudioSessionId == audioSessionId) return
+        lastAudioSessionId = audioSessionId
+        val extras = Bundle(session.sessionExtras ?: Bundle()).apply {
+            putInt(KEY_AUDIO_SESSION_ID, audioSessionId)
+        }
+        session.setSessionExtras(extras)
     }
 
     private fun startPeriodicSave() {
@@ -279,7 +301,7 @@ class MusicService : MediaSessionService() {
             val sessionExtras = Bundle()
             // Use try-catch to prevent crashes if player is not ready or other issues
             try {
-                sessionExtras.putInt("AUDIO_SESSION_ID", player.audioSessionId)
+                sessionExtras.putInt(KEY_AUDIO_SESSION_ID, player.audioSessionId)
             } catch (e: Exception) {
                 Log.e(TAG, "MusicSessionCallback.onConnect: error getting audio session ID", e)
                 appLogger.error(TAG, "Error getting audio session ID in onConnect", e)

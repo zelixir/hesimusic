@@ -44,7 +44,9 @@ private const val SPECTRUM_SPACING_DIVISOR = 3f
 private const val SPECTRUM_BAR_WIDTH_MULTIPLIER = 1.8f
 private const val SPECTRUM_MIN_BAR_HEIGHT_RATIO = 0.2f
 private const val SPECTRUM_WAVE_HEIGHT_RANGE = 0.75f
-private const val SPECTRUM_MAGNITUDE_NORMALIZER = 128.0
+// Max FFT magnitude is when unsigned real/imaginary are both 255: sqrt(255^2 + 255^2) ~= 360.6.
+// Use 360 as a practical normalizer to map magnitudes to roughly 0..1 for bar rendering.
+private const val SPECTRUM_MAGNITUDE_NORMALIZER = 360.0
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -311,8 +313,8 @@ fun SpectrumVisualizer(
                                 for (i in 0 until SPECTRUM_BAR_COUNT) {
                                     val binIndex = ((i.toFloat() / denominator) * (fftBins - 1)).toInt()
                                     val fftIndex = (binIndex * 2).coerceAtMost(fft.size - 2)
-                                    val real = fft[fftIndex].toInt()
-                                    val imaginary = fft[fftIndex + 1].toInt()
+                                    val real = fft[fftIndex].toInt() and 0xFF
+                                    val imaginary = fft[fftIndex + 1].toInt() and 0xFF
                                     val magnitude = sqrt((real * real + imaginary * imaginary).toDouble())
                                     bars[i] = (magnitude / SPECTRUM_MAGNITUDE_NORMALIZER).toFloat().coerceIn(0f, 1f)
                                 }

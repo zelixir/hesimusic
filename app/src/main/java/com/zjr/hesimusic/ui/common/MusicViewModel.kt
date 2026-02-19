@@ -209,7 +209,7 @@ class MusicViewModel @Inject constructor(
     private fun updateState() {
         mediaController?.let { controller ->
             val playlist = List(controller.mediaItemCount) { i -> controller.getMediaItemAt(i) }
-            val audioSessionId = controller.sessionExtras.getInt("AUDIO_SESSION_ID", 0)
+            val audioSessionId = controller.sessionExtras.getInt(MusicService.KEY_AUDIO_SESSION_ID, 0)
             // Extract file path from current media item URI
             val currentFilePath = controller.currentMediaItem?.localConfiguration?.uri?.path
             // Extract start position from clipping configuration (for CUE tracks)
