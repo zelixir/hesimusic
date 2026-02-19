@@ -1,13 +1,8 @@
 package com.zjr.hesimusic.ui.player
 
 import android.media.audiofx.Equalizer
-import android.media.audiofx.Visualizer
-import android.os.Handler
-import android.os.Looper
-import android.util.Log
 import android.widget.Toast
 import androidx.compose.foundation.background
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -24,7 +19,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
@@ -36,17 +30,6 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.utils.TimeFormatter
-import kotlin.math.sqrt
-
-private const val TAG = "PlayerScreen"
-private const val SPECTRUM_BAR_COUNT = 24
-private const val SPECTRUM_SPACING_DIVISOR = 3f
-private const val SPECTRUM_BAR_WIDTH_MULTIPLIER = 1.8f
-private const val SPECTRUM_MIN_BAR_HEIGHT_RATIO = 0.2f
-private const val SPECTRUM_WAVE_HEIGHT_RANGE = 0.75f
-// Max FFT magnitude is when unsigned real/imaginary are both 255: sqrt(255^2 + 255^2) ~= 360.6.
-// Use 360 as a practical normalizer to map magnitudes to roughly 0..1 for bar rendering.
-private const val SPECTRUM_MAGNITUDE_NORMALIZER = 360.0
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -120,14 +103,19 @@ fun PlayerScreen(
                     contentScale = ContentScale.Crop
                 )
             } else {
-                SpectrumVisualizer(
+                Box(
                     modifier = Modifier
                         .aspectRatio(1f)
                         .clip(MaterialTheme.shapes.medium)
                         .background(MaterialTheme.colorScheme.surfaceVariant),
-                    audioSessionId = uiState.audioSessionId,
-                    isPlaying = uiState.isPlaying
-                )
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "暂无封面",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
 
             // Title & Artist
@@ -267,97 +255,6 @@ fun PlayerScreen(
         } else {
             Toast.makeText(context, "音频会话ID不可用", Toast.LENGTH_SHORT).show()
             showEqualizer = false
-        }
-    }
-}
-
-@Composable
-fun SpectrumVisualizer(
-    modifier: Modifier = Modifier,
-    audioSessionId: Int,
-    isPlaying: Boolean
-) {
-    var levels by remember(audioSessionId) {
-        mutableStateOf(List(SPECTRUM_BAR_COUNT) { 0f })
-    }
-
-    DisposableEffect(audioSessionId, isPlaying) {
-        if (!isPlaying) {
-            levels = List(SPECTRUM_BAR_COUNT) { 0f }
-        }
-        var mainHandler: Handler? = null
-        val visualizer = if (audioSessionId != 0 && isPlaying) {
-            try {
-                mainHandler = Handler(Looper.getMainLooper())
-                Visualizer(audioSessionId).apply {
-                    val captureSizeRange = Visualizer.getCaptureSizeRange()
-                    captureSize = captureSizeRange.getOrElse(1) { getCaptureSize() }
-                    val captureRate = Visualizer.getMaxCaptureRate() / 2
-                    setDataCaptureListener(
-                        object : Visualizer.OnDataCaptureListener {
-                            override fun onWaveFormDataCapture(
-                                visualizer: Visualizer?,
-                                waveform: ByteArray?,
-                                samplingRate: Int
-                            ) = Unit
-
-                            override fun onFftDataCapture(
-                                visualizer: Visualizer?,
-                                fft: ByteArray?,
-                                samplingRate: Int
-                            ) {
-                                if (fft == null || fft.size < 2) return
-                                val bars = MutableList(SPECTRUM_BAR_COUNT) { 0f }
-                                val fftBins = (fft.size / 2).coerceAtLeast(1)
-                                val denominator = (SPECTRUM_BAR_COUNT - 1).coerceAtLeast(1)
-                                for (i in 0 until SPECTRUM_BAR_COUNT) {
-                                    val binIndex = ((i.toFloat() / denominator) * (fftBins - 1)).toInt()
-                                    val fftIndex = (binIndex * 2).coerceAtMost(fft.size - 2)
-                                    val real = fft[fftIndex].toInt() and 0xFF
-                                    val imaginary = fft[fftIndex + 1].toInt() and 0xFF
-                                    val magnitude = sqrt((real * real + imaginary * imaginary).toDouble())
-                                    bars[i] = (magnitude / SPECTRUM_MAGNITUDE_NORMALIZER).toFloat().coerceIn(0f, 1f)
-                                }
-                                mainHandler?.post { levels = bars }
-                            }
-                        },
-                        captureRate,
-                        false,
-                        true
-                    )
-                    enabled = true
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Spectrum visualizer init failed for session=$audioSessionId", e)
-                null
-            }
-        } else {
-            null
-        }
-
-        onDispose {
-            visualizer?.release()
-            mainHandler?.removeCallbacksAndMessages(null)
-        }
-    }
-
-    val primary = MaterialTheme.colorScheme.primary
-    val secondary = MaterialTheme.colorScheme.secondary
-
-    Canvas(modifier = modifier) {
-        val spacing = size.width / (SPECTRUM_BAR_COUNT * SPECTRUM_SPACING_DIVISOR)
-        val barWidth = spacing * SPECTRUM_BAR_WIDTH_MULTIPLIER
-        for (i in 0 until SPECTRUM_BAR_COUNT) {
-            val wave = levels.getOrElse(i) { 0f }
-            val barHeight = size.height * (SPECTRUM_MIN_BAR_HEIGHT_RATIO + SPECTRUM_WAVE_HEIGHT_RANGE * wave)
-            val x = spacing + i * (barWidth + spacing)
-            val y = size.height - barHeight
-            drawRoundRect(
-                color = lerp(secondary, primary, wave).copy(alpha = 0.9f),
-                topLeft = androidx.compose.ui.geometry.Offset(x, y),
-                size = androidx.compose.ui.geometry.Size(barWidth, barHeight),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(barWidth / 2f, barWidth / 2f)
-            )
         }
     }
 }
