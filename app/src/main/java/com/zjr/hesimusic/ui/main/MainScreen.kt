@@ -80,7 +80,7 @@ fun MainScreen(
     
     val pagerState = rememberPagerState(pageCount = { 6 })
     val scope = rememberCoroutineScope()
-    val titles = listOf("歌曲", "收藏", "歌手", "专辑", "文件夹", "歌单")
+    val titles = listOf("歌曲", "歌单", "收藏", "文件夹", "歌手", "专辑")
     val musicUiState by musicViewModel.uiState.collectAsState()
     val isSearchActive by viewModel.isSearchActive.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
@@ -222,6 +222,14 @@ fun MainScreen(
                         )
                     }
                     1 -> {
+                        com.zjr.hesimusic.ui.library.PlaylistTabScreen(
+                            viewModel = viewModel,
+                            musicViewModel = musicViewModel,
+                            currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
+                            onSongLongClick = { selectedSongForActions = it }
+                        )
+                    }
+                    2 -> {
                         val favoriteSongs by viewModel.favoriteSongs.collectAsState()
                         Log.d("MainScreen", "SongList (Favorites): displaying ${favoriteSongs.size} songs")
                         appLogger?.info("MainScreen", "SongList (Favorites): displaying ${favoriteSongs.size} songs")
@@ -236,19 +244,7 @@ fun MainScreen(
                             appLogger = appLogger
                         )
                     }
-                    2 -> {
-                        val artists by viewModel.artists.collectAsState()
-                        Log.d("MainScreen", "ArtistList: displaying ${artists.size} artists")
-                        appLogger?.info("MainScreen", "ArtistList: displaying ${artists.size} artists")
-                        ArtistList(artists = artists, onArtistClick = onArtistClick, appLogger = appLogger)
-                    }
                     3 -> {
-                        val albums by viewModel.albums.collectAsState()
-                        Log.d("MainScreen", "AlbumList: displaying ${albums.size} albums")
-                        appLogger?.info("MainScreen", "AlbumList: displaying ${albums.size} albums")
-                        AlbumList(albums = albums, onAlbumClick = onAlbumClick, appLogger = appLogger)
-                    }
-                    4 -> {
                         Log.d("MainScreen", "FolderList view activated")
                         appLogger?.info("MainScreen", "FolderList view activated")
                         FolderList(
@@ -261,13 +257,17 @@ fun MainScreen(
                             appLogger = appLogger
                         )
                     }
+                    4 -> {
+                        val artists by viewModel.artists.collectAsState()
+                        Log.d("MainScreen", "ArtistList: displaying ${artists.size} artists")
+                        appLogger?.info("MainScreen", "ArtistList: displaying ${artists.size} artists")
+                        ArtistList(artists = artists, onArtistClick = onArtistClick, appLogger = appLogger)
+                    }
                     5 -> {
-                        com.zjr.hesimusic.ui.library.PlaylistTabScreen(
-                            viewModel = viewModel,
-                            musicViewModel = musicViewModel,
-                            currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
-                            onSongLongClick = { selectedSongForActions = it }
-                        )
+                        val albums by viewModel.albums.collectAsState()
+                        Log.d("MainScreen", "AlbumList: displaying ${albums.size} albums")
+                        appLogger?.info("MainScreen", "AlbumList: displaying ${albums.size} albums")
+                        AlbumList(albums = albums, onAlbumClick = onAlbumClick, appLogger = appLogger)
                     }
                 }
             }

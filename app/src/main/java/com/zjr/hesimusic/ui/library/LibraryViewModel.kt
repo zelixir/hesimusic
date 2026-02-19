@@ -114,6 +114,8 @@ class LibraryViewModel @Inject constructor(
         songs.filterNot { (it.filePath to it.startPosition) in hiddenKeys }
     }
 
+    fun getPlaylistSongCount(playlistId: Long) = playlistRepository.getPlaylistSongCount(playlistId)
+
     fun updateSearchQuery(query: String) {
         _searchQuery.value = query
     }

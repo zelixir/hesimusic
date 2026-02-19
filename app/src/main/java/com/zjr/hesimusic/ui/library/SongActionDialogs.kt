@@ -20,9 +20,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import com.zjr.hesimusic.data.model.Playlist
 import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.ui.common.doubleScaled
 import com.zjr.hesimusic.utils.TimeFormatter
 import java.io.File
 import java.util.Locale
@@ -41,10 +43,12 @@ fun SongActionHost(
     val context = LocalContext.current
     var showAddDialog by remember(selectedSong) { mutableStateOf(false) }
     var showInfoDialog by remember(selectedSong) { mutableStateOf(false) }
+    var showHideConfirmDialog by remember(selectedSong) { mutableStateOf(false) }
     var showDeleteDialog by remember(selectedSong) { mutableStateOf(false) }
     var metadata by remember(selectedSong) { mutableStateOf<Map<String, String>>(emptyMap()) }
+    val menuTextStyle = largeMenuTextStyle()
 
-    if (selectedSong != null && !showAddDialog && !showInfoDialog && !showDeleteDialog) {
+    if (selectedSong != null && !showAddDialog && !showInfoDialog && !showHideConfirmDialog && !showDeleteDialog) {
         AlertDialog(
             onDismissRequest = onDismiss,
             title = { Text(selectedSong.title) },
@@ -52,6 +56,7 @@ fun SongActionHost(
                 Column {
                     Text(
                         text = "添加到歌单",
+                        style = menuTextStyle,
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { showAddDialog = true }
@@ -59,6 +64,7 @@ fun SongActionHost(
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
                         text = "歌曲信息",
+                        style = menuTextStyle,
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable {
@@ -69,17 +75,15 @@ fun SongActionHost(
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
                         text = "从曲库中隐藏歌曲",
+                        style = menuTextStyle,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable {
-                                onHideSong(selectedSong)
-                                Toast.makeText(context, "已隐藏", Toast.LENGTH_SHORT).show()
-                                onDismiss()
-                            }
+                            .clickable { showHideConfirmDialog = true }
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
                         text = "删除歌曲文件",
+                        style = menuTextStyle,
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { showDeleteDialog = true }
@@ -125,6 +129,29 @@ fun SongActionHost(
             onDismiss = {
                 showInfoDialog = false
                 onDismiss()
+            }
+        )
+    }
+
+    if (selectedSong != null && showHideConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showHideConfirmDialog = false },
+            title = { Text("隐藏歌曲") },
+            text = { Text("确定要隐藏这首歌曲吗？隐藏后不会显示在任何列表中。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onHideSong(selectedSong)
+                    Toast.makeText(context, "已隐藏", Toast.LENGTH_SHORT).show()
+                    showHideConfirmDialog = false
+                    onDismiss()
+                }) {
+                    Text("确定")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showHideConfirmDialog = false }) {
+                    Text("取消")
+                }
             }
         )
     }
@@ -258,4 +285,9 @@ private fun formatSize(size: Long): String {
     } else {
         String.format(Locale.getDefault(), "%.2f KB", size / kb)
     }
+}
+
+@Composable
+private fun largeMenuTextStyle(): TextStyle {
+    return androidx.compose.material3.MaterialTheme.typography.bodyLarge.doubleScaled()
 }
