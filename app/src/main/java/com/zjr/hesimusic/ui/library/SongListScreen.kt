@@ -55,6 +55,9 @@ fun SongListScreen(
     val sleepTimerState by musicViewModel.sleepTimerState.collectAsState()
     val playlists by viewModel.playlists.collectAsState()
     var selectedSongForActions by remember { mutableStateOf<Song?>(null) }
+    var isBatchMode by remember { mutableStateOf(false) }
+    var batchSelectedSongIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var showBatchAddDialog by remember { mutableStateOf(false) }
 
     val handleSongClick = remember(musicViewModel, type, value) {
         { list: List<Song>, index: Int ->
@@ -80,41 +83,57 @@ fun SongListScreen(
             )
         },
         bottomBar = {
-            BottomPlayerBar(
-                currentMediaItem = musicUiState.currentMediaItem,
-                isPlaying = musicUiState.isPlaying,
-                currentPosition = musicUiState.currentPosition,
-                duration = musicUiState.duration,
-                repeatMode = musicUiState.repeatMode,
-                shuffleModeEnabled = musicUiState.shuffleModeEnabled,
-                onPlayPauseClick = {
-                    if (musicUiState.isPlaying) {
-                        musicViewModel.pause()
-                    } else {
-                        musicViewModel.resume()
+            if (isBatchMode) {
+                BatchActionBar(
+                    showRemoveFromPlaylist = false,
+                    favoriteActionText = "加入收藏",
+                    onAddToPlaylist = { showBatchAddDialog = true },
+                    onFavoriteAction = {
+                        val selectedSongs = songs.filter { it.id in batchSelectedSongIds }
+                        viewModel.addSongsToFavorites(selectedSongs)
+                    },
+                    onExit = {
+                        isBatchMode = false
+                        batchSelectedSongIds = emptySet()
                     }
-                },
-                onPreviousClick = { musicViewModel.skipToPrevious() },
-                onNextClick = { musicViewModel.skipToNext() },
-                onPlayModeClick = {
-                    val (newShuffle, newRepeat) = when {
-                        musicUiState.shuffleModeEnabled -> false to Player.REPEAT_MODE_ONE // Random -> Single Loop
-                        musicUiState.repeatMode == Player.REPEAT_MODE_ONE -> false to Player.REPEAT_MODE_ALL // Single Loop -> Sequential
-                        else -> true to Player.REPEAT_MODE_ALL // Sequential -> Random
-                    }
-                    musicViewModel.setShuffleModeEnabled(newShuffle)
-                    musicViewModel.setRepeatMode(newRepeat)
-                },
-                onClick = { /* TODO: Navigate to player if needed, or just expand */ },
-                onScanClick = onScanClick,
-                onBackupRestoreClick = onBackupRestoreClick,
-                onSettingsClick = onSettingsClick,
-                onEqualizerClick = onEqualizerClick,
-                onAboutClick = onAboutClick,
-                onSleepTimerClick = onSleepTimerClick,
-                onLogsClick = onLogsClick,
-                sleepTimerRemaining = sleepTimerState
-            )
+                )
+            } else {
+                BottomPlayerBar(
+                    currentMediaItem = musicUiState.currentMediaItem,
+                    isPlaying = musicUiState.isPlaying,
+                    currentPosition = musicUiState.currentPosition,
+                    duration = musicUiState.duration,
+                    repeatMode = musicUiState.repeatMode,
+                    shuffleModeEnabled = musicUiState.shuffleModeEnabled,
+                    onPlayPauseClick = {
+                        if (musicUiState.isPlaying) {
+                            musicViewModel.pause()
+                        } else {
+                            musicViewModel.resume()
+                        }
+                    },
+                    onPreviousClick = { musicViewModel.skipToPrevious() },
+                    onNextClick = { musicViewModel.skipToNext() },
+                    onPlayModeClick = {
+                        val (newShuffle, newRepeat) = when {
+                            musicUiState.shuffleModeEnabled -> false to Player.REPEAT_MODE_ONE // Random -> Single Loop
+                            musicUiState.repeatMode == Player.REPEAT_MODE_ONE -> false to Player.REPEAT_MODE_ALL // Single Loop -> Sequential
+                            else -> true to Player.REPEAT_MODE_ALL // Sequential -> Random
+                        }
+                        musicViewModel.setShuffleModeEnabled(newShuffle)
+                        musicViewModel.setRepeatMode(newRepeat)
+                    },
+                    onClick = { /* TODO: Navigate to player if needed, or just expand */ },
+                    onScanClick = onScanClick,
+                    onBackupRestoreClick = onBackupRestoreClick,
+                    onSettingsClick = onSettingsClick,
+                    onEqualizerClick = onEqualizerClick,
+                    onAboutClick = onAboutClick,
+                    onSleepTimerClick = onSleepTimerClick,
+                    onLogsClick = onLogsClick,
+                    sleepTimerRemaining = sleepTimerState
+                )
+            }
         }
     ) { innerPadding ->
         Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
@@ -122,7 +141,16 @@ fun SongListScreen(
                 songs = songs,
                 currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
                 onSongClick = handleSongClick,
-                onSongLongClick = { selectedSongForActions = it }
+                onSongLongClick = { selectedSongForActions = it },
+                isBatchMode = isBatchMode,
+                selectedSongIds = batchSelectedSongIds,
+                onBatchSongToggle = { song ->
+                    batchSelectedSongIds = if (song.id in batchSelectedSongIds) {
+                        batchSelectedSongIds - song.id
+                    } else {
+                        batchSelectedSongIds + song.id
+                    }
+                }
             )
             SongActionHost(
                 selectedSong = selectedSongForActions,
@@ -130,10 +158,34 @@ fun SongListScreen(
                 onDismiss = { selectedSongForActions = null },
                 onAddToPlaylist = { song, playlistId -> viewModel.addSongToPlaylist(song, playlistId) },
                 onCreatePlaylist = { name, onCreated -> viewModel.createPlaylist(name, onCreated) },
+                onBatchManage = { song ->
+                    isBatchMode = true
+                    batchSelectedSongIds = setOf(song.id)
+                },
                 onHideSong = { song -> viewModel.hideSong(song) },
                 onDeleteSong = { song, onResult -> viewModel.deleteSongFile(song, onResult) },
                 onLoadMetadata = { song, onLoaded -> viewModel.loadSongMetadata(song, onLoaded) }
             )
+            if (showBatchAddDialog) {
+                AddToPlaylistDialog(
+                    playlists = playlists,
+                    onDismiss = { showBatchAddDialog = false },
+                    onAdd = { playlistId ->
+                        val selectedSongs = songs.filter { it.id in batchSelectedSongIds }
+                        viewModel.addSongsToPlaylist(selectedSongs, playlistId)
+                        showBatchAddDialog = false
+                    },
+                    onCreate = { name ->
+                        viewModel.createPlaylist(name) { playlistId ->
+                            if (playlistId != null) {
+                                val selectedSongs = songs.filter { it.id in batchSelectedSongIds }
+                                viewModel.addSongsToPlaylist(selectedSongs, playlistId)
+                                showBatchAddDialog = false
+                            }
+                        }
+                    }
+                )
+            }
         }
     }
 }

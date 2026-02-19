@@ -9,9 +9,17 @@ class MainScreenTabRestoreTest {
     @Test
     fun `playlist type maps to expected tab index`() {
         assertEquals(0, playlistTypeToTabIndex(PlaylistType.GLOBAL))
-        assertEquals(1, playlistTypeToTabIndex(PlaylistType.FAVORITES))
-        assertEquals(2, playlistTypeToTabIndex(PlaylistType.ARTIST))
-        assertEquals(3, playlistTypeToTabIndex(PlaylistType.ALBUM))
-        assertEquals(4, playlistTypeToTabIndex(PlaylistType.FOLDER))
+        assertEquals(1, playlistTypeToTabIndex(PlaylistType.PLAYLIST))
+        assertEquals(2, playlistTypeToTabIndex(PlaylistType.FAVORITES))
+        assertEquals(3, playlistTypeToTabIndex(PlaylistType.FOLDER))
+        assertEquals(4, playlistTypeToTabIndex(PlaylistType.ARTIST))
+        assertEquals(5, playlistTypeToTabIndex(PlaylistType.ALBUM))
+    }
+
+    @Test
+    fun `favorite action text follows tab context`() {
+        assertEquals("加入收藏", favoriteActionTextForTab(0))
+        assertEquals("加入收藏", favoriteActionTextForTab(1))
+        assertEquals("取消收藏", favoriteActionTextForTab(2))
     }
 }

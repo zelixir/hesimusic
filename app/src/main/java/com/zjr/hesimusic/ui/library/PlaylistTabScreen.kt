@@ -1,20 +1,26 @@
 package com.zjr.hesimusic.ui.library
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.zjr.hesimusic.data.model.Playlist
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.preferences.PlaylistContext
 import com.zjr.hesimusic.data.preferences.PlaylistType
@@ -26,10 +32,14 @@ fun PlaylistTabScreen(
     viewModel: LibraryViewModel,
     musicViewModel: MusicViewModel,
     currentPlayingSongId: String?,
-    onSongLongClick: (Song) -> Unit
+    onSongLongClick: (Song, Long, List<Song>) -> Unit,
+    isBatchMode: Boolean,
+    selectedSongIds: Set<Long>,
+    onBatchSongToggle: (Song) -> Unit
 ) {
     val playlists by viewModel.playlists.collectAsState()
     var selectedPlaylistId by remember { mutableLongStateOf(0L) }
+    var selectedPlaylistForAction by remember { mutableStateOf<Playlist?>(null) }
 
     if (selectedPlaylistId == 0L) {
         LazyColumn(modifier = Modifier.fillMaxSize()) {
@@ -38,7 +48,8 @@ fun PlaylistTabScreen(
                 MusicListItem(
                     title = playlist.name,
                     subtitle = "$songCount 首歌曲",
-                    onClick = { selectedPlaylistId = playlist.id }
+                    onClick = { selectedPlaylistId = playlist.id },
+                    onLongClick = { selectedPlaylistForAction = playlist }
                 )
             }
         }
@@ -58,9 +69,37 @@ fun PlaylistTabScreen(
                         PlaylistContext(PlaylistType.PLAYLIST, selectedPlaylistId.toString())
                     )
                 },
-                onSongLongClick = onSongLongClick,
+                onSongLongClick = { song -> onSongLongClick(song, selectedPlaylistId, songs) },
+                isBatchMode = isBatchMode,
+                selectedSongIds = selectedSongIds,
+                onBatchSongToggle = onBatchSongToggle,
                 modifier = Modifier.fillMaxSize()
             )
         }
+    }
+
+    if (selectedPlaylistForAction != null) {
+        AlertDialog(
+            onDismissRequest = { selectedPlaylistForAction = null },
+            title = { Text(selectedPlaylistForAction!!.name) },
+            text = {
+                Text(
+                    text = "删除歌单",
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp)
+                        .clickable {
+                            viewModel.deletePlaylist(selectedPlaylistForAction!!.id)
+                            selectedPlaylistForAction = null
+                        }
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { selectedPlaylistForAction = null }) {
+                    Text("关闭")
+                }
+            }
+        )
     }
 }

@@ -43,6 +43,9 @@ fun SongList(
     currentPlayingSongId: String? = null,
     onSongClick: (List<Song>, Int) -> Unit,
     onSongLongClick: ((Song) -> Unit)? = null,
+    isBatchMode: Boolean = false,
+    selectedSongIds: Set<Long> = emptySet(),
+    onBatchSongToggle: ((Song) -> Unit)? = null,
     modifier: Modifier = Modifier,
     appLogger: AppLogger? = null
 ) {
@@ -151,18 +154,23 @@ fun SongList(
                     contentType = { _, _ -> "song" }
                 ) { index, song ->
                     val globalIndex = (groupStartingIndices[initial] ?: 0) + index + 1
+                    val isSelectedInBatch = song.id in selectedSongIds
                     MusicListItem(
-                        title = song.title,
+                        title = if (isBatchMode && isSelectedInBatch) "✓ ${song.title}" else song.title,
                         subtitle = "${song.artist} - ${song.album}",
-                        isCurrent = song.id.toString() == currentPlayingSongId,
-                        index = globalIndex,
+                        isCurrent = if (isBatchMode) isSelectedInBatch else song.id.toString() == currentPlayingSongId,
+                        index = if (isBatchMode) null else globalIndex,
                         onClick = { 
-                            val index = flattenedSongs.indexOf(song)
-                            if (index != -1) {
-                                onSongClick(flattenedSongs, index)
+                            if (isBatchMode) {
+                                onBatchSongToggle?.invoke(song)
+                            } else {
+                                val index = flattenedSongs.indexOf(song)
+                                if (index != -1) {
+                                    onSongClick(flattenedSongs, index)
+                                }
                             }
                         },
-                        onLongClick = if (onSongLongClick != null) ({ onSongLongClick(song) }) else null
+                        onLongClick = if (!isBatchMode && onSongLongClick != null) ({ onSongLongClick(song) }) else null
                     )
                 }
             }
