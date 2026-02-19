@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import com.zjr.hesimusic.data.model.Playlist
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.ui.common.doubleScaled
+import com.zjr.hesimusic.ui.common.largeScaled
 import com.zjr.hesimusic.utils.TimeFormatter
 import java.io.File
 import java.util.Locale
@@ -201,6 +202,7 @@ private fun AddToPlaylistDialog(
                         items(playlists) { playlist ->
                             Text(
                                 text = playlist.name,
+                                style = androidx.compose.material3.MaterialTheme.typography.bodyLarge.doubleScaled(),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable { onAdd(playlist.id) }
@@ -289,5 +291,5 @@ private fun formatSize(size: Long): String {
 
 @Composable
 private fun largeMenuTextStyle(): TextStyle {
-    return androidx.compose.material3.MaterialTheme.typography.bodyLarge.doubleScaled()
+    return androidx.compose.material3.MaterialTheme.typography.bodyLarge.largeScaled()
 }
