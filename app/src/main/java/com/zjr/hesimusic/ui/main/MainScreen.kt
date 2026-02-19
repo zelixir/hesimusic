@@ -83,6 +83,7 @@ fun MainScreen(
     val scope = rememberCoroutineScope()
     val titles = listOf("歌曲", "歌单", "收藏", "文件夹", "歌手", "专辑")
     val musicUiState by musicViewModel.uiState.collectAsState()
+    val sleepTimerState by musicViewModel.sleepTimerState.collectAsState()
     val savedPlaylistContext by musicViewModel.savedPlaylistContext.collectAsState()
     val isSearchActive by viewModel.isSearchActive.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
@@ -165,7 +166,8 @@ fun MainScreen(
                 onEqualizerClick = onEqualizerClick,
                 onAboutClick = onAboutClick,
                 onSleepTimerClick = onSleepTimerClick,
-                onLogsClick = onLogsClick
+                onLogsClick = onLogsClick,
+                sleepTimerRemaining = sleepTimerState
             )
         }
     ) { innerPadding ->

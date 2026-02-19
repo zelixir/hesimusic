@@ -19,8 +19,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
@@ -32,8 +30,6 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.utils.TimeFormatter
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -68,7 +64,11 @@ fun PlayerScreen(
                         )
                     }
                     IconButton(onClick = { showSleepTimer = true }) {
-                        Icon(Icons.Rounded.Timer, contentDescription = "睡眠定时")
+                        Icon(
+                            imageVector = if (sleepTimerState != null) Icons.Default.AlarmOn else Icons.Rounded.Timer,
+                            contentDescription = "睡眠定时",
+                            tint = if (sleepTimerState != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                        )
                     }
                     IconButton(onClick = { showEqualizer = true }) {
                         Icon(Icons.Rounded.GraphicEq, contentDescription = "均衡器")
@@ -88,19 +88,35 @@ fun PlayerScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceEvenly
         ) {
-            // Cover Art - use artwork bytes from taglib if available
-            AsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(uiState.artworkBytes ?: uiState.currentMediaItem?.mediaMetadata?.artworkUri)
-                    .crossfade(true)
-                    .build(),
-                contentDescription = "封面",
-                modifier = Modifier
-                    .aspectRatio(1f)
-                    .clip(MaterialTheme.shapes.medium)
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                contentScale = ContentScale.Crop
-            )
+            val artworkData = uiState.artworkBytes ?: uiState.currentMediaItem?.mediaMetadata?.artworkUri
+            if (artworkData != null) {
+                AsyncImage(
+                    model = ImageRequest.Builder(context)
+                        .data(artworkData)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = "封面",
+                    modifier = Modifier
+                        .aspectRatio(1f)
+                        .clip(MaterialTheme.shapes.medium)
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentScale = ContentScale.Crop
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .aspectRatio(1f)
+                        .clip(MaterialTheme.shapes.medium)
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "暂无封面",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
 
             // Title & Artist
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
