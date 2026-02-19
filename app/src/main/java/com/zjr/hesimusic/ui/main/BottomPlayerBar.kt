@@ -35,6 +35,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import com.zjr.hesimusic.utils.TimeFormatter
 
 @Composable
 fun BottomPlayerBar(
@@ -55,6 +56,7 @@ fun BottomPlayerBar(
     onAboutClick: () -> Unit,
     onSleepTimerClick: () -> Unit,
     onLogsClick: () -> Unit,
+    sleepTimerRemaining: Long?,
     modifier: Modifier = Modifier
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -175,7 +177,14 @@ fun BottomPlayerBar(
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("睡眠定时") },
+                            text = {
+                                val timerText = if (sleepTimerRemaining != null) {
+                                    "睡眠定时 (${TimeFormatter.formatTime(sleepTimerRemaining)})"
+                                } else {
+                                    "睡眠定时"
+                                }
+                                Text(timerText)
+                            },
                             onClick = { 
                                 showMenu = false
                                 onSleepTimerClick()

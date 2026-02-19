@@ -49,6 +49,7 @@ fun SongListScreen(
     
     val songs by songsFlow.collectAsState(initial = emptyList())
     val musicUiState by musicViewModel.uiState.collectAsState()
+    val sleepTimerState by musicViewModel.sleepTimerState.collectAsState()
 
     val handleSongClick = remember(musicViewModel, type, value) {
         { list: List<Song>, index: Int ->
@@ -105,7 +106,8 @@ fun SongListScreen(
                 onEqualizerClick = onEqualizerClick,
                 onAboutClick = onAboutClick,
                 onSleepTimerClick = onSleepTimerClick,
-                onLogsClick = onLogsClick
+                onLogsClick = onLogsClick,
+                sleepTimerRemaining = sleepTimerState
             )
         }
     ) { innerPadding ->
