@@ -15,7 +15,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.Player
@@ -50,6 +52,8 @@ fun SongListScreen(
     
     val songs by songsFlow.collectAsState(initial = emptyList())
     val musicUiState by musicViewModel.uiState.collectAsState()
+    val playlists by viewModel.playlists.collectAsState()
+    var selectedSongForActions by remember { mutableStateOf<Song?>(null) }
 
     val handleSongClick = remember(musicViewModel, type, value) {
         { list: List<Song>, index: Int ->
@@ -115,7 +119,18 @@ fun SongListScreen(
             SongList(
                 songs = songs,
                 currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
-                onSongClick = handleSongClick
+                onSongClick = handleSongClick,
+                onSongLongClick = { selectedSongForActions = it }
+            )
+            SongActionHost(
+                selectedSong = selectedSongForActions,
+                playlists = playlists,
+                onDismiss = { selectedSongForActions = null },
+                onAddToPlaylist = { song, playlistId -> viewModel.addSongToPlaylist(song, playlistId) },
+                onCreatePlaylist = { name, onCreated -> viewModel.createPlaylist(name, onCreated) },
+                onHideSong = { song -> viewModel.hideSong(song) },
+                onDeleteSong = { song, onResult -> viewModel.deleteSongFile(song, onResult) },
+                onLoadMetadata = { song, onLoaded -> viewModel.loadSongMetadata(song, onLoaded) }
             )
         }
     }

@@ -5,25 +5,38 @@ import androidx.lifecycle.viewModelScope
 import com.zjr.hesimusic.data.model.Album
 import com.zjr.hesimusic.data.model.Artist
 import com.zjr.hesimusic.data.model.FileSystemItem
+import com.zjr.hesimusic.data.model.HiddenSong
+import com.zjr.hesimusic.data.model.Playlist
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
+import com.zjr.hesimusic.data.repository.HiddenSongRepository
 import com.zjr.hesimusic.data.repository.LibraryRepository
+import com.zjr.hesimusic.data.repository.PlaylistRepository
+import com.zjr.hesimusic.data.repository.SongRepository
+import com.zjr.hesimusic.data.scanner.TagLibHelper
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @OptIn(FlowPreview::class)
 @HiltViewModel
 class LibraryViewModel @Inject constructor(
     private val repository: LibraryRepository,
+    private val hiddenSongRepository: HiddenSongRepository,
+    private val playlistRepository: PlaylistRepository,
+    private val songRepository: SongRepository,
+    private val tagLibHelper: TagLibHelper,
     private val playbackPreferences: PlaybackPreferences
 ) : ViewModel() {
 
@@ -67,6 +80,12 @@ class LibraryViewModel @Inject constructor(
         filterSongs(songs, query)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
+    val playlists: StateFlow<List<Playlist>> = playlistRepository.getPlaylists()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    val hiddenSongs: StateFlow<List<HiddenSong>> = hiddenSongRepository.getHiddenSongs()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
     private fun filterSongs(songs: List<Song>, query: String): List<Song> {
         if (query.isBlank()) return songs
         return songs.filter { song ->
@@ -82,6 +101,16 @@ class LibraryViewModel @Inject constructor(
     
     fun getSongsByAlbum(album: String) = repository.getSongsByAlbum(album)
 
+    fun getSongsByPlaylist(playlistId: Long) = combine(
+        playlistRepository.getSongsByPlaylist(playlistId),
+        hiddenSongRepository.getHiddenSongs()
+    ) { songs, hidden ->
+        val hiddenKeys = hidden.map { it.filePath to it.startPosition }.toSet()
+        songs.filterNot { (it.filePath to it.startPosition) in hiddenKeys }
+    }
+
+    fun getPlaylistSongCount(playlistId: Long) = playlistRepository.getPlaylistSongCount(playlistId)
+
     fun updateSearchQuery(query: String) {
         _searchQuery.value = query
     }
@@ -91,6 +120,71 @@ class LibraryViewModel @Inject constructor(
         if (!active) {
             _searchQuery.value = ""
         }
+    }
+
+    fun addSongToPlaylist(song: Song, playlistId: Long) {
+        viewModelScope.launch {
+            playlistRepository.addSongToPlaylist(playlistId, song.id)
+        }
+    }
+
+    fun createPlaylist(name: String, onCreated: (Long?) -> Unit = {}) {
+        viewModelScope.launch {
+            val trimmedName = name.trim()
+            if (trimmedName.isBlank()) {
+                onCreated(null)
+                return@launch
+            }
+            onCreated(playlistRepository.createPlaylist(trimmedName))
+        }
+    }
+
+    fun hideSong(song: Song) {
+        viewModelScope.launch {
+            hiddenSongRepository.hideSong(song)
+        }
+    }
+
+    fun unhideSong(hiddenSong: HiddenSong) {
+        viewModelScope.launch {
+            hiddenSongRepository.unhideSong(hiddenSong.filePath, hiddenSong.startPosition)
+        }
+    }
+
+    fun deleteSongFile(song: Song, onResult: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            val deleted = withContext(Dispatchers.IO) { songRepository.removeSong(song, deleteFile = true) }
+            if (deleted) {
+                songRepository.removeSongsByFilePath(song.filePath)
+            }
+            onResult(deleted)
+        }
+    }
+
+    fun loadSongMetadata(song: Song, onLoaded: (Map<String, String>) -> Unit) {
+        viewModelScope.launch {
+            val metadata = withContext(Dispatchers.IO) {
+                tagLibHelper.extractMetadata(song.filePath) ?: hashMapOf()
+            }
+            onLoaded(metadata)
+        }
+    }
+}
+
+internal fun filterArtists(artists: List<Artist>, query: String, minArtistTrackCount: Int): List<Artist> {
+    val artistsWithEnoughSongs = artists.filter { artist -> artist.songCount >= minArtistTrackCount }
+    if (query.isBlank()) return artistsWithEnoughSongs
+    return artistsWithEnoughSongs.filter { artist ->
+        artist.name.contains(query, ignoreCase = true)
+    }
+}
+
+internal fun filterAlbums(albums: List<Album>, query: String, minAlbumTrackCount: Int): List<Album> {
+    val albumsWithEnoughSongs = albums.filter { album -> album.songCount >= minAlbumTrackCount }
+    if (query.isBlank()) return albumsWithEnoughSongs
+    return albumsWithEnoughSongs.filter { album ->
+        album.name.contains(query, ignoreCase = true) ||
+        album.artist.contains(query, ignoreCase = true)
     }
 }
 

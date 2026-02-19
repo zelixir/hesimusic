@@ -1,6 +1,7 @@
 package com.zjr.hesimusic.data.repository
 
 import com.zjr.hesimusic.data.dao.FavoriteDao
+import com.zjr.hesimusic.data.dao.HiddenSongDao
 import com.zjr.hesimusic.data.dao.SongDao
 import com.zjr.hesimusic.data.model.Album
 import com.zjr.hesimusic.data.model.Artist
@@ -14,20 +15,38 @@ import javax.inject.Inject
 
 class LibraryRepository @Inject constructor(
     private val songDao: SongDao,
-    private val favoriteDao: FavoriteDao
+    private val favoriteDao: FavoriteDao,
+    private val hiddenSongDao: HiddenSongDao
 ) {
-    fun getAllSongs(): Flow<List<Song>> = songDao.getAllSongs()
+    private val visibleSongs: Flow<List<Song>> = songDao.getAllSongs().combine(hiddenSongDao.getAll()) { songs, hidden ->
+        val hiddenKeys = hidden.map { it.filePath to it.startPosition }.toSet()
+        songs.filterNot { (it.filePath to it.startPosition) in hiddenKeys }
+    }
 
-    fun getArtists(): Flow<List<Artist>> = songDao.getArtists()
+    fun getAllSongs(): Flow<List<Song>> = visibleSongs
 
-    fun getAlbums(): Flow<List<Album>> = songDao.getAlbums()
+    fun getArtists(): Flow<List<Artist>> = visibleSongs.map { songs ->
+        songs.groupBy { it.artist }
+            .map { Artist(name = it.key, songCount = it.value.size) }
+            .sortedBy { it.name.lowercase() }
+    }
 
-    fun getSongsByArtist(artist: String): Flow<List<Song>> = songDao.getSongsByArtist(artist)
+    fun getAlbums(): Flow<List<Album>> = visibleSongs.map { songs ->
+        songs.groupBy { it.album to it.artist }
+            .map { Album(name = it.key.first, artist = it.key.second, songCount = it.value.size) }
+            .sortedBy { it.name.lowercase() }
+    }
 
-    fun getSongsByAlbum(album: String): Flow<List<Song>> = songDao.getSongsByAlbum(album)
+    fun getSongsByArtist(artist: String): Flow<List<Song>> = visibleSongs.map { songs ->
+        songs.filter { it.artist == artist }.sortedBy { it.title.lowercase() }
+    }
+
+    fun getSongsByAlbum(album: String): Flow<List<Song>> = visibleSongs.map { songs ->
+        songs.filter { it.album == album }.sortedBy { it.trackNumber }
+    }
 
     fun getFavoriteSongs(): Flow<List<Song>> {
-        return favoriteDao.getAllFavoritesAsList().combine(songDao.getAllSongs()) { favorites, allSongs ->
+        return favoriteDao.getAllFavoritesAsList().combine(visibleSongs) { favorites, allSongs ->
             // Create a set of (filePath, startPosition) pairs for efficient lookup
             val favoriteKeys = favorites.map { it.filePath to it.startPosition }.toSet()
             allSongs.filter { (it.filePath to it.startPosition) in favoriteKeys }
@@ -35,7 +54,7 @@ class LibraryRepository @Inject constructor(
     }
 
     fun getFolderContents(parentPath: String): Flow<List<FileSystemItem>> {
-        return songDao.getAllSongs().map { songs ->
+        return visibleSongs.map { songs ->
             val items = mutableListOf<FileSystemItem>()
             val folders = mutableMapOf<String, Int>() // path -> count
 

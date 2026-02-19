@@ -43,4 +43,10 @@ interface SongDao {
 
     @Query("SELECT * FROM songs WHERE id IN (:ids)")
     suspend fun getSongsByIds(ids: List<Long>): List<Song>
+
+    @Query("DELETE FROM songs WHERE id = :songId")
+    suspend fun deleteById(songId: Long)
+
+    @Query("DELETE FROM songs WHERE filePath = :filePath")
+    suspend fun deleteByFilePath(filePath: String)
 }
