@@ -1,6 +1,7 @@
 package com.zjr.hesimusic.ui.settings
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -8,13 +9,17 @@ import androidx.room.withTransaction
 import com.zjr.hesimusic.data.AppDatabase
 import com.zjr.hesimusic.data.model.Favorite
 import com.zjr.hesimusic.data.model.LogEntry
+import com.zjr.hesimusic.data.model.Playlist
+import com.zjr.hesimusic.data.model.PlaylistEntry
 import com.zjr.hesimusic.data.model.Song
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import javax.inject.Inject
@@ -24,17 +29,24 @@ class BackupRestoreViewModel @Inject constructor(
     private val appDatabase: AppDatabase,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
+    private val preferenceFileNames = listOf("playback_prefs", "scan_prefs")
+
     private val _statusMessage = MutableStateFlow("请选择备份或还原操作")
     val statusMessage: StateFlow<String> = _statusMessage.asStateFlow()
 
     fun backupDatabase(uri: Uri) {
         viewModelScope.launch {
             runCatching {
-                val backupJson = JSONObject().apply {
-                    put("version", 1)
-                    put("songs", songsToJson(appDatabase.songDao().getAllSongsList()))
-                    put("favorites", favoritesToJson(appDatabase.favoriteDao().getAllFavoritesList()))
-                    put("logs", logsToJson(appDatabase.logDao().getAllLogsList()))
+                val backupJson = withContext(Dispatchers.IO) {
+                    JSONObject().apply {
+                        put("version", 2)
+                        put("songs", songsToJson(appDatabase.songDao().getAllSongsList()))
+                        put("favorites", favoritesToJson(appDatabase.favoriteDao().getAllFavoritesList()))
+                        put("logs", logsToJson(appDatabase.logDao().getAllLogsList()))
+                        put("playlists", playlistsToJson(appDatabase.playlistDao().getAllPlaylistsList()))
+                        put("playlistEntries", playlistEntriesToJson(appDatabase.playlistEntryDao().getAllPlaylistEntriesList()))
+                        put("preferences", preferencesToJson())
+                    }
                 }
                 context.contentResolver.openOutputStream(uri)?.use { outputStream ->
                     outputStream.write(backupJson.toString().toByteArray(Charsets.UTF_8))
@@ -50,20 +62,34 @@ class BackupRestoreViewModel @Inject constructor(
     fun restoreDatabase(uri: Uri) {
         viewModelScope.launch {
             runCatching {
-                val backupContent = context.contentResolver.openInputStream(uri)?.use {
-                    it.readBytes().toString(Charsets.UTF_8)
-                } ?: error("无法读取备份文件")
+                val backupContent = withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uri)?.use {
+                        it.readBytes().toString(Charsets.UTF_8)
+                    } ?: error("无法读取备份文件")
+                }
                 val backupJson = JSONObject(backupContent)
+                val backupVersion = backupJson.optInt("version", 1)
+                if (backupVersion < 1) error("不支持的备份版本: $backupVersion")
+                if (backupVersion > 2) error("备份版本过新，当前版本暂不支持: $backupVersion")
                 val songs = jsonToSongs(backupJson.optJSONArray("songs") ?: JSONArray())
                 val favorites = jsonToFavorites(backupJson.optJSONArray("favorites") ?: JSONArray())
                 val logs = jsonToLogs(backupJson.optJSONArray("logs") ?: JSONArray())
+                val playlists = jsonToPlaylists(backupJson.optJSONArray("playlists") ?: JSONArray())
+                val playlistEntries = jsonToPlaylistEntries(backupJson.optJSONArray("playlistEntries") ?: JSONArray())
                 appDatabase.withTransaction {
                     appDatabase.songDao().deleteAll()
+                    appDatabase.playlistEntryDao().deleteAll()
+                    appDatabase.playlistDao().deleteAll()
                     appDatabase.favoriteDao().deleteAll()
                     appDatabase.logDao().deleteAllLogs()
                     if (songs.isNotEmpty()) appDatabase.songDao().insertAll(songs)
+                    if (playlists.isNotEmpty()) appDatabase.playlistDao().insertAll(playlists)
+                    if (playlistEntries.isNotEmpty()) appDatabase.playlistEntryDao().insertAll(playlistEntries)
                     if (favorites.isNotEmpty()) appDatabase.favoriteDao().insertAll(favorites)
                     if (logs.isNotEmpty()) appDatabase.logDao().insertAll(logs)
+                }
+                withContext(Dispatchers.IO) {
+                    restorePreferences(backupJson.optJSONObject("preferences"))
                 }
             }.onSuccess {
                 _statusMessage.value = "数据库还原成功"
@@ -126,6 +152,63 @@ class BackupRestoreViewModel @Inject constructor(
         }
     }
 
+    private fun playlistsToJson(playlists: List<Playlist>) = JSONArray().apply {
+        playlists.forEach { playlist ->
+            put(
+                JSONObject().apply {
+                    put("id", playlist.id)
+                    put("name", playlist.name)
+                    put("createdAt", playlist.createdAt)
+                }
+            )
+        }
+    }
+
+    private fun playlistEntriesToJson(entries: List<PlaylistEntry>) = JSONArray().apply {
+        entries.forEach { entry ->
+            put(
+                JSONObject().apply {
+                    put("id", entry.id)
+                    put("playlistId", entry.playlistId)
+                    put("songId", entry.songId)
+                    put("order", entry.order)
+                }
+            )
+        }
+    }
+
+    private fun preferencesToJson(): JSONObject = JSONObject().apply {
+        preferenceFileNames.forEach { name ->
+            val sharedPreferences = context.getSharedPreferences(name, Context.MODE_PRIVATE)
+            put(name, sharedPreferencesToJson(sharedPreferences))
+        }
+    }
+
+    private fun sharedPreferencesToJson(sharedPreferences: SharedPreferences): JSONArray = JSONArray().apply {
+        sharedPreferences.all.forEach { (key, value) ->
+            val (type, serializedValue) = serializePreferenceValue(value)
+            if (type != null) {
+                put(
+                    JSONObject().apply {
+                        put("key", key)
+                        put("type", type)
+                        put("value", serializedValue)
+                    }
+                )
+            }
+        }
+    }
+
+    private fun serializePreferenceValue(value: Any?): Pair<String?, Any?> = when (value) {
+        is String -> "string" to value
+        is Boolean -> "boolean" to value
+        is Int -> "int" to value
+        is Long -> "long" to value
+        is Float -> "float" to value.toDouble()
+        is Set<*> -> "string_set" to JSONArray(value.filterIsInstance<String>())
+        else -> null to null
+    }
+
     private fun jsonToSongs(jsonArray: JSONArray): List<Song> =
         List(jsonArray.length()) { index ->
             val item = jsonArray.getJSONObject(index)
@@ -151,6 +234,27 @@ class BackupRestoreViewModel @Inject constructor(
             )
         }
 
+    private fun jsonToPlaylists(jsonArray: JSONArray): List<Playlist> =
+        List(jsonArray.length()) { index ->
+            val item = jsonArray.getJSONObject(index)
+            Playlist(
+                id = item.optLong("id", 0L),
+                name = item.getString("name"),
+                createdAt = item.optLong("createdAt", System.currentTimeMillis())
+            )
+        }
+
+    private fun jsonToPlaylistEntries(jsonArray: JSONArray): List<PlaylistEntry> =
+        List(jsonArray.length()) { index ->
+            val item = jsonArray.getJSONObject(index)
+            PlaylistEntry(
+                id = item.optLong("id", 0L),
+                playlistId = item.getLong("playlistId"),
+                songId = item.getLong("songId"),
+                order = item.optInt("order", index)
+            )
+        }
+
     private fun jsonToFavorites(jsonArray: JSONArray): List<Favorite> =
         List(jsonArray.length()) { index ->
             val item = jsonArray.getJSONObject(index)
@@ -172,4 +276,41 @@ class BackupRestoreViewModel @Inject constructor(
                 message = item.getString("message")
             )
         }
+
+    private fun restorePreferences(preferencesJson: JSONObject?) {
+        if (preferencesJson == null) return
+        preferenceFileNames.forEach { name ->
+            val entries = preferencesJson.optJSONArray(name) ?: JSONArray()
+            val editor = context.getSharedPreferences(name, Context.MODE_PRIVATE).edit()
+            editor.clear()
+            for (index in 0 until entries.length()) {
+                val item = entries.optJSONObject(index) ?: continue
+                val key = item.optString("key")
+                when (item.optString("type")) {
+                    "string" -> editor.putString(key, item.optString("value"))
+                    "boolean" -> editor.putBoolean(key, item.optBoolean("value"))
+                    "int" -> editor.putInt(key, item.optInt("value"))
+                    "long" -> editor.putLong(key, item.optLong("value"))
+                    "float" -> {
+                        val rawValue = item.opt("value")
+                        val parsedValue = when (rawValue) {
+                            is Number -> rawValue.toFloat()
+                            is String -> rawValue.toFloatOrNull()
+                            else -> null
+                        } ?: error("无效的浮点配置值: key=$key")
+                        editor.putFloat(key, parsedValue)
+                    }
+                    "string_set" -> {
+                        val jsonArray = item.optJSONArray("value") ?: JSONArray()
+                        val stringSet = mutableSetOf<String>()
+                        for (setIndex in 0 until jsonArray.length()) {
+                            stringSet.add(jsonArray.optString(setIndex))
+                        }
+                        editor.putStringSet(key, stringSet)
+                    }
+                }
+            }
+            editor.apply()
+        }
+    }
 }

@@ -21,6 +21,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+
+private val BACKUP_FILE_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -66,7 +70,8 @@ fun BackupRestoreScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Button(onClick = {
-                backupLauncher.launch("hesimusic_backup.json")
+                val timestamp = LocalDateTime.now().format(BACKUP_FILE_TIME_FORMATTER)
+                backupLauncher.launch("hesimusic_backup_$timestamp.json")
             }) {
                 Text("备份数据库到 JSON")
             }
