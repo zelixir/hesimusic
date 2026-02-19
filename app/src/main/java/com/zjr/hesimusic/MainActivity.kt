@@ -21,6 +21,7 @@ import com.zjr.hesimusic.ui.logs.LogScreen
 import com.zjr.hesimusic.ui.main.MainScreen
 import com.zjr.hesimusic.ui.player.PlayerScreen
 import com.zjr.hesimusic.ui.scan.ScanScreen
+import com.zjr.hesimusic.ui.settings.BackupRestoreScreen
 import com.zjr.hesimusic.ui.settings.SettingsScreen
 import com.zjr.hesimusic.ui.sleeptimer.SleepTimerScreen
 import com.zjr.hesimusic.ui.test.PlayerTestScreen
@@ -89,6 +90,7 @@ class MainActivity : ComponentActivity() {
                                     navController.navigate("player")
                                 },
                                 onScanClick = { navController.navigate("scan") },
+                                onBackupRestoreClick = { navController.navigate("backup_restore") },
                                 onSettingsClick = { navController.navigate("settings") },
                                 onEqualizerClick = { navController.navigate("equalizer") },
                                 onAboutClick = { navController.navigate("about") },
@@ -103,6 +105,10 @@ class MainActivity : ComponentActivity() {
 
                         composable("settings") {
                             SettingsScreen(onBackClick = { navController.popBackStack() })
+                        }
+
+                        composable("backup_restore") {
+                            BackupRestoreScreen(onBackClick = { navController.popBackStack() })
                         }
 
                         composable("equalizer") {
@@ -144,6 +150,7 @@ class MainActivity : ComponentActivity() {
                                 onBack = { navController.popBackStack() },
                                 onSongClick = { /* TODO: Play */ },
                                 onScanClick = { navController.navigate("scan") },
+                                onBackupRestoreClick = { navController.navigate("backup_restore") },
                                 onSettingsClick = { navController.navigate("settings") },
                                 onEqualizerClick = { navController.navigate("equalizer") },
                                 onAboutClick = { navController.navigate("about") },

@@ -50,6 +50,7 @@ fun BottomPlayerBar(
     onPlayModeClick: () -> Unit,
     onClick: () -> Unit,
     onScanClick: () -> Unit,
+    onBackupRestoreClick: () -> Unit,
     onSettingsClick: () -> Unit,
     onEqualizerClick: () -> Unit,
     onAboutClick: () -> Unit,
@@ -158,6 +159,13 @@ fun BottomPlayerBar(
                             onClick = { 
                                 showMenu = false
                                 onScanClick()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("备份/还原") },
+                            onClick = {
+                                showMenu = false
+                                onBackupRestoreClick()
                             }
                         )
                         DropdownMenuItem(

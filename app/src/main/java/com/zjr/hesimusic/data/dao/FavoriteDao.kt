@@ -25,6 +25,15 @@ interface FavoriteDao {
     @Query("SELECT * FROM favorites")
     fun getAllFavoritesAsList(): Flow<List<Favorite>>
 
+    @Query("SELECT * FROM favorites")
+    suspend fun getAllFavoritesList(): List<Favorite>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(favorites: List<Favorite>)
+
+    @Query("DELETE FROM favorites")
+    suspend fun deleteAll()
+
     @Query("SELECT EXISTS(SELECT 1 FROM favorites WHERE filePath = :filePath AND startPosition = :startPosition)")
     fun isFavorite(filePath: String, startPosition: Long): Flow<Boolean>
 

@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MusicNote
@@ -32,8 +33,9 @@ fun FolderList(
     onSongClick: (List<Song>, Int, String) -> Unit,
     appLogger: AppLogger? = null
 ) {
-    var currentPath by remember { mutableStateOf(initialPath) }
+    var currentPath by remember(initialPath) { mutableStateOf(initialPath) }
     val items by viewModel.getFolderContents(currentPath).collectAsState(initial = emptyList())
+    val listState = rememberLazyListState()
 
     // Log list size for performance tracking
     LaunchedEffect(items.size, currentPath) {
@@ -51,8 +53,19 @@ fun FolderList(
             currentPath = parent
         }
     }
+    
+    LaunchedEffect(items, currentPlayingSongId, currentPath, initialPath) {
+        if (currentPlayingSongId == null) return@LaunchedEffect
+        val itemIndex = items.indexOfFirst { item ->
+            item is FileSystemItem.MusicFile && item.song.id.toString() == currentPlayingSongId
+        }
+        if (itemIndex >= 0) {
+            val scrollIndex = if (currentPath != initialPath) itemIndex + 1 else itemIndex
+            listState.scrollToItem(scrollIndex)
+        }
+    }
 
-    LazyColumn(modifier = modifier) {
+    LazyColumn(state = listState, modifier = modifier) {
         if (currentPath != initialPath) {
              item {
                  MusicListItem(

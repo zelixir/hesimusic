@@ -66,6 +66,7 @@ fun MainScreen(
     onAlbumClick: (Album) -> Unit,
     onPlayerClick: () -> Unit,
     onScanClick: () -> Unit,
+    onBackupRestoreClick: () -> Unit,
     onSettingsClick: () -> Unit,
     onEqualizerClick: () -> Unit,
     onAboutClick: () -> Unit,
@@ -82,11 +83,14 @@ fun MainScreen(
     val scope = rememberCoroutineScope()
     val titles = listOf("歌曲", "歌单", "收藏", "文件夹", "歌手", "专辑")
     val musicUiState by musicViewModel.uiState.collectAsState()
+    val savedPlaylistContext by musicViewModel.savedPlaylistContext.collectAsState()
     val isSearchActive by viewModel.isSearchActive.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     val focusRequester = remember { FocusRequester() }
     val playlists by viewModel.playlists.collectAsState()
     var selectedSongForActions by remember { mutableStateOf<Song?>(null) }
+    var hasRestoredLibraryContext by remember { mutableStateOf(false) }
+    var restoredFolderPath by remember { mutableStateOf<String?>(null) }
 
     // Request focus when search becomes active
     LaunchedEffect(isSearchActive) {
@@ -98,6 +102,33 @@ fun MainScreen(
     // Handle back button to close search
     BackHandler(enabled = isSearchActive) {
         viewModel.setSearchActive(false)
+    }
+    
+    LaunchedEffect(savedPlaylistContext, hasRestoredLibraryContext) {
+        if (hasRestoredLibraryContext) return@LaunchedEffect
+        val playlistContext = savedPlaylistContext ?: return@LaunchedEffect
+        val targetPage = playlistTypeToTabIndex(playlistContext.type)
+        if (pagerState.currentPage != targetPage) {
+            pagerState.scrollToPage(targetPage)
+        }
+        when (playlistContext.type) {
+            PlaylistType.ARTIST -> {
+                if (playlistContext.value.isNotBlank()) {
+                    onArtistClick(Artist(name = playlistContext.value, songCount = 0))
+                }
+            }
+            PlaylistType.ALBUM -> {
+                if (playlistContext.value.isNotBlank()) {
+                    onAlbumClick(Album(name = playlistContext.value, artist = "", songCount = 0))
+                }
+            }
+            PlaylistType.FOLDER -> {
+                restoredFolderPath = playlistContext.value.takeIf { it.isNotBlank() }
+            }
+            else -> Unit
+        }
+        hasRestoredLibraryContext = true
+        musicViewModel.clearSavedPlaylistContext()
     }
 
     Scaffold(
@@ -129,6 +160,7 @@ fun MainScreen(
                 },
                 onClick = onPlayerClick,
                 onScanClick = onScanClick,
+                onBackupRestoreClick = onBackupRestoreClick,
                 onSettingsClick = onSettingsClick,
                 onEqualizerClick = onEqualizerClick,
                 onAboutClick = onAboutClick,
@@ -249,6 +281,7 @@ fun MainScreen(
                         appLogger?.info("MainScreen", "FolderList view activated")
                         FolderList(
                             viewModel = viewModel,
+                            initialPath = restoredFolderPath ?: "/storage/emulated/0",
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
                             onSongClick = { list, index, folderPath -> 
                                 Log.d("MainScreen", "FolderList: playing song at index $index in folder $folderPath")
@@ -284,4 +317,12 @@ fun MainScreen(
             )
         }
     }
+}
+
+internal fun playlistTypeToTabIndex(type: PlaylistType): Int = when (type) {
+    PlaylistType.GLOBAL -> 0
+    PlaylistType.FAVORITES -> 1
+    PlaylistType.ARTIST -> 2
+    PlaylistType.ALBUM -> 3
+    PlaylistType.FOLDER -> 4
 }

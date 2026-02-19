@@ -8,6 +8,7 @@ import com.zjr.hesimusic.data.dao.FavoriteDao
 import com.zjr.hesimusic.data.dao.HiddenSongDao
 import com.zjr.hesimusic.data.dao.LogDao
 import com.zjr.hesimusic.data.dao.PlaylistDao
+import com.zjr.hesimusic.data.dao.PlaylistEntryDao
 import com.zjr.hesimusic.data.dao.SongDao
 import com.zjr.hesimusic.data.model.Favorite
 import com.zjr.hesimusic.data.model.HiddenSong
@@ -23,9 +24,10 @@ import com.zjr.hesimusic.data.model.Song
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun songDao(): SongDao
+    abstract fun playlistDao(): PlaylistDao
+    abstract fun playlistEntryDao(): PlaylistEntryDao
     abstract fun favoriteDao(): FavoriteDao
     abstract fun logDao(): LogDao
-    abstract fun playlistDao(): PlaylistDao
     abstract fun hiddenSongDao(): HiddenSongDao
     
     companion object {
