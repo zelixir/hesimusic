@@ -65,7 +65,11 @@ fun SettingsScreen(
                 }
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(hiddenSongs, key = { "${it.filePath}-${it.startPosition}" }) { hiddenSong ->
-                        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp)
+                        ) {
                             Text(text = hiddenSong.filePath)
                             TextButton(onClick = { viewModel.unhideSong(hiddenSong) }) {
                                 Text("取消隐藏")

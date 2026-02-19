@@ -193,7 +193,11 @@ private fun AddToPlaylistDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onCreate(newPlaylistName) }) {
+            TextButton(onClick = {
+                if (newPlaylistName.isNotBlank()) {
+                    onCreate(newPlaylistName)
+                }
+            }) {
                 Text("新建并添加")
             }
         },
