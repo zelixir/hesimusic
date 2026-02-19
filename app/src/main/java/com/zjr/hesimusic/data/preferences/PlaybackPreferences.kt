@@ -5,6 +5,9 @@ import android.content.SharedPreferences
 import android.util.Log
 import androidx.media3.common.Player
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -50,10 +53,16 @@ class PlaybackPreferences @Inject constructor(
         private const val KEY_PLAYLIST_TYPE = "playlist_type"
         private const val KEY_PLAYLIST_VALUE = "playlist_value"
         private const val KEY_STATE_VERSION = "state_version"
+        private const val KEY_MIN_ALBUM_TRACK_COUNT = "min_album_track_count"
+        private const val KEY_MIN_ARTIST_TRACK_COUNT = "min_artist_track_count"
     }
     
     // State version to track if the saved state is valid and not overwritten by UI initialization
     private var currentStateVersion: Long = System.currentTimeMillis()
+    private val _minAlbumTrackCountFlow = MutableStateFlow(getMinAlbumTrackCount())
+    val minAlbumTrackCountFlow: StateFlow<Int> = _minAlbumTrackCountFlow.asStateFlow()
+    private val _minArtistTrackCountFlow = MutableStateFlow(getMinArtistTrackCount())
+    val minArtistTrackCountFlow: StateFlow<Int> = _minArtistTrackCountFlow.asStateFlow()
 
     fun saveQueue(ids: List<Long>) {
         val idsString = ids.joinToString(",")
@@ -132,6 +141,26 @@ class PlaybackPreferences @Inject constructor(
 
     fun getShuffleModeEnabled(): Boolean {
         return prefs.getBoolean(KEY_SHUFFLE_MODE_ENABLED, false)
+    }
+
+    fun saveMinAlbumTrackCount(value: Int) {
+        val normalized = value.coerceAtLeast(0)
+        prefs.edit().putInt(KEY_MIN_ALBUM_TRACK_COUNT, normalized).apply()
+        _minAlbumTrackCountFlow.value = normalized
+    }
+
+    fun getMinAlbumTrackCount(): Int {
+        return prefs.getInt(KEY_MIN_ALBUM_TRACK_COUNT, 5).coerceAtLeast(0)
+    }
+
+    fun saveMinArtistTrackCount(value: Int) {
+        val normalized = value.coerceAtLeast(0)
+        prefs.edit().putInt(KEY_MIN_ARTIST_TRACK_COUNT, normalized).apply()
+        _minArtistTrackCountFlow.value = normalized
+    }
+
+    fun getMinArtistTrackCount(): Int {
+        return prefs.getInt(KEY_MIN_ARTIST_TRACK_COUNT, 5).coerceAtLeast(0)
     }
     
     /**

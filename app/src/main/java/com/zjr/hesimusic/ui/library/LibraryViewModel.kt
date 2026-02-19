@@ -6,6 +6,7 @@ import com.zjr.hesimusic.data.model.Album
 import com.zjr.hesimusic.data.model.Artist
 import com.zjr.hesimusic.data.model.FileSystemItem
 import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.data.preferences.PlaybackPreferences
 import com.zjr.hesimusic.data.repository.LibraryRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -22,7 +23,8 @@ import javax.inject.Inject
 @OptIn(FlowPreview::class)
 @HiltViewModel
 class LibraryViewModel @Inject constructor(
-    private val repository: LibraryRepository
+    private val repository: LibraryRepository,
+    private val playbackPreferences: PlaybackPreferences
 ) : ViewModel() {
 
     private val _searchQuery = MutableStateFlow("")
@@ -53,15 +55,12 @@ class LibraryViewModel @Inject constructor(
         filterSongs(songs, query)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    val artists: StateFlow<List<Artist>> = combine(allArtists, debouncedSearchQuery) { artists, query ->
-        if (query.isBlank()) artists
-        else artists.filter { artist ->
-            artist.name.contains(query, ignoreCase = true)
-        }
+    val artists: StateFlow<List<Artist>> = combine(allArtists, debouncedSearchQuery, playbackPreferences.minArtistTrackCountFlow) { artists, query, minArtistTrackCount ->
+        filterArtists(artists, query, minArtistTrackCount)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    val albums: StateFlow<List<Album>> = combine(allAlbums, debouncedSearchQuery) { albums, query ->
-        filterAlbums(albums, query)
+    val albums: StateFlow<List<Album>> = combine(allAlbums, debouncedSearchQuery, playbackPreferences.minAlbumTrackCountFlow) { albums, query, minAlbumTrackCount ->
+        filterAlbums(albums, query, minAlbumTrackCount)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val favoriteSongs: StateFlow<List<Song>> = combine(allFavoriteSongs, debouncedSearchQuery) { songs, query ->
@@ -95,8 +94,16 @@ class LibraryViewModel @Inject constructor(
     }
 }
 
-internal fun filterAlbums(albums: List<Album>, query: String): List<Album> {
-    val albumsWithEnoughSongs = albums.filter { album -> album.songCount >= 5 }
+internal fun filterArtists(artists: List<Artist>, query: String, minArtistTrackCount: Int): List<Artist> {
+    val artistsWithEnoughSongs = artists.filter { artist -> artist.songCount >= minArtistTrackCount }
+    if (query.isBlank()) return artistsWithEnoughSongs
+    return artistsWithEnoughSongs.filter { artist ->
+        artist.name.contains(query, ignoreCase = true)
+    }
+}
+
+internal fun filterAlbums(albums: List<Album>, query: String, minAlbumTrackCount: Int): List<Album> {
+    val albumsWithEnoughSongs = albums.filter { album -> album.songCount >= minAlbumTrackCount }
     if (query.isBlank()) return albumsWithEnoughSongs
     return albumsWithEnoughSongs.filter { album ->
         album.name.contains(query, ignoreCase = true) ||
