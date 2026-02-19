@@ -30,8 +30,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -43,6 +45,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.Player
 import com.zjr.hesimusic.data.model.Album
 import com.zjr.hesimusic.data.model.Artist
+import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.preferences.PlaylistContext
 import com.zjr.hesimusic.data.preferences.PlaylistType
 import com.zjr.hesimusic.ui.common.MusicViewModel
@@ -51,6 +54,7 @@ import com.zjr.hesimusic.ui.library.ArtistList
 import com.zjr.hesimusic.ui.library.FolderList
 import com.zjr.hesimusic.ui.library.LibraryViewModel
 import com.zjr.hesimusic.ui.library.SongList
+import com.zjr.hesimusic.ui.library.SongActionHost
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -74,13 +78,15 @@ fun MainScreen(
         (context.applicationContext as? com.zjr.hesimusic.HesiMusicApplication)?.appLogger
     }
     
-    val pagerState = rememberPagerState(pageCount = { 5 })
+    val pagerState = rememberPagerState(pageCount = { 6 })
     val scope = rememberCoroutineScope()
-    val titles = listOf("歌曲", "收藏", "歌手", "专辑", "文件夹")
+    val titles = listOf("歌曲", "收藏", "歌手", "专辑", "文件夹", "歌单")
     val musicUiState by musicViewModel.uiState.collectAsState()
     val isSearchActive by viewModel.isSearchActive.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     val focusRequester = remember { FocusRequester() }
+    val playlists by viewModel.playlists.collectAsState()
+    var selectedSongForActions by remember { mutableStateOf<Song?>(null) }
 
     // Request focus when search becomes active
     LaunchedEffect(isSearchActive) {
@@ -211,6 +217,7 @@ fun MainScreen(
                                 Log.d("MainScreen", "SongList (Global): playing song at index $index")
                                 musicViewModel.playList(list, index, PlaylistContext.GLOBAL)
                             },
+                            onSongLongClick = { selectedSongForActions = it },
                             appLogger = appLogger
                         )
                     }
@@ -225,6 +232,7 @@ fun MainScreen(
                                 Log.d("MainScreen", "SongList (Favorites): playing song at index $index")
                                 musicViewModel.playList(list, index, PlaylistContext.FAVORITES)
                             },
+                            onSongLongClick = { selectedSongForActions = it },
                             appLogger = appLogger
                         )
                     }
@@ -253,8 +261,27 @@ fun MainScreen(
                             appLogger = appLogger
                         )
                     }
+                    5 -> {
+                        com.zjr.hesimusic.ui.library.PlaylistTabScreen(
+                            viewModel = viewModel,
+                            musicViewModel = musicViewModel,
+                            currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
+                            onSongLongClick = { selectedSongForActions = it }
+                        )
+                    }
                 }
             }
+
+            SongActionHost(
+                selectedSong = selectedSongForActions,
+                playlists = playlists,
+                onDismiss = { selectedSongForActions = null },
+                onAddToPlaylist = { song, playlistId -> viewModel.addSongToPlaylist(song, playlistId) },
+                onCreatePlaylist = { name, onCreated -> viewModel.createPlaylist(name, onCreated) },
+                onHideSong = { song -> viewModel.hideSong(song) },
+                onDeleteSong = { song, onResult -> viewModel.deleteSongFile(song, onResult) },
+                onLoadMetadata = { song, onLoaded -> viewModel.loadSongMetadata(song, onLoaded) }
+            )
         }
     }
 }

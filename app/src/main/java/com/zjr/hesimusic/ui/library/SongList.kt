@@ -42,6 +42,7 @@ fun SongList(
     songs: List<Song>,
     currentPlayingSongId: String? = null,
     onSongClick: (List<Song>, Int) -> Unit,
+    onSongLongClick: ((Song) -> Unit)? = null,
     modifier: Modifier = Modifier,
     appLogger: AppLogger? = null
 ) {
@@ -160,7 +161,8 @@ fun SongList(
                             if (index != -1) {
                                 onSongClick(flattenedSongs, index)
                             }
-                        }
+                        },
+                        onLongClick = if (onSongLongClick != null) ({ onSongLongClick(song) }) else null
                     )
                 }
             }

@@ -16,7 +16,8 @@ enum class PlaylistType {
     FAVORITES,   // Favorites list
     ARTIST,      // Songs by artist
     ALBUM,       // Songs by album
-    FOLDER       // Songs in folder
+    FOLDER,      // Songs in folder
+    PLAYLIST     // Songs in custom playlist
 }
 
 /**

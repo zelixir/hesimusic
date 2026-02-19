@@ -1,6 +1,6 @@
 package com.zjr.hesimusic.ui.common
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -21,6 +21,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun MusicListItem(
     title: String,
@@ -29,6 +30,7 @@ fun MusicListItem(
     icon: ImageVector = Icons.Default.MusicNote,
     isCurrent: Boolean = false,
     index: Int? = null,
+    onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit
 ) {
     val backgroundColor = if (isCurrent) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
@@ -38,7 +40,10 @@ fun MusicListItem(
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            ),
         color = backgroundColor
     ) {
         Row(
