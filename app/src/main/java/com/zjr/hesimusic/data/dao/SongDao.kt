@@ -14,6 +14,9 @@ interface SongDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(songs: List<Song>)
 
+    @Query("SELECT * FROM songs")
+    suspend fun getAllSongsList(): List<Song>
+
     @Query("SELECT * FROM songs ORDER BY titleInitial COLLATE NOCASE ASC, title COLLATE NOCASE ASC")
     fun getAllSongs(): Flow<List<Song>>
 

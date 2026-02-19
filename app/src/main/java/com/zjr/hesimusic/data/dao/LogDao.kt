@@ -10,9 +10,15 @@ import kotlinx.coroutines.flow.Flow
 interface LogDao {
     @Insert
     suspend fun insert(log: LogEntry)
+
+    @Insert
+    suspend fun insertAll(logs: List<LogEntry>)
     
     @Query("SELECT * FROM logs ORDER BY timestamp DESC, id DESC")
     fun getAllLogs(): Flow<List<LogEntry>>
+
+    @Query("SELECT * FROM logs")
+    suspend fun getAllLogsList(): List<LogEntry>
     
     @Query("SELECT COUNT(*) FROM logs")
     suspend fun getLogCount(): Int
