@@ -3,6 +3,7 @@ package com.zjr.hesimusic.ui.settings
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -13,6 +14,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -26,14 +28,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.zjr.hesimusic.ui.library.LibraryViewModel
+import com.zjr.hesimusic.ui.settings.SettingsViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
-    viewModel: LibraryViewModel = hiltViewModel(),
-    onBackClick: () -> Unit
+    onBackClick: () -> Unit,
+    settingsViewModel: SettingsViewModel = hiltViewModel(),
+    libraryViewModel: LibraryViewModel = hiltViewModel()
 ) {
-    val hiddenSongs by viewModel.hiddenSongs.collectAsState()
+    val minAlbumTrackCount by settingsViewModel.minAlbumTrackCount.collectAsState()
+    val minArtistTrackCount by settingsViewModel.minArtistTrackCount.collectAsState()
+    val hiddenSongs by libraryViewModel.hiddenSongs.collectAsState()
     var showHiddenManager by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -49,13 +55,33 @@ fun SettingsScreen(
         }
     ) { innerPadding ->
         if (!showHiddenManager) {
-            Column(modifier = Modifier.padding(innerPadding)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(16.dp)
+            ) {
+                Text("专辑列表最少曲目数：$minAlbumTrackCount")
+                Slider(
+                    value = minAlbumTrackCount.toFloat(),
+                    onValueChange = { settingsViewModel.updateMinAlbumTrackCount(it.toInt()) },
+                    valueRange = 0f..50f,
+                    steps = 49
+                )
+                Text("歌手列表最少曲目数：$minArtistTrackCount")
+                Slider(
+                    value = minArtistTrackCount.toFloat(),
+                    onValueChange = { settingsViewModel.updateMinArtistTrackCount(it.toInt()) },
+                    valueRange = 0f..50f,
+                    steps = 49
+                )
+
                 Text(
                     text = "管理隐藏歌曲",
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable { showHiddenManager = true }
-                        .padding(16.dp)
+                        .padding(top = 16.dp)
                 )
             }
         } else {
@@ -71,7 +97,7 @@ fun SettingsScreen(
                                 .padding(horizontal = 16.dp)
                         ) {
                             Text(text = hiddenSong.filePath)
-                            TextButton(onClick = { viewModel.unhideSong(hiddenSong) }) {
+                            TextButton(onClick = { libraryViewModel.unhideSong(hiddenSong) }) {
                                 Text("取消隐藏")
                             }
                         }

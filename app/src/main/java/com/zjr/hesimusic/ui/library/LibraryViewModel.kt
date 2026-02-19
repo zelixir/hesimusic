@@ -8,6 +8,7 @@ import com.zjr.hesimusic.data.model.FileSystemItem
 import com.zjr.hesimusic.data.model.HiddenSong
 import com.zjr.hesimusic.data.model.Playlist
 import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.data.preferences.PlaybackPreferences
 import com.zjr.hesimusic.data.repository.HiddenSongRepository
 import com.zjr.hesimusic.data.repository.LibraryRepository
 import com.zjr.hesimusic.data.repository.PlaylistRepository
@@ -35,7 +36,8 @@ class LibraryViewModel @Inject constructor(
     private val hiddenSongRepository: HiddenSongRepository,
     private val playlistRepository: PlaylistRepository,
     private val songRepository: SongRepository,
-    private val tagLibHelper: TagLibHelper
+    private val tagLibHelper: TagLibHelper,
+    private val playbackPreferences: PlaybackPreferences
 ) : ViewModel() {
 
     private val _searchQuery = MutableStateFlow("")
@@ -66,19 +68,12 @@ class LibraryViewModel @Inject constructor(
         filterSongs(songs, query)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    val artists: StateFlow<List<Artist>> = combine(allArtists, debouncedSearchQuery) { artists, query ->
-        if (query.isBlank()) artists
-        else artists.filter { artist ->
-            artist.name.contains(query, ignoreCase = true)
-        }
+    val artists: StateFlow<List<Artist>> = combine(allArtists, debouncedSearchQuery, playbackPreferences.minArtistTrackCountFlow) { artists, query, minArtistTrackCount ->
+        filterArtists(artists, query, minArtistTrackCount)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    val albums: StateFlow<List<Album>> = combine(allAlbums, debouncedSearchQuery) { albums, query ->
-        if (query.isBlank()) albums
-        else albums.filter { album ->
-            album.name.contains(query, ignoreCase = true) ||
-            album.artist.contains(query, ignoreCase = true)
-        }
+    val albums: StateFlow<List<Album>> = combine(allAlbums, debouncedSearchQuery, playbackPreferences.minAlbumTrackCountFlow) { albums, query, minAlbumTrackCount ->
+        filterAlbums(albums, query, minAlbumTrackCount)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val favoriteSongs: StateFlow<List<Song>> = combine(allFavoriteSongs, debouncedSearchQuery) { songs, query ->
@@ -173,5 +168,22 @@ class LibraryViewModel @Inject constructor(
             }
             onLoaded(metadata)
         }
+    }
+}
+
+internal fun filterArtists(artists: List<Artist>, query: String, minArtistTrackCount: Int): List<Artist> {
+    val artistsWithEnoughSongs = artists.filter { artist -> artist.songCount >= minArtistTrackCount }
+    if (query.isBlank()) return artistsWithEnoughSongs
+    return artistsWithEnoughSongs.filter { artist ->
+        artist.name.contains(query, ignoreCase = true)
+    }
+}
+
+internal fun filterAlbums(albums: List<Album>, query: String, minAlbumTrackCount: Int): List<Album> {
+    val albumsWithEnoughSongs = albums.filter { album -> album.songCount >= minAlbumTrackCount }
+    if (query.isBlank()) return albumsWithEnoughSongs
+    return albumsWithEnoughSongs.filter { album ->
+        album.name.contains(query, ignoreCase = true) ||
+        album.artist.contains(query, ignoreCase = true)
     }
 }
