@@ -321,8 +321,9 @@ fun MainScreen(
 
 internal fun playlistTypeToTabIndex(type: PlaylistType): Int = when (type) {
     PlaylistType.GLOBAL -> 0
-    PlaylistType.FAVORITES -> 1
-    PlaylistType.ARTIST -> 2
-    PlaylistType.ALBUM -> 3
-    PlaylistType.FOLDER -> 4
+    PlaylistType.PLAYLIST -> 1
+    PlaylistType.FAVORITES -> 2
+    PlaylistType.FOLDER -> 3
+    PlaylistType.ARTIST -> 4
+    PlaylistType.ALBUM -> 5
 }

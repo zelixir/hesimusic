@@ -21,6 +21,15 @@ interface PlaylistDao {
     @Query("SELECT * FROM playlists ORDER BY createdAt DESC")
     fun getPlaylists(): Flow<List<Playlist>>
 
+    @Query("SELECT * FROM playlists ORDER BY createdAt DESC")
+    suspend fun getAllPlaylistsList(): List<Playlist>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(playlists: List<Playlist>)
+
+    @Query("DELETE FROM playlists")
+    suspend fun deleteAll()
+
     @Query("SELECT * FROM songs INNER JOIN playlist_entries ON songs.id = playlist_entries.songId WHERE playlist_entries.playlistId = :playlistId ORDER BY playlist_entries.`order` ASC")
     fun getSongsByPlaylist(playlistId: Long): Flow<List<Song>>
 
