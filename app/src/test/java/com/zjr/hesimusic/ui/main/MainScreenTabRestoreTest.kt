@@ -22,4 +22,12 @@ class MainScreenTabRestoreTest {
         assertEquals("加入收藏", favoriteActionTextForTab(1))
         assertEquals("取消收藏", favoriteActionTextForTab(2))
     }
+
+    @Test
+    fun `parse playlist id returns valid positive id`() {
+        assertEquals(123L, parsePlaylistId("123"))
+        assertEquals(null, parsePlaylistId("0"))
+        assertEquals(null, parsePlaylistId("-1"))
+        assertEquals(null, parsePlaylistId("abc"))
+    }
 }

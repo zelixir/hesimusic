@@ -43,10 +43,10 @@ interface PlaylistDao {
     fun getPlaylistSongCount(playlistId: Long): Flow<Int>
 
     @Query("DELETE FROM playlist_entries WHERE playlistId = :playlistId AND songId = :songId")
-    suspend fun removeSongFromPlaylist(playlistId: Long, songId: Long)
+    suspend fun removeSongFromPlaylist(playlistId: Long, songId: Long): Int
 
     @Query("DELETE FROM playlist_entries WHERE playlistId = :playlistId AND songId IN (:songIds)")
-    suspend fun removeSongsFromPlaylist(playlistId: Long, songIds: List<Long>)
+    suspend fun removeSongsFromPlaylist(playlistId: Long, songIds: List<Long>): Int
 
     @Query("DELETE FROM playlist_entries WHERE playlistId = :playlistId")
     suspend fun deletePlaylistEntries(playlistId: Long)

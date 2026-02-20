@@ -105,6 +105,7 @@ fun MainScreen(
     var showBatchAddDialog by remember { mutableStateOf(false) }
     var hasRestoredLibraryContext by remember { mutableStateOf(false) }
     var restoredFolderPath by remember { mutableStateOf<String?>(null) }
+    var restoredPlaylistId by remember { mutableStateOf<Long?>(null) }
 
     // Request focus when search becomes active
     LaunchedEffect(isSearchActive) {
@@ -162,6 +163,9 @@ fun MainScreen(
             PlaylistType.FOLDER -> {
                 restoredFolderPath = playlistContext.value.takeIf { it.isNotBlank() }
             }
+            PlaylistType.PLAYLIST -> {
+                restoredPlaylistId = parsePlaylistId(playlistContext.value)
+            }
             else -> Unit
         }
         hasRestoredLibraryContext = true
@@ -205,14 +209,18 @@ fun MainScreen(
                             if (selectedSongs.isEmpty()) {
                                 Toast.makeText(context, "请先选择歌曲", Toast.LENGTH_SHORT).show()
                             } else {
-                                viewModel.removeSongsFromPlaylist(selectedSongs, playlistId) {
-                                    Toast.makeText(context, "已从歌单移除 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
-                                    val remainingSongs = batchModeSongs.filterNot { it.id in batchSelectedSongIds }
-                                    if (remainingSongs.isEmpty()) {
-                                        exitBatchMode()
+                                viewModel.removeSongsFromPlaylist(selectedSongs, playlistId) { deletedCount ->
+                                    if (deletedCount > 0) {
+                                        Toast.makeText(context, "已从歌单移除 $deletedCount 首歌曲", Toast.LENGTH_SHORT).show()
+                                        val remainingSongs = batchModeSongs.filterNot { it.id in batchSelectedSongIds }
+                                        if (remainingSongs.isEmpty()) {
+                                            exitBatchMode()
+                                        } else {
+                                            batchModeSongs = remainingSongs
+                                            batchSelectedSongIds = emptySet()
+                                        }
                                     } else {
-                                        batchModeSongs = remainingSongs
-                                        batchSelectedSongIds = emptySet()
+                                        Toast.makeText(context, "未从歌单移除任何歌曲", Toast.LENGTH_SHORT).show()
                                     }
                                 }
                             }
@@ -361,6 +369,7 @@ fun MainScreen(
                             viewModel = viewModel,
                             musicViewModel = musicViewModel,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
+                            initialSelectedPlaylistId = restoredPlaylistId,
                             onSongLongClick = { song, playlistId, songs ->
                                 selectedSongForActions = song
                                 batchModeSongs = songs
@@ -413,7 +422,8 @@ fun MainScreen(
                         appLogger?.info("MainScreen", "FolderList view activated")
                         FolderList(
                             viewModel = viewModel,
-                            initialPath = restoredFolderPath ?: "/storage/emulated/0",
+                            initialPath = "/storage/emulated/0",
+                            startPath = restoredFolderPath,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
                             onSongClick = { list, index, folderPath -> 
                                 Log.d("MainScreen", "FolderList: playing song at index $index in folder $folderPath")
@@ -497,4 +507,8 @@ internal fun playlistTypeToTabIndex(type: PlaylistType): Int = when (type) {
 
 internal fun favoriteActionTextForTab(tabIndex: Int): String {
     return if (tabIndex == 2) "取消收藏" else "加入收藏"
+}
+
+internal fun parsePlaylistId(value: String): Long? {
+    return value.toLongOrNull()?.takeIf { it > 0L }
 }

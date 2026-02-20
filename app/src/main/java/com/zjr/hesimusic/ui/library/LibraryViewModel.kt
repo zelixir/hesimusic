@@ -152,11 +152,11 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
-    fun removeSongsFromPlaylist(songs: List<Song>, playlistId: Long, onCompleted: () -> Unit = {}) {
+    fun removeSongsFromPlaylist(songs: List<Song>, playlistId: Long, onCompleted: (Int) -> Unit = { _ -> }) {
         viewModelScope.launch {
-            playlistRepository.removeSongsFromPlaylist(playlistId, songs.map { it.id })
+            val deletedCount = playlistRepository.removeSongsFromPlaylist(playlistId, songs.map { it.id })
             withContext(Dispatchers.Main.immediate) {
-                onCompleted()
+                onCompleted(deletedCount)
             }
         }
     }

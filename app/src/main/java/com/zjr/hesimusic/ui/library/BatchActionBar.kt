@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.ui.Alignment
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
@@ -19,6 +20,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 
 private val BatchActionBarHeight = 64.dp
+private val BatchSelectControlWidth = 88.dp
 
 @Composable
 fun BatchActionBar(
@@ -42,7 +44,8 @@ fun BatchActionBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 8.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -51,6 +54,7 @@ fun BatchActionBar(
                     .semantics {
                         contentDescription = if (allSelected) "清除所有歌曲选择" else "全选所有歌曲"
                     }
+                    .width(BatchSelectControlWidth)
             ) {
                 Checkbox(checked = allSelected, onCheckedChange = null)
                 Text(if (allSelected) "清除" else "全选")

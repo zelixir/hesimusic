@@ -33,6 +33,7 @@ fun PlaylistTabScreen(
     viewModel: LibraryViewModel,
     musicViewModel: MusicViewModel,
     currentPlayingSongId: String?,
+    initialSelectedPlaylistId: Long? = null,
     onSongLongClick: (Song, Long, List<Song>) -> Unit,
     isBatchMode: Boolean,
     selectedSongIds: Set<Long>,
@@ -40,7 +41,7 @@ fun PlaylistTabScreen(
     onPlaylistSongsVisibleChanged: (Boolean) -> Unit
 ) {
     val playlists by viewModel.playlists.collectAsState()
-    var selectedPlaylistId by remember { mutableLongStateOf(0L) }
+    var selectedPlaylistId by remember(initialSelectedPlaylistId) { mutableLongStateOf(initialSelectedPlaylistId ?: 0L) }
     var selectedPlaylistForAction by remember { mutableStateOf<Playlist?>(null) }
     LaunchedEffect(selectedPlaylistId) {
         onPlaylistSongsVisibleChanged(selectedPlaylistId != 0L)

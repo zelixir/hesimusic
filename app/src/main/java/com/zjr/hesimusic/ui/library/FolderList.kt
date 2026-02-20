@@ -36,11 +36,12 @@ fun FolderList(
     viewModel: LibraryViewModel,
     modifier: Modifier = Modifier,
     initialPath: String = "/storage/emulated/0",
+    startPath: String? = null,
     currentPlayingSongId: String? = null,
     onSongClick: (List<Song>, Int, String) -> Unit,
     appLogger: AppLogger? = null
 ) {
-    var currentPath by remember(initialPath) { mutableStateOf(initialPath) }
+    var currentPath by remember(initialPath, startPath) { mutableStateOf(startPath ?: initialPath) }
     val items by viewModel.getFolderContents(currentPath).collectAsState(initial = emptyList())
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
