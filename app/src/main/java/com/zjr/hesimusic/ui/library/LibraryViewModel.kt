@@ -141,17 +141,23 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
-    fun addSongsToPlaylist(songs: List<Song>, playlistId: Long) {
+    fun addSongsToPlaylist(songs: List<Song>, playlistId: Long, onCompleted: () -> Unit = {}) {
         viewModelScope.launch {
             songs.forEach { song ->
                 playlistRepository.addSongToPlaylist(playlistId, song.id)
             }
+            withContext(Dispatchers.Main.immediate) {
+                onCompleted()
+            }
         }
     }
 
-    fun removeSongsFromPlaylist(songs: List<Song>, playlistId: Long) {
+    fun removeSongsFromPlaylist(songs: List<Song>, playlistId: Long, onCompleted: () -> Unit = {}) {
         viewModelScope.launch {
             playlistRepository.removeSongsFromPlaylist(playlistId, songs.map { it.id })
+            withContext(Dispatchers.Main.immediate) {
+                onCompleted()
+            }
         }
     }
 

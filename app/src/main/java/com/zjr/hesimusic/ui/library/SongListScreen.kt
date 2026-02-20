@@ -188,8 +188,9 @@ fun SongListScreen(
                         if (selectedSongs.isEmpty()) {
                             Toast.makeText(context, "请先选择歌曲", Toast.LENGTH_SHORT).show()
                         } else {
-                            viewModel.addSongsToPlaylist(selectedSongs, playlistId)
-                            Toast.makeText(context, "已加入歌单 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
+                            viewModel.addSongsToPlaylist(selectedSongs, playlistId) {
+                                Toast.makeText(context, "已加入歌单 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
+                            }
                         }
                         showBatchAddDialog = false
                     },
@@ -197,8 +198,9 @@ fun SongListScreen(
                         viewModel.createPlaylist(name) { playlistId ->
                             if (playlistId != null) {
                                 val selectedSongs = songs.filter { it.id in batchSelectedSongIds }
-                                viewModel.addSongsToPlaylist(selectedSongs, playlistId)
-                                Toast.makeText(context, "歌单已创建并加入 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
+                                viewModel.addSongsToPlaylist(selectedSongs, playlistId) {
+                                    Toast.makeText(context, "歌单已创建并加入 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
+                                }
                                 showBatchAddDialog = false
                             }
                         }

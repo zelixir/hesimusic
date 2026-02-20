@@ -60,6 +60,8 @@ import com.zjr.hesimusic.ui.library.SongActionHost
 import com.zjr.hesimusic.ui.library.AddToPlaylistDialog
 import kotlinx.coroutines.launch
 
+private const val PLAYLIST_TAB_INDEX = 1
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MainScreen(
@@ -116,7 +118,7 @@ fun MainScreen(
         viewModel.setSearchActive(false)
     }
 
-    val exitBatchMode = {
+    fun exitBatchMode() {
         isBatchMode = false
         batchModeTabIndex = null
         batchSelectedSongIds = emptySet()
@@ -132,7 +134,9 @@ fun MainScreen(
     }
 
     LaunchedEffect(isPlaylistSongsVisible) {
-        if (isBatchMode && batchModeTabIndex == 1 && !isPlaylistSongsVisible) {
+        val shouldExitBatchModeForPlaylistView =
+            isBatchMode && batchModeTabIndex == PLAYLIST_TAB_INDEX && !isPlaylistSongsVisible
+        if (shouldExitBatchModeForPlaylistView) {
             exitBatchMode()
         }
     }
@@ -201,10 +205,16 @@ fun MainScreen(
                             if (selectedSongs.isEmpty()) {
                                 Toast.makeText(context, "请先选择歌曲", Toast.LENGTH_SHORT).show()
                             } else {
-                                viewModel.removeSongsFromPlaylist(selectedSongs, playlistId)
-                                Toast.makeText(context, "已从歌单移除 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
-                                batchModeSongs = batchModeSongs.filterNot { it.id in batchSelectedSongIds }
-                                batchSelectedSongIds = emptySet()
+                                viewModel.removeSongsFromPlaylist(selectedSongs, playlistId) {
+                                    Toast.makeText(context, "已从歌单移除 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
+                                    val remainingSongs = batchModeSongs.filterNot { it.id in batchSelectedSongIds }
+                                    if (remainingSongs.isEmpty()) {
+                                        exitBatchMode()
+                                    } else {
+                                        batchModeSongs = remainingSongs
+                                        batchSelectedSongIds = emptySet()
+                                    }
+                                }
                             }
                         }
                     }
@@ -357,7 +367,7 @@ fun MainScreen(
                                 batchModePlaylistId = playlistId
                                 batchFavoriteActionText = favoriteActionTextForTab(1)
                             },
-                            isBatchMode = isBatchMode && pagerState.currentPage == 1,
+                            isBatchMode = isBatchMode && pagerState.currentPage == PLAYLIST_TAB_INDEX,
                             selectedSongIds = batchSelectedSongIds,
                             onBatchSongToggle = { song ->
                                 batchSelectedSongIds = if (song.id in batchSelectedSongIds) {
@@ -454,17 +464,19 @@ fun MainScreen(
                             showBatchAddDialog = false
                             return@AddToPlaylistDialog
                         }
-                        viewModel.addSongsToPlaylist(selectedSongs, playlistId)
-                        Toast.makeText(context, "已加入歌单 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
-                        showBatchAddDialog = false
+                        viewModel.addSongsToPlaylist(selectedSongs, playlistId) {
+                            Toast.makeText(context, "已加入歌单 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
+                            showBatchAddDialog = false
+                        }
                     },
                     onCreate = { name ->
                         viewModel.createPlaylist(name) { playlistId ->
                             if (playlistId != null) {
                                 val selectedSongs = batchModeSongs.filter { it.id in batchSelectedSongIds }
-                                viewModel.addSongsToPlaylist(selectedSongs, playlistId)
-                                Toast.makeText(context, "歌单已创建并加入 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
-                                showBatchAddDialog = false
+                                viewModel.addSongsToPlaylist(selectedSongs, playlistId) {
+                                    Toast.makeText(context, "歌单已创建并加入 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
+                                    showBatchAddDialog = false
+                                }
                             }
                         }
                     }
