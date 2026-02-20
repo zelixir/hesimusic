@@ -1,14 +1,18 @@
 package com.zjr.hesimusic.service
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Intent
 import android.os.Bundle
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import com.zjr.hesimusic.R
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
 import com.zjr.hesimusic.data.repository.SongRepository
@@ -29,6 +33,8 @@ class MusicService : MediaSessionService() {
     companion object {
         private const val TAG = "MusicService"
         const val KEY_AUDIO_SESSION_ID = "AUDIO_SESSION_ID"
+        private const val SILENT_CHANNEL_ID = "silent_media_service"
+        private const val SILENT_NOTIFICATION_ID = 2001
     }
 
     @Inject
@@ -49,12 +55,21 @@ class MusicService : MediaSessionService() {
     // Flag to prevent saving state while restoring it
     private var isRestoringState = false
     private var lastAudioSessionId: Int? = null
+    private var showMediaNotificationEnabled: Boolean = true
 
     override fun onCreate() {
         val startTime = System.currentTimeMillis()
         super.onCreate()
         Log.d(TAG, "onCreate: MusicService created")
         appLogger.info(TAG, "MusicService onCreate started")
+
+        createSilentNotificationChannel()
+        showMediaNotificationEnabled = playbackPreferences.getShowMediaNotification()
+        serviceScope.launch {
+            playbackPreferences.showMediaNotificationFlow.collect { value ->
+                showMediaNotificationEnabled = value
+            }
+        }
         
         val forwardingPlayer = object : ForwardingPlayer(player) {
             override fun getAvailableCommands(): Player.Commands {
@@ -272,6 +287,32 @@ class MusicService : MediaSessionService() {
         val mediaItems = List(player.mediaItemCount) { i -> player.getMediaItemAt(i) }
         val ids = mediaItems.mapNotNull { it.mediaId.toLongOrNull() }
         playbackPreferences.saveQueue(ids)
+    }
+
+    private fun createSilentNotificationChannel() {
+        val channel = NotificationChannel(
+            SILENT_CHANNEL_ID,
+            "后台播放服务",
+            NotificationManager.IMPORTANCE_MIN
+        ).apply {
+            setShowBadge(false)
+        }
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        notificationManager.createNotificationChannel(channel)
+    }
+
+    override fun onUpdateNotification(session: MediaSession, startInForeground: Boolean) {
+        if (showMediaNotificationEnabled) {
+            super.onUpdateNotification(session, startInForeground)
+        } else {
+            val notification = NotificationCompat.Builder(this, SILENT_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setContentTitle(getString(R.string.app_name))
+                .setPriority(NotificationCompat.PRIORITY_MIN)
+                .setOngoing(true)
+                .build()
+            startForeground(SILENT_NOTIFICATION_ID, notification)
+        }
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {

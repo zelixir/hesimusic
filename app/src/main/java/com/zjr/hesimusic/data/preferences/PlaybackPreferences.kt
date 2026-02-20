@@ -56,6 +56,7 @@ class PlaybackPreferences @Inject constructor(
         private const val KEY_STATE_VERSION = "state_version"
         private const val KEY_MIN_ALBUM_TRACK_COUNT = "min_album_track_count"
         private const val KEY_MIN_ARTIST_TRACK_COUNT = "min_artist_track_count"
+        private const val KEY_SHOW_MEDIA_NOTIFICATION = "show_media_notification"
     }
     
     // State version to track if the saved state is valid and not overwritten by UI initialization
@@ -64,6 +65,8 @@ class PlaybackPreferences @Inject constructor(
     val minAlbumTrackCountFlow: StateFlow<Int> = _minAlbumTrackCountFlow.asStateFlow()
     private val _minArtistTrackCountFlow = MutableStateFlow(getMinArtistTrackCount())
     val minArtistTrackCountFlow: StateFlow<Int> = _minArtistTrackCountFlow.asStateFlow()
+    private val _showMediaNotificationFlow = MutableStateFlow(getShowMediaNotification())
+    val showMediaNotificationFlow: StateFlow<Boolean> = _showMediaNotificationFlow.asStateFlow()
 
     fun saveQueue(ids: List<Long>) {
         val idsString = ids.joinToString(",")
@@ -162,6 +165,15 @@ class PlaybackPreferences @Inject constructor(
 
     fun getMinArtistTrackCount(): Int {
         return prefs.getInt(KEY_MIN_ARTIST_TRACK_COUNT, 5).coerceAtLeast(0)
+    }
+
+    fun saveShowMediaNotification(value: Boolean) {
+        prefs.edit().putBoolean(KEY_SHOW_MEDIA_NOTIFICATION, value).apply()
+        _showMediaNotificationFlow.value = value
+    }
+
+    fun getShowMediaNotification(): Boolean {
+        return prefs.getBoolean(KEY_SHOW_MEDIA_NOTIFICATION, true)
     }
     
     /**
