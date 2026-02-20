@@ -273,21 +273,21 @@ class MusicViewModel @Inject constructor(
     }
     
     fun playList(songs: List<Song>, startIndex: Int = 0, context: PlaylistContext? = null) {
-         mediaController?.let { controller ->
+        mediaController?.let { controller ->
             Log.d(TAG, "playList: ${songs.size} songs, startIndex=$startIndex, context=$context")
             val mediaItems = songs.map { it.toMediaItem() }
             controller.setMediaItems(mediaItems, startIndex, 0)
             controller.prepare()
             controller.play()
             
-             // Save playlist context if provided
-             context?.let {
-                 playbackPreferences.savePlaylistContext(it)
-                 Log.d(TAG, "playList: saved context $it")
-                 _uiState.update { state -> state.copy(playlistContext = it) }
-             }
-             _playQueueSongIds.value = emptyList()
-         }
+            // Save playlist context if provided
+            context?.let {
+                playbackPreferences.savePlaylistContext(it)
+                Log.d(TAG, "playList: saved context $it")
+                _uiState.update { state -> state.copy(playlistContext = it) }
+            }
+            _playQueueSongIds.value = emptyList()
+        }
     }
 
     fun addSongsToPlayQueue(songs: List<Song>) {

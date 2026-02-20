@@ -178,6 +178,13 @@ fun MainScreen(
         bottomBar = {
             if (isBatchMode) {
                 val playlistId = batchModePlaylistId
+                val canAddToQueue = when (batchModeTabIndex) {
+                    0 -> musicUiState.playlistContext == PlaylistContext.GLOBAL
+                    PLAYLIST_TAB_INDEX -> playlistId != null &&
+                        musicUiState.playlistContext == PlaylistContext(PlaylistType.PLAYLIST, playlistId.toString())
+                    2 -> musicUiState.playlistContext == PlaylistContext.FAVORITES
+                    else -> false
+                }
                 BatchActionBar(
                     showRemoveFromPlaylist = playlistId != null,
                     favoriteActionText = batchFavoriteActionText,
@@ -191,30 +198,14 @@ fun MainScreen(
                     },
                     onAddToPlaylist = { showBatchAddDialog = true },
                     onAddToQueue = {
-                        val playlistIdText = playlistId?.toString()
-                        val isCurrentPlayingList = when (batchModeTabIndex) {
-                            0 -> musicUiState.playlistContext == PlaylistContext.GLOBAL
-                            PLAYLIST_TAB_INDEX -> playlistIdText != null &&
-                                musicUiState.playlistContext == PlaylistContext(PlaylistType.PLAYLIST, playlistIdText)
-                            2 -> musicUiState.playlistContext == PlaylistContext.FAVORITES
-                            else -> false
-                        }
                         val selectedSongs = batchModeSongs.filter { it.id in batchSelectedSongIds }
-                        if (!isCurrentPlayingList || selectedSongs.isEmpty()) {
+                        if (!canAddToQueue || selectedSongs.isEmpty()) {
                             Toast.makeText(context, "请先在当前播放列表中选择歌曲", Toast.LENGTH_SHORT).show()
                         } else {
                             musicViewModel.addSongsToPlayQueue(selectedSongs)
                             Toast.makeText(context, "已加入队列 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
                         }
-                    }.takeIf {
-                        when (batchModeTabIndex) {
-                            0 -> musicUiState.playlistContext == PlaylistContext.GLOBAL
-                            PLAYLIST_TAB_INDEX -> playlistId != null &&
-                                musicUiState.playlistContext == PlaylistContext(PlaylistType.PLAYLIST, playlistId.toString())
-                            2 -> musicUiState.playlistContext == PlaylistContext.FAVORITES
-                            else -> false
-                        }
-                    },
+                    }.takeIf { canAddToQueue },
                     onFavoriteAction = {
                         val selectedSongs = batchModeSongs.filter { it.id in batchSelectedSongIds }
                         if (selectedSongs.isEmpty()) {

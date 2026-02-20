@@ -65,7 +65,7 @@ fun MusicListItem(
                     style = MaterialTheme.typography.bodyLarge,
                     color = indexTextColor ?: subtitleColor,
                     maxLines = 2,
-                    overflow = TextOverflow.Clip,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.width(40.dp)
                 )
             }

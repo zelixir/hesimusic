@@ -37,6 +37,7 @@ import kotlinx.coroutines.launch
 private const val SCROLL_OFFSET_TO_CENTER_ITEM = -200
 private const val TAG = "SongList"
 private const val BATCH_SELECTED_PREFIX = "✓ "
+private const val QUEUE_DISPLAY_MAX_CHARS_PER_LINE = 4
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -212,9 +213,9 @@ internal fun buildQueueDisplayBySongId(queueSongIds: List<Long>): Map<Long, Stri
 internal fun formatQueuePositionsForDisplay(positions: List<Int>): String {
     if (positions.isEmpty()) return ""
     val raw = positions.joinToString(",")
-    if (raw.length <= 4) return raw
-    val firstLine = raw.take(4)
-    val secondLine = raw.drop(4).take(4)
+    if (raw.length <= QUEUE_DISPLAY_MAX_CHARS_PER_LINE) return raw
+    val firstLine = raw.take(QUEUE_DISPLAY_MAX_CHARS_PER_LINE)
+    val secondLine = raw.drop(QUEUE_DISPLAY_MAX_CHARS_PER_LINE).take(QUEUE_DISPLAY_MAX_CHARS_PER_LINE)
     return if (secondLine.isEmpty()) firstLine else "$firstLine\n$secondLine"
 }
 
