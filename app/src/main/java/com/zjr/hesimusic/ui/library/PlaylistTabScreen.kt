@@ -38,8 +38,10 @@ fun PlaylistTabScreen(
     isBatchMode: Boolean,
     selectedSongIds: Set<Long>,
     onBatchSongToggle: (Song) -> Unit,
-    onPlaylistSongsVisibleChanged: (Boolean) -> Unit
+    onPlaylistSongsVisibleChanged: (Boolean) -> Unit,
+    queueDisplayBySongId: Map<Long, String> = emptyMap()
 ) {
+    val musicUiState by musicViewModel.uiState.collectAsState()
     val playlists by viewModel.playlists.collectAsState()
     var selectedPlaylistId by remember(initialSelectedPlaylistId) { mutableLongStateOf(initialSelectedPlaylistId ?: 0L) }
     var selectedPlaylistForAction by remember { mutableStateOf<Playlist?>(null) }
@@ -78,6 +80,11 @@ fun PlaylistTabScreen(
                 onSongLongClick = { song -> onSongLongClick(song, selectedPlaylistId, songs) },
                 isBatchMode = isBatchMode,
                 selectedSongIds = selectedSongIds,
+                queueDisplayBySongId = if (musicUiState.playlistContext == PlaylistContext(PlaylistType.PLAYLIST, selectedPlaylistId.toString())) {
+                    queueDisplayBySongId
+                } else {
+                    emptyMap()
+                },
                 onBatchSongToggle = onBatchSongToggle,
                 modifier = Modifier.fillMaxSize()
             )

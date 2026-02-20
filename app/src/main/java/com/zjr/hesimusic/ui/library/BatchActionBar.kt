@@ -27,6 +27,7 @@ fun BatchActionBar(
     allSelected: Boolean,
     onSelectAllChange: (Boolean) -> Unit,
     onAddToPlaylist: () -> Unit,
+    onAddToQueue: (() -> Unit)? = null,
     onFavoriteAction: () -> Unit,
     onExit: () -> Unit,
     onRemoveFromPlaylist: (() -> Unit)? = null
@@ -63,6 +64,11 @@ fun BatchActionBar(
             }
             TextButton(onClick = onAddToPlaylist) {
                 Text("加入歌单")
+            }
+            if (onAddToQueue != null) {
+                TextButton(onClick = onAddToQueue) {
+                    Text("加入队列")
+                }
             }
             TextButton(onClick = onFavoriteAction) {
                 Text(favoriteActionText)

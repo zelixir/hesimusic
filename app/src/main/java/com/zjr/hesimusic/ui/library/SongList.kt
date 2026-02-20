@@ -19,6 +19,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.ui.common.FastScrollbar
@@ -47,6 +48,7 @@ fun SongList(
     isBatchMode: Boolean = false,
     selectedSongIds: Set<Long> = emptySet(),
     onBatchSongToggle: ((Song) -> Unit)? = null,
+    queueDisplayBySongId: Map<Long, String> = emptyMap(),
     modifier: Modifier = Modifier,
     appLogger: AppLogger? = null
 ) {
@@ -156,11 +158,14 @@ fun SongList(
                 ) { index, song ->
                     val globalIndex = (groupStartingIndices[initial] ?: 0) + index + 1
                     val isSelectedInBatch = song.id in selectedSongIds
+                    val queueDisplay = queueDisplayBySongId[song.id]
                     MusicListItem(
                         title = if (isBatchMode && isSelectedInBatch) "$BATCH_SELECTED_PREFIX${song.title}" else song.title,
                         subtitle = "${song.artist} - ${song.album}",
                         isCurrent = if (isBatchMode) isSelectedInBatch else song.id.toString() == currentPlayingSongId,
                         index = if (isBatchMode) null else globalIndex,
+                        indexText = if (isBatchMode) null else queueDisplay,
+                        indexTextColor = if (queueDisplay != null) Color.Red else null,
                         onClick = { 
                             if (isBatchMode) {
                                 onBatchSongToggle?.invoke(song)
@@ -191,6 +196,26 @@ fun SongList(
             )
         }
     }
+}
+
+internal fun buildQueueDisplayBySongId(queueSongIds: List<Long>): Map<Long, String> {
+    if (queueSongIds.isEmpty()) return emptyMap()
+    val positionsBySongId = linkedMapOf<Long, MutableList<Int>>()
+    queueSongIds.forEachIndexed { index, songId ->
+        positionsBySongId.getOrPut(songId) { mutableListOf() }.add(index + 1)
+    }
+    return positionsBySongId.mapValues { (_, positions) ->
+        formatQueuePositionsForDisplay(positions)
+    }
+}
+
+internal fun formatQueuePositionsForDisplay(positions: List<Int>): String {
+    if (positions.isEmpty()) return ""
+    val raw = positions.joinToString(",")
+    if (raw.length <= 4) return raw
+    val firstLine = raw.take(4)
+    val secondLine = raw.drop(4).take(4)
+    return if (secondLine.isEmpty()) firstLine else "$firstLine\n$secondLine"
 }
 
 /**

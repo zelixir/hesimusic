@@ -58,6 +58,8 @@ class MusicViewModel @Inject constructor(
     // Expose the saved playlist context for UI to use when restoring state
     private val _savedPlaylistContext = MutableStateFlow<PlaylistContext?>(null)
     val savedPlaylistContext: StateFlow<PlaylistContext?> = _savedPlaylistContext.asStateFlow()
+    private val _playQueueSongIds = MutableStateFlow<List<Long>>(emptyList())
+    val playQueueSongIds: StateFlow<List<Long>> = _playQueueSongIds.asStateFlow()
 
     private var sleepTimer: CountDownTimer? = null
     
@@ -133,6 +135,7 @@ class MusicViewModel @Inject constructor(
 
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                     Log.d(TAG, "onMediaItemTransition: mediaId=${mediaItem?.mediaId}, reason=$reason")
+                    consumePlayQueue(mediaItem?.mediaId?.toLongOrNull())
                     updateState()
                     // Update favorite status when song changes
                     updateCurrentSongFavoriteStatus()
@@ -277,11 +280,24 @@ class MusicViewModel @Inject constructor(
             controller.prepare()
             controller.play()
             
-            // Save playlist context if provided
-            context?.let {
-                playbackPreferences.savePlaylistContext(it)
-                Log.d(TAG, "playList: saved context $it")
-            }
+             // Save playlist context if provided
+             context?.let {
+                 playbackPreferences.savePlaylistContext(it)
+                 Log.d(TAG, "playList: saved context $it")
+                 _uiState.update { state -> state.copy(playlistContext = it) }
+             }
+             _playQueueSongIds.value = emptyList()
+         }
+    }
+
+    fun addSongsToPlayQueue(songs: List<Song>) {
+        if (songs.isEmpty()) return
+        mediaController?.let { controller ->
+            val queueIds = songs.map { it.id }
+            val insertIndex = (controller.currentMediaItemIndex + 1 + _playQueueSongIds.value.size)
+                .coerceIn(0, controller.mediaItemCount)
+            controller.addMediaItems(insertIndex, songs.map { it.toMediaItem() })
+            _playQueueSongIds.update { it + queueIds }
         }
     }
 
@@ -347,6 +363,18 @@ class MusicViewModel @Inject constructor(
     
     fun clearPlaylist() {
         mediaController?.clearMediaItems()
+        _playQueueSongIds.value = emptyList()
+    }
+
+    private fun consumePlayQueue(currentSongId: Long?) {
+        if (currentSongId == null) return
+        _playQueueSongIds.update { queue ->
+            if (queue.isNotEmpty() && queue.first() == currentSongId) {
+                queue.drop(1)
+            } else {
+                queue
+            }
+        }
     }
 
     fun toggleCurrentSongFavorite() {

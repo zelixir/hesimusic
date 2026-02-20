@@ -58,6 +58,7 @@ import com.zjr.hesimusic.ui.library.LibraryViewModel
 import com.zjr.hesimusic.ui.library.SongList
 import com.zjr.hesimusic.ui.library.SongActionHost
 import com.zjr.hesimusic.ui.library.AddToPlaylistDialog
+import com.zjr.hesimusic.ui.library.buildQueueDisplayBySongId
 import kotlinx.coroutines.launch
 
 private const val PLAYLIST_TAB_INDEX = 1
@@ -90,6 +91,7 @@ fun MainScreen(
     val musicUiState by musicViewModel.uiState.collectAsState()
     val sleepTimerState by musicViewModel.sleepTimerState.collectAsState()
     val savedPlaylistContext by musicViewModel.savedPlaylistContext.collectAsState()
+    val playQueueSongIds by musicViewModel.playQueueSongIds.collectAsState()
     val isSearchActive by viewModel.isSearchActive.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     val focusRequester = remember { FocusRequester() }
@@ -188,6 +190,31 @@ fun MainScreen(
                         }
                     },
                     onAddToPlaylist = { showBatchAddDialog = true },
+                    onAddToQueue = {
+                        val playlistIdText = playlistId?.toString()
+                        val isCurrentPlayingList = when (batchModeTabIndex) {
+                            0 -> musicUiState.playlistContext == PlaylistContext.GLOBAL
+                            PLAYLIST_TAB_INDEX -> playlistIdText != null &&
+                                musicUiState.playlistContext == PlaylistContext(PlaylistType.PLAYLIST, playlistIdText)
+                            2 -> musicUiState.playlistContext == PlaylistContext.FAVORITES
+                            else -> false
+                        }
+                        val selectedSongs = batchModeSongs.filter { it.id in batchSelectedSongIds }
+                        if (!isCurrentPlayingList || selectedSongs.isEmpty()) {
+                            Toast.makeText(context, "请先在当前播放列表中选择歌曲", Toast.LENGTH_SHORT).show()
+                        } else {
+                            musicViewModel.addSongsToPlayQueue(selectedSongs)
+                            Toast.makeText(context, "已加入队列 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
+                        }
+                    }.takeIf {
+                        when (batchModeTabIndex) {
+                            0 -> musicUiState.playlistContext == PlaylistContext.GLOBAL
+                            PLAYLIST_TAB_INDEX -> playlistId != null &&
+                                musicUiState.playlistContext == PlaylistContext(PlaylistType.PLAYLIST, playlistId.toString())
+                            2 -> musicUiState.playlistContext == PlaylistContext.FAVORITES
+                            else -> false
+                        }
+                    },
                     onFavoriteAction = {
                         val selectedSongs = batchModeSongs.filter { it.id in batchSelectedSongIds }
                         if (selectedSongs.isEmpty()) {
@@ -354,6 +381,11 @@ fun MainScreen(
                             },
                             isBatchMode = isBatchMode && pagerState.currentPage == 0,
                             selectedSongIds = batchSelectedSongIds,
+                            queueDisplayBySongId = if (musicUiState.playlistContext == PlaylistContext.GLOBAL) {
+                                buildQueueDisplayBySongId(playQueueSongIds)
+                            } else {
+                                emptyMap()
+                            },
                             onBatchSongToggle = { song ->
                                 batchSelectedSongIds = if (song.id in batchSelectedSongIds) {
                                     batchSelectedSongIds - song.id
@@ -385,7 +417,8 @@ fun MainScreen(
                                     batchSelectedSongIds + song.id
                                 }
                             },
-                            onPlaylistSongsVisibleChanged = { isPlaylistSongsVisible = it }
+                            onPlaylistSongsVisibleChanged = { isPlaylistSongsVisible = it },
+                            queueDisplayBySongId = buildQueueDisplayBySongId(playQueueSongIds)
                         )
                     }
                     2 -> {
@@ -407,6 +440,11 @@ fun MainScreen(
                             },
                             isBatchMode = isBatchMode && pagerState.currentPage == 2,
                             selectedSongIds = batchSelectedSongIds,
+                            queueDisplayBySongId = if (musicUiState.playlistContext == PlaylistContext.FAVORITES) {
+                                buildQueueDisplayBySongId(playQueueSongIds)
+                            } else {
+                                emptyMap()
+                            },
                             onBatchSongToggle = { song ->
                                 batchSelectedSongIds = if (song.id in batchSelectedSongIds) {
                                     batchSelectedSongIds - song.id
