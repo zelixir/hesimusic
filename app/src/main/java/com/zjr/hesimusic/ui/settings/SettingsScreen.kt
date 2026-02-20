@@ -31,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.zjr.hesimusic.data.preferences.AppThemeMode
 import com.zjr.hesimusic.ui.library.LibraryViewModel
 import com.zjr.hesimusic.ui.settings.SettingsViewModel
 
@@ -44,6 +45,7 @@ fun SettingsScreen(
     val minAlbumTrackCount by settingsViewModel.minAlbumTrackCount.collectAsState()
     val minArtistTrackCount by settingsViewModel.minArtistTrackCount.collectAsState()
     val showMediaNotification by settingsViewModel.showMediaNotification.collectAsState()
+    val appThemeMode by settingsViewModel.appThemeMode.collectAsState()
     val hiddenSongs by libraryViewModel.hiddenSongs.collectAsState()
     var showHiddenManager by remember { mutableStateOf(false) }
 
@@ -93,6 +95,32 @@ fun SettingsScreen(
                         checked = showMediaNotification,
                         onCheckedChange = { settingsViewModel.updateShowMediaNotification(it) }
                     )
+                }
+
+                Text(
+                    text = "颜色主题",
+                    modifier = Modifier.padding(top = 16.dp)
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    AppThemeMode.values().forEach { mode ->
+                        TextButton(onClick = { settingsViewModel.updateAppThemeMode(mode) }) {
+                            Text(
+                                text = when (mode) {
+                                    AppThemeMode.SYSTEM -> "跟随系统"
+                                    AppThemeMode.LIGHT -> "浅色"
+                                    AppThemeMode.DARK -> "深色"
+                                },
+                                color = if (mode == appThemeMode) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                }
+                            )
+                        }
+                    }
                 }
 
                 Text(

@@ -6,7 +6,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavType
@@ -28,6 +31,8 @@ import com.zjr.hesimusic.ui.sleeptimer.SleepTimerScreen
 import com.zjr.hesimusic.ui.test.PlayerTestScreen
 import com.zjr.hesimusic.ui.theme.HesimusicTheme
 import com.zjr.hesimusic.ui.common.MusicViewModel
+import com.zjr.hesimusic.data.preferences.PlaybackPreferences
+import com.zjr.hesimusic.data.preferences.resolveDarkTheme
 import com.zjr.hesimusic.utils.AppLogger
 import dagger.hilt.android.AndroidEntryPoint
 
@@ -40,6 +45,8 @@ class MainActivity : ComponentActivity() {
     
     @Inject
     lateinit var appLogger: AppLogger
+    @Inject
+    lateinit var playbackPreferences: PlaybackPreferences
     
     private val TAG = "MainActivity"
     
@@ -59,7 +66,9 @@ class MainActivity : ComponentActivity() {
         
         val uiStartTime = System.currentTimeMillis()
         setContent {
-            HesimusicTheme {
+            val appThemeMode by playbackPreferences.appThemeModeFlow.collectAsState()
+            val isSystemDarkTheme = isSystemInDarkTheme()
+            HesimusicTheme(darkTheme = resolveDarkTheme(appThemeMode, isSystemDarkTheme)) {
                 val navController = rememberNavController()
                 
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->

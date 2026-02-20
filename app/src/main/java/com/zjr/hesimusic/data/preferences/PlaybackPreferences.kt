@@ -36,6 +36,24 @@ data class PlaylistContext(
     }
 }
 
+enum class AppThemeMode {
+    SYSTEM,
+    LIGHT,
+    DARK
+}
+
+internal fun parseAppThemeMode(name: String?): AppThemeMode {
+    return AppThemeMode.values().firstOrNull { it.name == name } ?: AppThemeMode.SYSTEM
+}
+
+fun resolveDarkTheme(themeMode: AppThemeMode, isSystemDarkTheme: Boolean): Boolean {
+    return when (themeMode) {
+        AppThemeMode.SYSTEM -> isSystemDarkTheme
+        AppThemeMode.LIGHT -> false
+        AppThemeMode.DARK -> true
+    }
+}
+
 @Singleton
 class PlaybackPreferences @Inject constructor(
     @ApplicationContext context: Context
@@ -57,6 +75,7 @@ class PlaybackPreferences @Inject constructor(
         private const val KEY_MIN_ALBUM_TRACK_COUNT = "min_album_track_count"
         private const val KEY_MIN_ARTIST_TRACK_COUNT = "min_artist_track_count"
         private const val KEY_SHOW_MEDIA_NOTIFICATION = "show_media_notification"
+        private const val KEY_APP_THEME_MODE = "app_theme_mode"
     }
     
     // State version to track if the saved state is valid and not overwritten by UI initialization
@@ -67,6 +86,8 @@ class PlaybackPreferences @Inject constructor(
     val minArtistTrackCountFlow: StateFlow<Int> = _minArtistTrackCountFlow.asStateFlow()
     private val _showMediaNotificationFlow = MutableStateFlow(getShowMediaNotification())
     val showMediaNotificationFlow: StateFlow<Boolean> = _showMediaNotificationFlow.asStateFlow()
+    private val _appThemeModeFlow = MutableStateFlow(getAppThemeMode())
+    val appThemeModeFlow: StateFlow<AppThemeMode> = _appThemeModeFlow.asStateFlow()
 
     fun saveQueue(ids: List<Long>) {
         val idsString = ids.joinToString(",")
@@ -174,6 +195,15 @@ class PlaybackPreferences @Inject constructor(
 
     fun getShowMediaNotification(): Boolean {
         return prefs.getBoolean(KEY_SHOW_MEDIA_NOTIFICATION, true)
+    }
+
+    fun saveAppThemeMode(value: AppThemeMode) {
+        prefs.edit().putString(KEY_APP_THEME_MODE, value.name).apply()
+        _appThemeModeFlow.value = value
+    }
+
+    fun getAppThemeMode(): AppThemeMode {
+        return parseAppThemeMode(prefs.getString(KEY_APP_THEME_MODE, AppThemeMode.SYSTEM.name))
     }
     
     /**
