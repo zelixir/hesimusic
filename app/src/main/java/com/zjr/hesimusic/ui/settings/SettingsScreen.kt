@@ -1,6 +1,8 @@
 package com.zjr.hesimusic.ui.settings
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,6 +17,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
@@ -27,11 +30,17 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.zjr.hesimusic.data.preferences.AppThemeMode
+import com.zjr.hesimusic.R
 import com.zjr.hesimusic.ui.library.LibraryViewModel
 import com.zjr.hesimusic.ui.settings.SettingsViewModel
 
@@ -98,33 +107,49 @@ fun SettingsScreen(
                 }
 
                 Text(
-                    text = "颜色主题",
+                    text = stringResource(R.string.settings_theme_title),
                     modifier = Modifier.padding(top = 16.dp)
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                val themeOptionsDescription = stringResource(R.string.settings_theme_options_description)
+                Column(
+                    modifier = Modifier
+                        .semantics { contentDescription = themeOptionsDescription }
+                        .selectableGroup()
                 ) {
-                    AppThemeMode.values().forEach { mode ->
-                        TextButton(onClick = { settingsViewModel.updateAppThemeMode(mode) }) {
-                            Text(
-                                text = when (mode) {
-                                    AppThemeMode.SYSTEM -> "跟随系统"
-                                    AppThemeMode.LIGHT -> "浅色"
-                                    AppThemeMode.DARK -> "深色"
+                    val selectedText = stringResource(R.string.settings_option_selected)
+                    val notSelectedText = stringResource(R.string.settings_option_not_selected)
+                    AppThemeMode.entries.forEach { mode ->
+                        val optionText = when (mode) {
+                            AppThemeMode.SYSTEM -> stringResource(R.string.settings_theme_system)
+                            AppThemeMode.LIGHT -> stringResource(R.string.settings_theme_light)
+                            AppThemeMode.DARK -> stringResource(R.string.settings_theme_dark)
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .selectable(
+                                    selected = (mode == appThemeMode),
+                                    onClick = { settingsViewModel.updateAppThemeMode(mode) },
+                                    role = Role.RadioButton
+                                )
+                                .semantics {
+                                    stateDescription = if (mode == appThemeMode) selectedText else notSelectedText
                                 },
-                                color = if (mode == appThemeMode) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurface
-                                }
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = (mode == appThemeMode),
+                                onClick = null
+                            )
+                            Text(
+                                text = optionText
                             )
                         }
                     }
                 }
 
                 Text(
-                    text = "管理隐藏歌曲",
+                    text = stringResource(R.string.settings_manage_hidden_songs),
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier
                         .fillMaxWidth()

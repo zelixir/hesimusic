@@ -1,3 +1,11 @@
 <resources>
     <string name="app_name">海瑟音乐</string>
+    <string name="settings_theme_title">颜色主题</string>
+    <string name="settings_theme_options_description">颜色主题选项</string>
+    <string name="settings_theme_system">跟随系统</string>
+    <string name="settings_theme_light">浅色</string>
+    <string name="settings_theme_dark">深色</string>
+    <string name="settings_manage_hidden_songs">管理隐藏歌曲</string>
+    <string name="settings_option_selected">已选中</string>
+    <string name="settings_option_not_selected">未选中</string>
 </resources>

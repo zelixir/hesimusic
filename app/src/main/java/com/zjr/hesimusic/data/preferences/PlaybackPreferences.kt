@@ -42,10 +42,16 @@ enum class AppThemeMode {
     DARK
 }
 
-internal fun parseAppThemeMode(name: String?): AppThemeMode {
-    return AppThemeMode.values().firstOrNull { it.name == name } ?: AppThemeMode.SYSTEM
+/**
+ * Parses stored theme mode name and falls back to [AppThemeMode.SYSTEM] for null/unknown values.
+ */
+internal fun parseAppThemeMode(modeName: String?): AppThemeMode {
+    return AppThemeMode.entries.firstOrNull { it.name == modeName } ?: AppThemeMode.SYSTEM
 }
 
+/**
+ * Resolves whether the app should use dark theme based on user setting and system dark mode state.
+ */
 fun resolveDarkTheme(themeMode: AppThemeMode, isSystemDarkTheme: Boolean): Boolean {
     return when (themeMode) {
         AppThemeMode.SYSTEM -> isSystemDarkTheme
