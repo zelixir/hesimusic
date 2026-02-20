@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.room.withTransaction
 import com.zjr.hesimusic.data.AppDatabase
 import com.zjr.hesimusic.data.model.Favorite
+import com.zjr.hesimusic.data.model.HiddenSong
 import com.zjr.hesimusic.data.model.LogEntry
 import com.zjr.hesimusic.data.model.Playlist
 import com.zjr.hesimusic.data.model.PlaylistEntry
@@ -43,6 +44,7 @@ class BackupRestoreViewModel @Inject constructor(
                         put("songs", songsToJson(appDatabase.songDao().getAllSongsList()))
                         put("favorites", favoritesToJson(appDatabase.favoriteDao().getAllFavoritesList()))
                         put("logs", logsToJson(appDatabase.logDao().getAllLogsList()))
+                        put("hiddenSongs", hiddenSongsToJson(appDatabase.hiddenSongDao().getAllHiddenSongsList()))
                         put("playlists", playlistsToJson(appDatabase.playlistDao().getAllPlaylistsList()))
                         put("playlistEntries", playlistEntriesToJson(appDatabase.playlistEntryDao().getAllPlaylistEntriesList()))
                         put("preferences", preferencesToJson())
@@ -74,6 +76,7 @@ class BackupRestoreViewModel @Inject constructor(
                 val songs = jsonToSongs(backupJson.optJSONArray("songs") ?: JSONArray())
                 val favorites = jsonToFavorites(backupJson.optJSONArray("favorites") ?: JSONArray())
                 val logs = jsonToLogs(backupJson.optJSONArray("logs") ?: JSONArray())
+                val hiddenSongs = jsonToHiddenSongs(backupJson.optJSONArray("hiddenSongs") ?: JSONArray())
                 val playlists = jsonToPlaylists(backupJson.optJSONArray("playlists") ?: JSONArray())
                 val playlistEntries = jsonToPlaylistEntries(backupJson.optJSONArray("playlistEntries") ?: JSONArray())
                 appDatabase.withTransaction {
@@ -82,11 +85,13 @@ class BackupRestoreViewModel @Inject constructor(
                     appDatabase.playlistDao().deleteAll()
                     appDatabase.favoriteDao().deleteAll()
                     appDatabase.logDao().deleteAllLogs()
+                    appDatabase.hiddenSongDao().deleteAll()
                     if (songs.isNotEmpty()) appDatabase.songDao().insertAll(songs)
                     if (playlists.isNotEmpty()) appDatabase.playlistDao().insertAll(playlists)
                     if (playlistEntries.isNotEmpty()) appDatabase.playlistEntryDao().insertAll(playlistEntries)
                     if (favorites.isNotEmpty()) appDatabase.favoriteDao().insertAll(favorites)
                     if (logs.isNotEmpty()) appDatabase.logDao().insertAll(logs)
+                    if (hiddenSongs.isNotEmpty()) appDatabase.hiddenSongDao().insertAll(hiddenSongs)
                 }
                 withContext(Dispatchers.IO) {
                     restorePreferences(backupJson.optJSONObject("preferences"))
@@ -147,6 +152,18 @@ class BackupRestoreViewModel @Inject constructor(
                     put("level", log.level)
                     put("tag", log.tag)
                     put("message", log.message)
+                }
+            )
+        }
+    }
+
+    private fun hiddenSongsToJson(hiddenSongs: List<HiddenSong>) = JSONArray().apply {
+        hiddenSongs.forEach { hiddenSong ->
+            put(
+                JSONObject().apply {
+                    put("filePath", hiddenSong.filePath)
+                    put("startPosition", hiddenSong.startPosition)
+                    put("hiddenAt", hiddenSong.hiddenAt)
                 }
             )
         }
@@ -274,6 +291,16 @@ class BackupRestoreViewModel @Inject constructor(
                 level = item.getString("level"),
                 tag = item.getString("tag"),
                 message = item.getString("message")
+            )
+        }
+
+    private fun jsonToHiddenSongs(jsonArray: JSONArray): List<HiddenSong> =
+        List(jsonArray.length()) { index ->
+            val item = jsonArray.getJSONObject(index)
+            HiddenSong(
+                filePath = item.getString("filePath"),
+                startPosition = item.optLong("startPosition", 0L),
+                hiddenAt = item.optLong("hiddenAt", System.currentTimeMillis())
             )
         }
 
