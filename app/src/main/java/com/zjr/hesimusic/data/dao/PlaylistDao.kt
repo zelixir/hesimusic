@@ -30,7 +30,7 @@ interface PlaylistDao {
     @Query("DELETE FROM playlists")
     suspend fun deleteAll()
 
-    @Query("SELECT * FROM songs INNER JOIN playlist_entries ON songs.id = playlist_entries.songId WHERE playlist_entries.playlistId = :playlistId ORDER BY playlist_entries.`order` ASC")
+    @Query("SELECT songs.* FROM songs INNER JOIN playlist_entries ON songs.id = playlist_entries.songId WHERE playlist_entries.playlistId = :playlistId ORDER BY playlist_entries.`order` ASC")
     fun getSongsByPlaylist(playlistId: Long): Flow<List<Song>>
 
     @Query("SELECT COALESCE(MAX(`order`), -1) + 1 FROM playlist_entries WHERE playlistId = :playlistId")
