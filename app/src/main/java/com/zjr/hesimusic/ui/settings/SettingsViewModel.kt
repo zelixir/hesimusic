@@ -12,6 +12,7 @@ class SettingsViewModel @Inject constructor(
 ) : ViewModel() {
     val minAlbumTrackCount: StateFlow<Int> = playbackPreferences.minAlbumTrackCountFlow
     val minArtistTrackCount: StateFlow<Int> = playbackPreferences.minArtistTrackCountFlow
+    val showMediaNotification: StateFlow<Boolean> = playbackPreferences.showMediaNotificationFlow
 
     fun updateMinAlbumTrackCount(value: Int) {
         playbackPreferences.saveMinAlbumTrackCount(value)
@@ -19,5 +20,9 @@ class SettingsViewModel @Inject constructor(
 
     fun updateMinArtistTrackCount(value: Int) {
         playbackPreferences.saveMinArtistTrackCount(value)
+    }
+
+    fun updateShowMediaNotification(value: Boolean) {
+        playbackPreferences.saveShowMediaNotification(value)
     }
 }
