@@ -1,6 +1,7 @@
 package com.zjr.hesimusic.ui.main
 
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Box
@@ -51,11 +52,15 @@ import com.zjr.hesimusic.data.preferences.PlaylistType
 import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.ui.library.AlbumList
 import com.zjr.hesimusic.ui.library.ArtistList
+import com.zjr.hesimusic.ui.library.BatchActionBar
 import com.zjr.hesimusic.ui.library.FolderList
 import com.zjr.hesimusic.ui.library.LibraryViewModel
 import com.zjr.hesimusic.ui.library.SongList
 import com.zjr.hesimusic.ui.library.SongActionHost
+import com.zjr.hesimusic.ui.library.AddToPlaylistDialog
 import kotlinx.coroutines.launch
+
+private const val PLAYLIST_TAB_INDEX = 1
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -90,8 +95,17 @@ fun MainScreen(
     val focusRequester = remember { FocusRequester() }
     val playlists by viewModel.playlists.collectAsState()
     var selectedSongForActions by remember { mutableStateOf<Song?>(null) }
+    var batchModeSongs by remember { mutableStateOf<List<Song>>(emptyList()) }
+    var batchModePlaylistId by remember { mutableStateOf<Long?>(null) }
+    var isBatchMode by remember { mutableStateOf(false) }
+    var batchModeTabIndex by remember { mutableStateOf<Int?>(null) }
+    var isPlaylistSongsVisible by remember { mutableStateOf(false) }
+    var batchSelectedSongIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var batchFavoriteActionText by remember { mutableStateOf("加入收藏") }
+    var showBatchAddDialog by remember { mutableStateOf(false) }
     var hasRestoredLibraryContext by remember { mutableStateOf(false) }
     var restoredFolderPath by remember { mutableStateOf<String?>(null) }
+    var restoredPlaylistId by remember { mutableStateOf<Long?>(null) }
 
     // Request focus when search becomes active
     LaunchedEffect(isSearchActive) {
@@ -103,6 +117,29 @@ fun MainScreen(
     // Handle back button to close search
     BackHandler(enabled = isSearchActive) {
         viewModel.setSearchActive(false)
+    }
+
+    fun exitBatchMode() {
+        isBatchMode = false
+        batchModeTabIndex = null
+        batchSelectedSongIds = emptySet()
+        batchModeSongs = emptyList()
+        batchModePlaylistId = null
+        batchFavoriteActionText = "加入收藏"
+    }
+
+    LaunchedEffect(pagerState.currentPage) {
+        if (isBatchMode && batchModeTabIndex != pagerState.currentPage) {
+            exitBatchMode()
+        }
+    }
+
+    LaunchedEffect(isPlaylistSongsVisible) {
+        val shouldExitBatchModeForPlaylistView =
+            isBatchMode && batchModeTabIndex == PLAYLIST_TAB_INDEX && !isPlaylistSongsVisible
+        if (shouldExitBatchModeForPlaylistView) {
+            exitBatchMode()
+        }
     }
     
     LaunchedEffect(savedPlaylistContext, hasRestoredLibraryContext) {
@@ -126,6 +163,9 @@ fun MainScreen(
             PlaylistType.FOLDER -> {
                 restoredFolderPath = playlistContext.value.takeIf { it.isNotBlank() }
             }
+            PlaylistType.PLAYLIST -> {
+                restoredPlaylistId = parsePlaylistId(playlistContext.value)
+            }
             else -> Unit
         }
         hasRestoredLibraryContext = true
@@ -134,41 +174,96 @@ fun MainScreen(
 
     Scaffold(
         bottomBar = {
-            BottomPlayerBar(
-                currentMediaItem = musicUiState.currentMediaItem,
-                isPlaying = musicUiState.isPlaying,
-                currentPosition = musicUiState.currentPosition,
-                duration = musicUiState.duration,
-                repeatMode = musicUiState.repeatMode,
-                shuffleModeEnabled = musicUiState.shuffleModeEnabled,
-                onPlayPauseClick = {
-                    if (musicUiState.isPlaying) {
-                        musicViewModel.pause()
-                    } else {
-                        musicViewModel.resume()
+            if (isBatchMode) {
+                val playlistId = batchModePlaylistId
+                BatchActionBar(
+                    showRemoveFromPlaylist = playlistId != null,
+                    favoriteActionText = batchFavoriteActionText,
+                    allSelected = batchModeSongs.isNotEmpty() && batchSelectedSongIds.size == batchModeSongs.size,
+                    onSelectAllChange = { checked ->
+                        batchSelectedSongIds = if (checked) {
+                            batchModeSongs.map { it.id }.toSet()
+                        } else {
+                            emptySet()
+                        }
+                    },
+                    onAddToPlaylist = { showBatchAddDialog = true },
+                    onFavoriteAction = {
+                        val selectedSongs = batchModeSongs.filter { it.id in batchSelectedSongIds }
+                        if (selectedSongs.isEmpty()) {
+                            Toast.makeText(context, "请先选择歌曲", Toast.LENGTH_SHORT).show()
+                        } else {
+                            if (batchFavoriteActionText == "取消收藏") {
+                                viewModel.removeSongsFromFavorites(selectedSongs)
+                                Toast.makeText(context, "已取消收藏 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
+                            } else {
+                                viewModel.addSongsToFavorites(selectedSongs)
+                                Toast.makeText(context, "已加入收藏 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    onExit = { exitBatchMode() },
+                    onRemoveFromPlaylist = if (playlistId == null) null else {
+                        {
+                            val selectedSongs = batchModeSongs.filter { it.id in batchSelectedSongIds }
+                            if (selectedSongs.isEmpty()) {
+                                Toast.makeText(context, "请先选择歌曲", Toast.LENGTH_SHORT).show()
+                            } else {
+                                viewModel.removeSongsFromPlaylist(selectedSongs, playlistId) { deletedCount ->
+                                    if (deletedCount > 0) {
+                                        Toast.makeText(context, "已从歌单移除 $deletedCount 首歌曲", Toast.LENGTH_SHORT).show()
+                                        val remainingSongs = batchModeSongs.filterNot { it.id in batchSelectedSongIds }
+                                        if (remainingSongs.isEmpty()) {
+                                            exitBatchMode()
+                                        } else {
+                                            batchModeSongs = remainingSongs
+                                            batchSelectedSongIds = emptySet()
+                                        }
+                                    } else {
+                                        Toast.makeText(context, "未从歌单移除任何歌曲", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }
+                        }
                     }
-                },
-                onPreviousClick = { musicViewModel.skipToPrevious() },
-                onNextClick = { musicViewModel.skipToNext() },
-                onPlayModeClick = {
-                    val (newShuffle, newRepeat) = when {
-                        musicUiState.shuffleModeEnabled -> false to Player.REPEAT_MODE_ONE // Random -> Single Loop
-                        musicUiState.repeatMode == Player.REPEAT_MODE_ONE -> false to Player.REPEAT_MODE_ALL // Single Loop -> Sequential
-                        else -> true to Player.REPEAT_MODE_ALL // Sequential -> Random
-                    }
-                    musicViewModel.setShuffleModeEnabled(newShuffle)
-                    musicViewModel.setRepeatMode(newRepeat)
-                },
-                onClick = onPlayerClick,
-                onScanClick = onScanClick,
-                onBackupRestoreClick = onBackupRestoreClick,
-                onSettingsClick = onSettingsClick,
-                onEqualizerClick = onEqualizerClick,
-                onAboutClick = onAboutClick,
-                onSleepTimerClick = onSleepTimerClick,
-                onLogsClick = onLogsClick,
-                sleepTimerRemaining = sleepTimerState
-            )
+                )
+            } else {
+                BottomPlayerBar(
+                    currentMediaItem = musicUiState.currentMediaItem,
+                    isPlaying = musicUiState.isPlaying,
+                    currentPosition = musicUiState.currentPosition,
+                    duration = musicUiState.duration,
+                    repeatMode = musicUiState.repeatMode,
+                    shuffleModeEnabled = musicUiState.shuffleModeEnabled,
+                    onPlayPauseClick = {
+                        if (musicUiState.isPlaying) {
+                            musicViewModel.pause()
+                        } else {
+                            musicViewModel.resume()
+                        }
+                    },
+                    onPreviousClick = { musicViewModel.skipToPrevious() },
+                    onNextClick = { musicViewModel.skipToNext() },
+                    onPlayModeClick = {
+                        val (newShuffle, newRepeat) = when {
+                            musicUiState.shuffleModeEnabled -> false to Player.REPEAT_MODE_ONE // Random -> Single Loop
+                            musicUiState.repeatMode == Player.REPEAT_MODE_ONE -> false to Player.REPEAT_MODE_ALL // Single Loop -> Sequential
+                            else -> true to Player.REPEAT_MODE_ALL // Sequential -> Random
+                        }
+                        musicViewModel.setShuffleModeEnabled(newShuffle)
+                        musicViewModel.setRepeatMode(newRepeat)
+                    },
+                    onClick = onPlayerClick,
+                    onScanClick = onScanClick,
+                    onBackupRestoreClick = onBackupRestoreClick,
+                    onSettingsClick = onSettingsClick,
+                    onEqualizerClick = onEqualizerClick,
+                    onAboutClick = onAboutClick,
+                    onSleepTimerClick = onSleepTimerClick,
+                    onLogsClick = onLogsClick,
+                    sleepTimerRemaining = sleepTimerState
+                )
+            }
         }
     ) { innerPadding ->
         Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
@@ -251,7 +346,21 @@ fun MainScreen(
                                 Log.d("MainScreen", "SongList (Global): playing song at index $index")
                                 musicViewModel.playList(list, index, PlaylistContext.GLOBAL)
                             },
-                            onSongLongClick = { selectedSongForActions = it },
+                            onSongLongClick = {
+                                selectedSongForActions = it
+                                batchModeSongs = songs
+                                batchModePlaylistId = null
+                                batchFavoriteActionText = favoriteActionTextForTab(0)
+                            },
+                            isBatchMode = isBatchMode && pagerState.currentPage == 0,
+                            selectedSongIds = batchSelectedSongIds,
+                            onBatchSongToggle = { song ->
+                                batchSelectedSongIds = if (song.id in batchSelectedSongIds) {
+                                    batchSelectedSongIds - song.id
+                                } else {
+                                    batchSelectedSongIds + song.id
+                                }
+                            },
                             appLogger = appLogger
                         )
                     }
@@ -260,7 +369,23 @@ fun MainScreen(
                             viewModel = viewModel,
                             musicViewModel = musicViewModel,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
-                            onSongLongClick = { selectedSongForActions = it }
+                            initialSelectedPlaylistId = restoredPlaylistId,
+                            onSongLongClick = { song, playlistId, songs ->
+                                selectedSongForActions = song
+                                batchModeSongs = songs
+                                batchModePlaylistId = playlistId
+                                batchFavoriteActionText = favoriteActionTextForTab(1)
+                            },
+                            isBatchMode = isBatchMode && pagerState.currentPage == PLAYLIST_TAB_INDEX,
+                            selectedSongIds = batchSelectedSongIds,
+                            onBatchSongToggle = { song ->
+                                batchSelectedSongIds = if (song.id in batchSelectedSongIds) {
+                                    batchSelectedSongIds - song.id
+                                } else {
+                                    batchSelectedSongIds + song.id
+                                }
+                            },
+                            onPlaylistSongsVisibleChanged = { isPlaylistSongsVisible = it }
                         )
                     }
                     2 -> {
@@ -274,7 +399,21 @@ fun MainScreen(
                                 Log.d("MainScreen", "SongList (Favorites): playing song at index $index")
                                 musicViewModel.playList(list, index, PlaylistContext.FAVORITES)
                             },
-                            onSongLongClick = { selectedSongForActions = it },
+                            onSongLongClick = {
+                                selectedSongForActions = it
+                                batchModeSongs = favoriteSongs
+                                batchModePlaylistId = null
+                                batchFavoriteActionText = favoriteActionTextForTab(2)
+                            },
+                            isBatchMode = isBatchMode && pagerState.currentPage == 2,
+                            selectedSongIds = batchSelectedSongIds,
+                            onBatchSongToggle = { song ->
+                                batchSelectedSongIds = if (song.id in batchSelectedSongIds) {
+                                    batchSelectedSongIds - song.id
+                                } else {
+                                    batchSelectedSongIds + song.id
+                                }
+                            },
                             appLogger = appLogger
                         )
                     }
@@ -283,7 +422,8 @@ fun MainScreen(
                         appLogger?.info("MainScreen", "FolderList view activated")
                         FolderList(
                             viewModel = viewModel,
-                            initialPath = restoredFolderPath ?: "/storage/emulated/0",
+                            initialPath = "/storage/emulated/0",
+                            startPath = restoredFolderPath,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
                             onSongClick = { list, index, folderPath -> 
                                 Log.d("MainScreen", "FolderList: playing song at index $index in folder $folderPath")
@@ -313,10 +453,45 @@ fun MainScreen(
                 onDismiss = { selectedSongForActions = null },
                 onAddToPlaylist = { song, playlistId -> viewModel.addSongToPlaylist(song, playlistId) },
                 onCreatePlaylist = { name, onCreated -> viewModel.createPlaylist(name, onCreated) },
+                onBatchManage = { song ->
+                    isBatchMode = true
+                    batchModeTabIndex = pagerState.currentPage
+                    batchSelectedSongIds = setOf(song.id)
+                },
                 onHideSong = { song -> viewModel.hideSong(song) },
                 onDeleteSong = { song, onResult -> viewModel.deleteSongFile(song, onResult) },
                 onLoadMetadata = { song, onLoaded -> viewModel.loadSongMetadata(song, onLoaded) }
             )
+            if (showBatchAddDialog) {
+                AddToPlaylistDialog(
+                    playlists = playlists,
+                    resetKey = batchSelectedSongIds,
+                    onDismiss = { showBatchAddDialog = false },
+                    onAdd = { playlistId ->
+                        val selectedSongs = batchModeSongs.filter { it.id in batchSelectedSongIds }
+                        if (selectedSongs.isEmpty()) {
+                            Toast.makeText(context, "请先选择歌曲", Toast.LENGTH_SHORT).show()
+                            showBatchAddDialog = false
+                            return@AddToPlaylistDialog
+                        }
+                        viewModel.addSongsToPlaylist(selectedSongs, playlistId) {
+                            Toast.makeText(context, "已加入歌单 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
+                            showBatchAddDialog = false
+                        }
+                    },
+                    onCreate = { name ->
+                        viewModel.createPlaylist(name) { playlistId ->
+                            if (playlistId != null) {
+                                val selectedSongs = batchModeSongs.filter { it.id in batchSelectedSongIds }
+                                viewModel.addSongsToPlaylist(selectedSongs, playlistId) {
+                                    Toast.makeText(context, "歌单已创建并加入 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
+                                    showBatchAddDialog = false
+                                }
+                            }
+                        }
+                    }
+                )
+            }
         }
     }
 }
@@ -328,4 +503,12 @@ internal fun playlistTypeToTabIndex(type: PlaylistType): Int = when (type) {
     PlaylistType.FOLDER -> 3
     PlaylistType.ARTIST -> 4
     PlaylistType.ALBUM -> 5
+}
+
+internal fun favoriteActionTextForTab(tabIndex: Int): String {
+    return if (tabIndex == 2) "取消收藏" else "加入收藏"
+}
+
+internal fun parsePlaylistId(value: String): Long? {
+    return value.toLongOrNull()?.takeIf { it > 0L }
 }

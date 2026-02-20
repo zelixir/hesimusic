@@ -11,6 +11,7 @@ import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
 import com.zjr.hesimusic.data.repository.HiddenSongRepository
 import com.zjr.hesimusic.data.repository.LibraryRepository
+import com.zjr.hesimusic.data.repository.FavoriteRepository
 import com.zjr.hesimusic.data.repository.PlaylistRepository
 import com.zjr.hesimusic.data.repository.SongRepository
 import com.zjr.hesimusic.data.scanner.TagLibHelper
@@ -35,6 +36,7 @@ class LibraryViewModel @Inject constructor(
     private val repository: LibraryRepository,
     private val hiddenSongRepository: HiddenSongRepository,
     private val playlistRepository: PlaylistRepository,
+    private val favoriteRepository: FavoriteRepository,
     private val songRepository: SongRepository,
     private val tagLibHelper: TagLibHelper,
     private val playbackPreferences: PlaybackPreferences
@@ -136,6 +138,48 @@ class LibraryViewModel @Inject constructor(
                 return@launch
             }
             onCreated(playlistRepository.createPlaylist(trimmedName))
+        }
+    }
+
+    fun addSongsToPlaylist(songs: List<Song>, playlistId: Long, onCompleted: () -> Unit = {}) {
+        viewModelScope.launch {
+            songs.forEach { song ->
+                playlistRepository.addSongToPlaylist(playlistId, song.id)
+            }
+            withContext(Dispatchers.Main.immediate) {
+                onCompleted()
+            }
+        }
+    }
+
+    fun removeSongsFromPlaylist(songs: List<Song>, playlistId: Long, onCompleted: (Int) -> Unit = { _ -> }) {
+        viewModelScope.launch {
+            val deletedCount = playlistRepository.removeSongsFromPlaylist(playlistId, songs.map { it.id })
+            withContext(Dispatchers.Main.immediate) {
+                onCompleted(deletedCount)
+            }
+        }
+    }
+
+    fun addSongsToFavorites(songs: List<Song>) {
+        viewModelScope.launch {
+            songs.forEach { song ->
+                favoriteRepository.addFavorite(song.filePath, song.startPosition)
+            }
+        }
+    }
+
+    fun removeSongsFromFavorites(songs: List<Song>) {
+        viewModelScope.launch {
+            songs.forEach { song ->
+                favoriteRepository.removeFavorite(song.filePath, song.startPosition)
+            }
+        }
+    }
+
+    fun deletePlaylist(playlistId: Long) {
+        viewModelScope.launch {
+            playlistRepository.deletePlaylist(playlistId)
         }
     }
 

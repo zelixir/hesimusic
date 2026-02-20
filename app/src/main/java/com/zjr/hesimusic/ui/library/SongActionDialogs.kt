@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -37,6 +38,7 @@ fun SongActionHost(
     onDismiss: () -> Unit,
     onAddToPlaylist: (Song, Long) -> Unit,
     onCreatePlaylist: (String, (Long?) -> Unit) -> Unit,
+    onBatchManage: (Song) -> Unit,
     onHideSong: (Song) -> Unit,
     onDeleteSong: (Song, (Boolean) -> Unit) -> Unit,
     onLoadMetadata: (Song, (Map<String, String>) -> Unit) -> Unit
@@ -58,14 +60,28 @@ fun SongActionHost(
                     Text(
                         text = "添加到歌单",
                         style = menuTextStyle,
+                        color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { showAddDialog = true }
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
+                        text = "批量管理",
+                        style = menuTextStyle,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onBatchManage(selectedSong)
+                                onDismiss()
+                            }
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
                         text = "歌曲信息",
                         style = menuTextStyle,
+                        color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable {
@@ -77,6 +93,7 @@ fun SongActionHost(
                     Text(
                         text = "从曲库中隐藏歌曲",
                         style = menuTextStyle,
+                        color = MaterialTheme.colorScheme.error,
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { showHideConfirmDialog = true }
@@ -85,6 +102,7 @@ fun SongActionHost(
                     Text(
                         text = "删除歌曲文件",
                         style = menuTextStyle,
+                        color = MaterialTheme.colorScheme.error,
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { showDeleteDialog = true }
@@ -101,8 +119,8 @@ fun SongActionHost(
 
     if (selectedSong != null && showAddDialog) {
         AddToPlaylistDialog(
-            song = selectedSong,
             playlists = playlists,
+            resetKey = selectedSong.id,
             onDismiss = { showAddDialog = false },
             onAdd = { playlistId ->
                 onAddToPlaylist(selectedSong, playlistId)
@@ -183,14 +201,14 @@ fun SongActionHost(
 }
 
 @Composable
-private fun AddToPlaylistDialog(
-    song: Song,
+fun AddToPlaylistDialog(
     playlists: List<Playlist>,
+    resetKey: Any? = null,
     onDismiss: () -> Unit,
     onAdd: (Long) -> Unit,
     onCreate: (String) -> Unit
 ) {
-    var newPlaylistName by remember(song.id) { mutableStateOf("") }
+    var newPlaylistName by remember(resetKey) { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,

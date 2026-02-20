@@ -22,4 +22,17 @@ class PlaylistRepository @Inject constructor(
     suspend fun createPlaylist(name: String): Long {
         return playlistDao.insertPlaylist(Playlist(name = name.trim()))
     }
+
+    suspend fun removeSongFromPlaylist(playlistId: Long, songId: Long): Int {
+        return playlistDao.removeSongFromPlaylist(playlistId, songId)
+    }
+
+    suspend fun removeSongsFromPlaylist(playlistId: Long, songIds: List<Long>): Int {
+        if (songIds.isEmpty()) return 0
+        return playlistDao.removeSongsFromPlaylist(playlistId, songIds)
+    }
+
+    suspend fun deletePlaylist(playlistId: Long) {
+        playlistDao.deletePlaylist(playlistId)
+    }
 }
