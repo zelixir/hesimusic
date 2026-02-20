@@ -27,6 +27,11 @@ class PlaylistRepository @Inject constructor(
         playlistDao.removeSongFromPlaylist(playlistId, songId)
     }
 
+    suspend fun removeSongsFromPlaylist(playlistId: Long, songIds: List<Long>) {
+        if (songIds.isEmpty()) return
+        playlistDao.removeSongsFromPlaylist(playlistId, songIds)
+    }
+
     suspend fun deletePlaylist(playlistId: Long) {
         playlistDao.deletePlaylist(playlistId)
     }

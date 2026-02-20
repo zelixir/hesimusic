@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -19,6 +20,8 @@ private val BatchActionBarHeight = 64.dp
 fun BatchActionBar(
     showRemoveFromPlaylist: Boolean,
     favoriteActionText: String,
+    allSelected: Boolean,
+    onSelectAllChange: (Boolean) -> Unit,
     onAddToPlaylist: () -> Unit,
     onFavoriteAction: () -> Unit,
     onExit: () -> Unit,
@@ -37,6 +40,10 @@ fun BatchActionBar(
                 .padding(horizontal = 8.dp),
             horizontalArrangement = Arrangement.SpaceEvenly
         ) {
+            Row {
+                Checkbox(checked = allSelected, onCheckedChange = onSelectAllChange)
+                Text("全选/清除")
+            }
             if (showRemoveFromPlaylist && onRemoveFromPlaylist != null) {
                 TextButton(onClick = onRemoveFromPlaylist) {
                     Text("从歌单移除")

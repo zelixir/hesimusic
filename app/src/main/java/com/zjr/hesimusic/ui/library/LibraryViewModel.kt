@@ -151,9 +151,7 @@ class LibraryViewModel @Inject constructor(
 
     fun removeSongsFromPlaylist(songs: List<Song>, playlistId: Long) {
         viewModelScope.launch {
-            songs.forEach { song ->
-                playlistRepository.removeSongFromPlaylist(playlistId, song.id)
-            }
+            playlistRepository.removeSongsFromPlaylist(playlistId, songs.map { it.id })
         }
     }
 

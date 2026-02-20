@@ -14,6 +14,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,11 +36,15 @@ fun PlaylistTabScreen(
     onSongLongClick: (Song, Long, List<Song>) -> Unit,
     isBatchMode: Boolean,
     selectedSongIds: Set<Long>,
-    onBatchSongToggle: (Song) -> Unit
+    onBatchSongToggle: (Song) -> Unit,
+    onPlaylistSongsVisibleChanged: (Boolean) -> Unit
 ) {
     val playlists by viewModel.playlists.collectAsState()
     var selectedPlaylistId by remember { mutableLongStateOf(0L) }
     var selectedPlaylistForAction by remember { mutableStateOf<Playlist?>(null) }
+    LaunchedEffect(selectedPlaylistId) {
+        onPlaylistSongsVisibleChanged(selectedPlaylistId != 0L)
+    }
 
     if (selectedPlaylistId == 0L) {
         LazyColumn(modifier = Modifier.fillMaxSize()) {

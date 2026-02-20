@@ -1,6 +1,7 @@
 package com.zjr.hesimusic.ui.library
 
 import android.util.Log
+import android.widget.Toast
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -19,6 +20,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.Player
 import com.zjr.hesimusic.data.model.Song
@@ -51,6 +53,7 @@ fun SongListScreen(
     }
     
     val songs by songsFlow.collectAsState(initial = emptyList())
+    val context = LocalContext.current
     val musicUiState by musicViewModel.uiState.collectAsState()
     val sleepTimerState by musicViewModel.sleepTimerState.collectAsState()
     val playlists by viewModel.playlists.collectAsState()
@@ -87,10 +90,19 @@ fun SongListScreen(
                 BatchActionBar(
                     showRemoveFromPlaylist = false,
                     favoriteActionText = "加入收藏",
+                    allSelected = songs.isNotEmpty() && batchSelectedSongIds.size == songs.size,
+                    onSelectAllChange = { checked ->
+                        batchSelectedSongIds = if (checked) songs.map { it.id }.toSet() else emptySet()
+                    },
                     onAddToPlaylist = { showBatchAddDialog = true },
                     onFavoriteAction = {
                         val selectedSongs = songs.filter { it.id in batchSelectedSongIds }
-                        viewModel.addSongsToFavorites(selectedSongs)
+                        if (selectedSongs.isEmpty()) {
+                            Toast.makeText(context, "请先选择歌曲", Toast.LENGTH_SHORT).show()
+                        } else {
+                            viewModel.addSongsToFavorites(selectedSongs)
+                            Toast.makeText(context, "已加入收藏 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
+                        }
                     },
                     onExit = {
                         isBatchMode = false
@@ -173,7 +185,12 @@ fun SongListScreen(
                     onDismiss = { showBatchAddDialog = false },
                     onAdd = { playlistId ->
                         val selectedSongs = songs.filter { it.id in batchSelectedSongIds }
-                        viewModel.addSongsToPlaylist(selectedSongs, playlistId)
+                        if (selectedSongs.isEmpty()) {
+                            Toast.makeText(context, "请先选择歌曲", Toast.LENGTH_SHORT).show()
+                        } else {
+                            viewModel.addSongsToPlaylist(selectedSongs, playlistId)
+                            Toast.makeText(context, "已加入歌单 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
+                        }
                         showBatchAddDialog = false
                     },
                     onCreate = { name ->
@@ -181,6 +198,7 @@ fun SongListScreen(
                             if (playlistId != null) {
                                 val selectedSongs = songs.filter { it.id in batchSelectedSongIds }
                                 viewModel.addSongsToPlaylist(selectedSongs, playlistId)
+                                Toast.makeText(context, "歌单已创建并加入 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
                                 showBatchAddDialog = false
                             }
                         }
