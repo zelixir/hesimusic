@@ -26,6 +26,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -123,6 +124,18 @@ fun ScanScreen(
 
             // Status section
             item {
+                ScanOptionsCard(
+                    skipShortSongs = uiState.skipShortSongs,
+                    skipAmrMid = uiState.skipAmrMid,
+                    skipHiddenFolders = uiState.skipHiddenFolders,
+                    onSkipShortSongsChanged = viewModel::updateSkipShortSongs,
+                    onSkipAmrMidChanged = viewModel::updateSkipAmrMid,
+                    onSkipHiddenFoldersChanged = viewModel::updateSkipHiddenFolders
+                )
+            }
+
+            // Status section
+            item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(
@@ -201,6 +214,41 @@ fun ScanScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ScanOptionsCard(
+    skipShortSongs: Boolean,
+    skipAmrMid: Boolean,
+    skipHiddenFolders: Boolean,
+    onSkipShortSongsChanged: (Boolean) -> Unit,
+    onSkipAmrMidChanged: (Boolean) -> Unit,
+    onSkipHiddenFoldersChanged: (Boolean) -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(text = "扫描开关", style = MaterialTheme.typography.titleMedium)
+            SwitchRow("不扫描60秒以下歌曲", skipShortSongs, onSkipShortSongsChanged)
+            SwitchRow("不扫描amr, mid格式歌曲", skipAmrMid, onSkipAmrMidChanged)
+            SwitchRow("不扫描隐藏文件夹", skipHiddenFolders, onSkipHiddenFoldersChanged)
+        }
+    }
+}
+
+@Composable
+private fun SwitchRow(
+    text: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(text = text)
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 
