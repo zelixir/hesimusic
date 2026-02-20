@@ -1,5 +1,6 @@
 package com.zjr.hesimusic.data.repository
 
+import android.util.Log
 import com.zjr.hesimusic.data.dao.PlaylistDao
 import com.zjr.hesimusic.data.model.Playlist
 import com.zjr.hesimusic.data.model.Song
@@ -9,6 +10,9 @@ import javax.inject.Inject
 class PlaylistRepository @Inject constructor(
     private val playlistDao: PlaylistDao
 ) {
+    companion object {
+        private const val TAG = "PlaylistRepository"
+    }
     fun getPlaylists(): Flow<List<Playlist>> = playlistDao.getPlaylists()
 
     fun getSongsByPlaylist(playlistId: Long): Flow<List<Song>> = playlistDao.getSongsByPlaylist(playlistId)
@@ -29,7 +33,14 @@ class PlaylistRepository @Inject constructor(
 
     suspend fun removeSongsFromPlaylist(playlistId: Long, songIds: List<Long>): Int {
         if (songIds.isEmpty()) return 0
-        return playlistDao.removeSongsFromPlaylist(playlistId, songIds)
+        val deletedCount = playlistDao.removeSongsFromPlaylist(playlistId, songIds)
+        if (deletedCount > 0) return deletedCount
+        Log.w(TAG, "Batch remove returned 0, fallback to per-song delete. playlistId=$playlistId, songCount=${songIds.size}")
+        var fallbackDeletedCount = 0
+        songIds.forEach { songId ->
+            fallbackDeletedCount += playlistDao.removeSongFromPlaylist(playlistId, songId)
+        }
+        return fallbackDeletedCount
     }
 
     suspend fun deletePlaylist(playlistId: Long) {
