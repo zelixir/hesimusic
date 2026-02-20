@@ -15,11 +15,11 @@ class FileScannerFilterTest {
     }
 
     @Test
-    fun `shouldSkipAmrMid only skips amr and mid when enabled`() {
-        assertTrue(shouldSkipAmrMid("amr", skipAmrMid = true))
-        assertTrue(shouldSkipAmrMid("mid", skipAmrMid = true))
-        assertFalse(shouldSkipAmrMid("mp3", skipAmrMid = true))
-        assertFalse(shouldSkipAmrMid("amr", skipAmrMid = false))
+    fun `shouldIncludeAmrMid only includes amr and mid when skip is disabled`() {
+        assertTrue(shouldIncludeAmrMid("amr", skipAmrMid = false))
+        assertTrue(shouldIncludeAmrMid("mid", skipAmrMid = false))
+        assertFalse(shouldIncludeAmrMid("mp3", skipAmrMid = false))
+        assertFalse(shouldIncludeAmrMid("amr", skipAmrMid = true))
     }
 
     @Test

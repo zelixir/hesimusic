@@ -122,7 +122,7 @@ fun ScanScreen(
                 )
             }
 
-            // Status section
+            // Scan options section
             item {
                 ScanOptionsCard(
                     skipShortSongs = uiState.skipShortSongs,

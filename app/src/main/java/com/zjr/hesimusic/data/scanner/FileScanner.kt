@@ -7,12 +7,15 @@ import com.zjr.hesimusic.utils.AppLogger
 import java.io.File
 import javax.inject.Inject
 
+private const val MIN_SCAN_DURATION_MS = 60_000L
+
 class FileScanner @Inject constructor(
     private val cueParser: CueParser,
     private val tagLibHelper: TagLibHelper,
     private val appLogger: AppLogger
 ) {
-    private val supportedExtensions = setOf("mp3", "flac", "wav", "m4a", "aac", "ogg", "amr", "mid")
+    private val supportedExtensions = setOf("mp3", "flac", "wav", "m4a", "aac", "ogg")
+    private val amrMidExtensions = setOf("amr", "mid")
 
     suspend fun scan(
         scanFolders: Set<String> = emptySet(),
@@ -198,7 +201,10 @@ class FileScanner @Inject constructor(
                 val ext = file.extension.lowercase()
                 if (ext == "cue") {
                     cueFiles.add(file)
-                } else if (supportedExtensions.contains(ext) && !shouldSkipAmrMid(ext, skipAmrMid)) {
+                } else if (
+                    supportedExtensions.contains(ext) ||
+                    shouldIncludeAmrMid(ext, skipAmrMid)
+                ) {
                     audioFiles.add(file)
                 }
             }
@@ -216,11 +222,11 @@ class FileScanner @Inject constructor(
 }
 
 internal fun shouldSkipByDuration(durationMs: Long, skipShortSongs: Boolean): Boolean {
-    return skipShortSongs && durationMs in 0 until 60_000
+    return skipShortSongs && durationMs in 0 until MIN_SCAN_DURATION_MS
 }
 
-internal fun shouldSkipAmrMid(extension: String, skipAmrMid: Boolean): Boolean {
-    return skipAmrMid && (extension == "amr" || extension == "mid")
+internal fun shouldIncludeAmrMid(extension: String, skipAmrMid: Boolean): Boolean {
+    return !skipAmrMid && (extension == "amr" || extension == "mid")
 }
 
 internal fun shouldSkipHiddenFolder(folder: File, skipHiddenFolders: Boolean): Boolean {
