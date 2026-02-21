@@ -4,6 +4,9 @@
 目标是替换天天动听
 本项目的绝大部分代码由AI生成
 
+<img width="1080" height="2400" alt="image" src="https://github.com/user-attachments/assets/f2025fd4-d4d8-4df8-8923-09348eb93775" />
+
+
 ## 功能清单
 
 - [x] 扫描本地音乐
