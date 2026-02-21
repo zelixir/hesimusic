@@ -423,7 +423,7 @@ class MusicViewModel @Inject constructor(
         val nextQueueSongId = _playQueueSongIds.value.firstOrNull() ?: return false
         if (!shouldForceQueueTransition(reason, currentSongId, nextQueueSongId)) return false
         val controller = mediaController ?: return false
-        val targetIndex = List(controller.mediaItemCount) { index -> index }
+        val targetIndex = (0 until controller.mediaItemCount)
             .firstOrNull { controller.getMediaItemAt(it).mediaId == nextQueueSongId.toString() }
             ?: return false
         if (targetIndex == controller.currentMediaItemIndex) return false
