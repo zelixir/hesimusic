@@ -67,8 +67,12 @@ class MainActivity : ComponentActivity() {
         val uiStartTime = System.currentTimeMillis()
         setContent {
             val appThemeMode by playbackPreferences.appThemeModeFlow.collectAsState()
+            val appThemePalette by playbackPreferences.appThemePaletteFlow.collectAsState()
             val isSystemDarkTheme = isSystemInDarkTheme()
-            HesimusicTheme(darkTheme = resolveDarkTheme(appThemeMode, isSystemDarkTheme)) {
+            HesimusicTheme(
+                darkTheme = resolveDarkTheme(appThemeMode, isSystemDarkTheme),
+                palette = appThemePalette
+            ) {
                 val navController = rememberNavController()
                 
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->

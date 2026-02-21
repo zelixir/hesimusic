@@ -18,4 +18,10 @@ class AppThemeModeTest {
         assertEquals(false, resolveDarkTheme(AppThemeMode.LIGHT, true))
         assertEquals(true, resolveDarkTheme(AppThemeMode.DARK, false))
     }
+
+    @Test
+    fun `parseAppThemePalette returns blue for unknown values`() {
+        assertEquals(AppThemePalette.BLUE, parseAppThemePalette(null))
+        assertEquals(AppThemePalette.BLUE, parseAppThemePalette("UNKNOWN"))
+    }
 }

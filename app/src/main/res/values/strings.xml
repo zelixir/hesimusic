@@ -5,6 +5,12 @@
     <string name="settings_theme_system">跟随系统</string>
     <string name="settings_theme_light">浅色</string>
     <string name="settings_theme_dark">深色</string>
+    <string name="settings_theme_palette_title">主题调色板</string>
+    <string name="settings_theme_palette_options_description">主题调色板选项</string>
+    <string name="settings_theme_palette_blue">海蓝</string>
+    <string name="settings_theme_palette_green">森林绿</string>
+    <string name="settings_theme_palette_purple">紫罗兰</string>
+    <string name="settings_theme_palette_orange">暖橙</string>
     <string name="settings_manage_hidden_songs">管理隐藏歌曲</string>
     <string name="settings_option_selected">已选中</string>
     <string name="settings_option_not_selected">未选中</string>

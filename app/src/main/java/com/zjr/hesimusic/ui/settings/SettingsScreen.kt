@@ -40,6 +40,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.zjr.hesimusic.data.preferences.AppThemeMode
+import com.zjr.hesimusic.data.preferences.AppThemePalette
 import com.zjr.hesimusic.R
 import com.zjr.hesimusic.ui.library.LibraryViewModel
 import com.zjr.hesimusic.ui.settings.SettingsViewModel
@@ -55,6 +56,7 @@ fun SettingsScreen(
     val minArtistTrackCount by settingsViewModel.minArtistTrackCount.collectAsState()
     val showMediaNotification by settingsViewModel.showMediaNotification.collectAsState()
     val appThemeMode by settingsViewModel.appThemeMode.collectAsState()
+    val appThemePalette by settingsViewModel.appThemePalette.collectAsState()
     val hiddenSongs by libraryViewModel.hiddenSongs.collectAsState()
     var showHiddenManager by remember { mutableStateOf(false) }
 
@@ -144,6 +146,47 @@ fun SettingsScreen(
                             Text(
                                 text = optionText
                             )
+                        }
+                    }
+                }
+
+                Text(
+                    text = stringResource(R.string.settings_theme_palette_title),
+                    modifier = Modifier.padding(top = 16.dp)
+                )
+                val paletteOptionsDescription = stringResource(R.string.settings_theme_palette_options_description)
+                Column(
+                    modifier = Modifier
+                        .semantics { contentDescription = paletteOptionsDescription }
+                        .selectableGroup()
+                ) {
+                    val selectedText = stringResource(R.string.settings_option_selected)
+                    val notSelectedText = stringResource(R.string.settings_option_not_selected)
+                    AppThemePalette.entries.forEach { palette ->
+                        val optionText = when (palette) {
+                            AppThemePalette.BLUE -> stringResource(R.string.settings_theme_palette_blue)
+                            AppThemePalette.GREEN -> stringResource(R.string.settings_theme_palette_green)
+                            AppThemePalette.PURPLE -> stringResource(R.string.settings_theme_palette_purple)
+                            AppThemePalette.ORANGE -> stringResource(R.string.settings_theme_palette_orange)
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .selectable(
+                                    selected = (palette == appThemePalette),
+                                    onClick = { settingsViewModel.updateAppThemePalette(palette) },
+                                    role = Role.RadioButton
+                                )
+                                .semantics {
+                                    stateDescription = if (palette == appThemePalette) selectedText else notSelectedText
+                                },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = (palette == appThemePalette),
+                                onClick = null
+                            )
+                            Text(text = optionText)
                         }
                     }
                 }

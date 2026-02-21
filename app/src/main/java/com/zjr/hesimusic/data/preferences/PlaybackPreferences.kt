@@ -42,11 +42,22 @@ enum class AppThemeMode {
     DARK
 }
 
+enum class AppThemePalette {
+    BLUE,
+    GREEN,
+    PURPLE,
+    ORANGE
+}
+
 /**
  * Parses stored theme mode name and falls back to [AppThemeMode.SYSTEM] for null/unknown values.
  */
 internal fun parseAppThemeMode(modeName: String?): AppThemeMode {
     return AppThemeMode.entries.firstOrNull { it.name == modeName } ?: AppThemeMode.SYSTEM
+}
+
+internal fun parseAppThemePalette(paletteName: String?): AppThemePalette {
+    return AppThemePalette.entries.firstOrNull { it.name == paletteName } ?: AppThemePalette.BLUE
 }
 
 /**
@@ -82,6 +93,7 @@ class PlaybackPreferences @Inject constructor(
         private const val KEY_MIN_ARTIST_TRACK_COUNT = "min_artist_track_count"
         private const val KEY_SHOW_MEDIA_NOTIFICATION = "show_media_notification"
         private const val KEY_APP_THEME_MODE = "app_theme_mode"
+        private const val KEY_APP_THEME_PALETTE = "app_theme_palette"
     }
     
     // State version to track if the saved state is valid and not overwritten by UI initialization
@@ -94,6 +106,8 @@ class PlaybackPreferences @Inject constructor(
     val showMediaNotificationFlow: StateFlow<Boolean> = _showMediaNotificationFlow.asStateFlow()
     private val _appThemeModeFlow = MutableStateFlow(getAppThemeMode())
     val appThemeModeFlow: StateFlow<AppThemeMode> = _appThemeModeFlow.asStateFlow()
+    private val _appThemePaletteFlow = MutableStateFlow(getAppThemePalette())
+    val appThemePaletteFlow: StateFlow<AppThemePalette> = _appThemePaletteFlow.asStateFlow()
 
     fun saveQueue(ids: List<Long>) {
         val idsString = ids.joinToString(",")
@@ -210,6 +224,15 @@ class PlaybackPreferences @Inject constructor(
 
     fun getAppThemeMode(): AppThemeMode {
         return parseAppThemeMode(prefs.getString(KEY_APP_THEME_MODE, AppThemeMode.SYSTEM.name))
+    }
+
+    fun saveAppThemePalette(value: AppThemePalette) {
+        prefs.edit().putString(KEY_APP_THEME_PALETTE, value.name).apply()
+        _appThemePaletteFlow.value = value
+    }
+
+    fun getAppThemePalette(): AppThemePalette {
+        return parseAppThemePalette(prefs.getString(KEY_APP_THEME_PALETTE, AppThemePalette.BLUE.name))
     }
     
     /**
