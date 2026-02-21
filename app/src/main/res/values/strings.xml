@@ -1,3 +1,35 @@
 <resources>
     <string name="app_name">海瑟音乐</string>
+    <string name="settings_theme_title">颜色主题</string>
+    <string name="settings_theme_options_description">颜色主题选项</string>
+    <string name="settings_theme_system">跟随系统</string>
+    <string name="settings_theme_light">浅色</string>
+    <string name="settings_theme_dark">深色</string>
+    <string name="settings_theme_palette_title">主题调色板</string>
+    <string name="settings_theme_palette_options_description">主题调色板选项</string>
+    <string name="settings_theme_palette_blue">海蓝</string>
+    <string name="settings_theme_palette_green">森林绿</string>
+    <string name="settings_theme_palette_purple">紫罗兰</string>
+    <string name="settings_theme_palette_orange">暖橙</string>
+    <string name="settings_theme_palette_red">珊瑚红</string>
+    <string name="settings_theme_palette_pink">玫瑰粉</string>
+    <string name="settings_theme_palette_teal">青玉色</string>
+    <string name="settings_theme_palette_yellow">琥珀黄</string>
+    <string name="settings_theme_palette_custom">自定义</string>
+    <string name="settings_startup_image_title">启动图</string>
+    <string name="settings_list_background_title">列表背景图</string>
+    <string name="settings_upload">上传</string>
+    <string name="settings_not_set">未设置</string>
+    <string name="settings_custom_color_picker_title">选择自定义颜色</string>
+    <string name="settings_color_red">红色</string>
+    <string name="settings_color_green">绿色</string>
+    <string name="settings_color_blue">蓝色</string>
+    <string name="settings_color_hex">HEX 颜色值</string>
+    <string name="settings_color_hex_invalid">请输入有效 HEX：#RGB / #RRGGBB / #RRGGBBAA</string>
+    <string name="settings_confirm">确定</string>
+    <string name="settings_cancel">取消</string>
+    <string name="settings_image_save_failed">图片保存失败</string>
+    <string name="settings_manage_hidden_songs">管理隐藏歌曲</string>
+    <string name="settings_option_selected">已选中</string>
+    <string name="settings_option_not_selected">未选中</string>
 </resources>

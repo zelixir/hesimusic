@@ -36,6 +36,50 @@ data class PlaylistContext(
     }
 }
 
+enum class AppThemeMode {
+    SYSTEM,
+    LIGHT,
+    DARK
+}
+
+enum class AppThemePalette {
+    BLUE,
+    GREEN,
+    PURPLE,
+    ORANGE,
+    RED,
+    PINK,
+    TEAL,
+    YELLOW,
+    CUSTOM
+}
+
+/**
+ * Parses stored theme mode name and falls back to [AppThemeMode.SYSTEM] for null/unknown values.
+ */
+internal fun parseAppThemeMode(modeName: String?): AppThemeMode {
+    return AppThemeMode.entries.firstOrNull { it.name == modeName } ?: AppThemeMode.SYSTEM
+}
+
+internal fun parseAppThemePalette(paletteName: String?): AppThemePalette {
+    return AppThemePalette.entries.firstOrNull { it.name == paletteName } ?: AppThemePalette.BLUE
+}
+
+internal fun parseCustomThemeColor(colorValue: Int): Int {
+    return if (colorValue == 0) 0xFF1A8DCE.toInt() else colorValue
+}
+
+/**
+ * Resolves whether the app should use dark theme based on user setting and system dark mode state.
+ */
+fun resolveDarkTheme(themeMode: AppThemeMode, isSystemDarkTheme: Boolean): Boolean {
+    return when (themeMode) {
+        AppThemeMode.SYSTEM -> isSystemDarkTheme
+        AppThemeMode.LIGHT -> false
+        AppThemeMode.DARK -> true
+    }
+}
+
 @Singleton
 class PlaybackPreferences @Inject constructor(
     @ApplicationContext context: Context
@@ -57,6 +101,11 @@ class PlaybackPreferences @Inject constructor(
         private const val KEY_MIN_ALBUM_TRACK_COUNT = "min_album_track_count"
         private const val KEY_MIN_ARTIST_TRACK_COUNT = "min_artist_track_count"
         private const val KEY_SHOW_MEDIA_NOTIFICATION = "show_media_notification"
+        private const val KEY_APP_THEME_MODE = "app_theme_mode"
+        private const val KEY_APP_THEME_PALETTE = "app_theme_palette"
+        private const val KEY_CUSTOM_THEME_COLOR = "custom_theme_color"
+        private const val KEY_STARTUP_IMAGE_URI = "startup_image_uri"
+        private const val KEY_LIST_BACKGROUND_IMAGE_URI = "list_background_image_uri"
     }
     
     // State version to track if the saved state is valid and not overwritten by UI initialization
@@ -67,6 +116,16 @@ class PlaybackPreferences @Inject constructor(
     val minArtistTrackCountFlow: StateFlow<Int> = _minArtistTrackCountFlow.asStateFlow()
     private val _showMediaNotificationFlow = MutableStateFlow(getShowMediaNotification())
     val showMediaNotificationFlow: StateFlow<Boolean> = _showMediaNotificationFlow.asStateFlow()
+    private val _appThemeModeFlow = MutableStateFlow(getAppThemeMode())
+    val appThemeModeFlow: StateFlow<AppThemeMode> = _appThemeModeFlow.asStateFlow()
+    private val _appThemePaletteFlow = MutableStateFlow(getAppThemePalette())
+    val appThemePaletteFlow: StateFlow<AppThemePalette> = _appThemePaletteFlow.asStateFlow()
+    private val _customThemeColorFlow = MutableStateFlow(getCustomThemeColor())
+    val customThemeColorFlow: StateFlow<Int> = _customThemeColorFlow.asStateFlow()
+    private val _startupImageUriFlow = MutableStateFlow(getStartupImageUri())
+    val startupImageUriFlow: StateFlow<String?> = _startupImageUriFlow.asStateFlow()
+    private val _listBackgroundImageUriFlow = MutableStateFlow(getListBackgroundImageUri())
+    val listBackgroundImageUriFlow: StateFlow<String?> = _listBackgroundImageUriFlow.asStateFlow()
 
     fun saveQueue(ids: List<Long>) {
         val idsString = ids.joinToString(",")
@@ -174,6 +233,51 @@ class PlaybackPreferences @Inject constructor(
 
     fun getShowMediaNotification(): Boolean {
         return prefs.getBoolean(KEY_SHOW_MEDIA_NOTIFICATION, true)
+    }
+
+    fun saveAppThemeMode(value: AppThemeMode) {
+        prefs.edit().putString(KEY_APP_THEME_MODE, value.name).apply()
+        _appThemeModeFlow.value = value
+    }
+
+    fun getAppThemeMode(): AppThemeMode {
+        return parseAppThemeMode(prefs.getString(KEY_APP_THEME_MODE, AppThemeMode.SYSTEM.name))
+    }
+
+    fun saveAppThemePalette(value: AppThemePalette) {
+        prefs.edit().putString(KEY_APP_THEME_PALETTE, value.name).apply()
+        _appThemePaletteFlow.value = value
+    }
+
+    fun getAppThemePalette(): AppThemePalette {
+        return parseAppThemePalette(prefs.getString(KEY_APP_THEME_PALETTE, AppThemePalette.BLUE.name))
+    }
+
+    fun saveCustomThemeColor(value: Int) {
+        prefs.edit().putInt(KEY_CUSTOM_THEME_COLOR, value).apply()
+        _customThemeColorFlow.value = value
+    }
+
+    fun getCustomThemeColor(): Int {
+        return parseCustomThemeColor(prefs.getInt(KEY_CUSTOM_THEME_COLOR, 0xFF1A8DCE.toInt()))
+    }
+
+    fun saveStartupImageUri(value: String?) {
+        prefs.edit().putString(KEY_STARTUP_IMAGE_URI, value).apply()
+        _startupImageUriFlow.value = value
+    }
+
+    fun getStartupImageUri(): String? {
+        return prefs.getString(KEY_STARTUP_IMAGE_URI, null)
+    }
+
+    fun saveListBackgroundImageUri(value: String?) {
+        prefs.edit().putString(KEY_LIST_BACKGROUND_IMAGE_URI, value).apply()
+        _listBackgroundImageUriFlow.value = value
+    }
+
+    fun getListBackgroundImageUri(): String? {
+        return prefs.getString(KEY_LIST_BACKGROUND_IMAGE_URI, null)
     }
     
     /**

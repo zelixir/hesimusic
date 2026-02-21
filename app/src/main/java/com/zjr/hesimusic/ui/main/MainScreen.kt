@@ -50,6 +50,7 @@ import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.preferences.PlaylistContext
 import com.zjr.hesimusic.data.preferences.PlaylistType
 import com.zjr.hesimusic.ui.common.MusicViewModel
+import com.zjr.hesimusic.ui.common.ListBackground
 import com.zjr.hesimusic.ui.library.AlbumList
 import com.zjr.hesimusic.ui.library.ArtistList
 import com.zjr.hesimusic.ui.library.BatchActionBar
@@ -58,6 +59,7 @@ import com.zjr.hesimusic.ui.library.LibraryViewModel
 import com.zjr.hesimusic.ui.library.SongList
 import com.zjr.hesimusic.ui.library.SongActionHost
 import com.zjr.hesimusic.ui.library.AddToPlaylistDialog
+import com.zjr.hesimusic.ui.settings.SettingsViewModel
 import com.zjr.hesimusic.ui.library.buildQueueDisplayBySongId
 import kotlinx.coroutines.launch
 
@@ -68,6 +70,7 @@ private const val PLAYLIST_TAB_INDEX = 1
 fun MainScreen(
     viewModel: LibraryViewModel = hiltViewModel(),
     musicViewModel: MusicViewModel = hiltViewModel(),
+    settingsViewModel: SettingsViewModel = hiltViewModel(),
     onArtistClick: (Artist) -> Unit,
     onAlbumClick: (Album) -> Unit,
     onPlayerClick: () -> Unit,
@@ -94,6 +97,7 @@ fun MainScreen(
     val playQueueSongIds by musicViewModel.playQueueSongIds.collectAsState()
     val isSearchActive by viewModel.isSearchActive.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
+    val listBackgroundImageUri by settingsViewModel.listBackgroundImageUri.collectAsState()
     val focusRequester = remember { FocusRequester() }
     val playlists by viewModel.playlists.collectAsState()
     var selectedSongForActions by remember { mutableStateOf<Song?>(null) }
@@ -288,7 +292,8 @@ fun MainScreen(
             }
         }
     ) { innerPadding ->
-        Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
+        ListBackground(imageUri = listBackgroundImageUri) {
+            Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
             if (isSearchActive) {
                 // Search bar
                 Row(
@@ -524,6 +529,7 @@ fun MainScreen(
                         }
                     }
                 )
+            }
             }
         }
     }

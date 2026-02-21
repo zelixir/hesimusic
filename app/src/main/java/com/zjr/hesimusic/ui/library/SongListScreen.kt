@@ -27,8 +27,10 @@ import androidx.media3.common.Player
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.preferences.PlaylistContext
 import com.zjr.hesimusic.data.preferences.PlaylistType
+import com.zjr.hesimusic.ui.common.ListBackground
 import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.ui.main.BottomPlayerBar
+import com.zjr.hesimusic.ui.settings.SettingsViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -37,6 +39,7 @@ fun SongListScreen(
     value: String,
     viewModel: LibraryViewModel = hiltViewModel(),
     musicViewModel: MusicViewModel = hiltViewModel(),
+    settingsViewModel: SettingsViewModel = hiltViewModel(),
     onBack: () -> Unit,
     onSongClick: (Song) -> Unit,
     onScanClick: () -> Unit,
@@ -58,6 +61,7 @@ fun SongListScreen(
     val musicUiState by musicViewModel.uiState.collectAsState()
     val playQueueSongIds by musicViewModel.playQueueSongIds.collectAsState()
     val sleepTimerState by musicViewModel.sleepTimerState.collectAsState()
+    val listBackgroundImageUri by settingsViewModel.listBackgroundImageUri.collectAsState()
     val playlists by viewModel.playlists.collectAsState()
     var selectedSongForActions by remember { mutableStateOf<Song?>(null) }
     var isBatchMode by remember { mutableStateOf(false) }
@@ -169,7 +173,8 @@ fun SongListScreen(
             }
         }
     ) { innerPadding ->
-        Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
+        ListBackground(imageUri = listBackgroundImageUri) {
+            Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
             SongList(
                 songs = songs,
                 currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
@@ -228,6 +233,7 @@ fun SongListScreen(
                         }
                     }
                 )
+            }
             }
         }
     }

@@ -144,7 +144,7 @@ fun SongList(
                 stickyHeader {
                     Surface(
                         modifier = Modifier.fillMaxWidth(),
-                        color = MaterialTheme.colorScheme.surfaceVariant
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.82f)
                     ) {
                         Text(
                             text = initial.toString(),
