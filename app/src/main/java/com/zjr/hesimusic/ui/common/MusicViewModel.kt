@@ -58,6 +58,11 @@ class MusicViewModel @Inject constructor(
     // Expose the saved playlist context for UI to use when restoring state
     private val _savedPlaylistContext = MutableStateFlow<PlaylistContext?>(null)
     val savedPlaylistContext: StateFlow<PlaylistContext?> = _savedPlaylistContext.asStateFlow()
+    private val _playQueueSongIds = MutableStateFlow<List<Long>>(emptyList())
+    val playQueueSongIds: StateFlow<List<Long>> = _playQueueSongIds.asStateFlow()
+    private var queuedPlaybackRestoreRepeatMode: Int? = null
+    private var queuedPlaybackRestoreShuffleModeEnabled: Boolean? = null
+    private var isSeekingToQueuedSong = false
 
     private var sleepTimer: CountDownTimer? = null
     
@@ -133,6 +138,11 @@ class MusicViewModel @Inject constructor(
 
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                     Log.d(TAG, "onMediaItemTransition: mediaId=${mediaItem?.mediaId}, reason=$reason")
+                    val currentSongId = mediaItem?.mediaId?.toLongOrNull()
+                    if (maybeSeekToQueuedSong(currentSongId, reason)) {
+                        return
+                    }
+                    consumePlayQueue(currentSongId)
                     updateState()
                     // Update favorite status when song changes
                     updateCurrentSongFavoriteStatus()
@@ -270,7 +280,7 @@ class MusicViewModel @Inject constructor(
     }
     
     fun playList(songs: List<Song>, startIndex: Int = 0, context: PlaylistContext? = null) {
-         mediaController?.let { controller ->
+        mediaController?.let { controller ->
             Log.d(TAG, "playList: ${songs.size} songs, startIndex=$startIndex, context=$context")
             val mediaItems = songs.map { it.toMediaItem() }
             controller.setMediaItems(mediaItems, startIndex, 0)
@@ -281,7 +291,22 @@ class MusicViewModel @Inject constructor(
             context?.let {
                 playbackPreferences.savePlaylistContext(it)
                 Log.d(TAG, "playList: saved context $it")
+                _uiState.update { state -> state.copy(playlistContext = it) }
             }
+            _playQueueSongIds.value = emptyList()
+            clearQueuePlaybackOverrides()
+        }
+    }
+
+    fun addSongsToPlayQueue(songs: List<Song>) {
+        if (songs.isEmpty()) return
+        mediaController?.let { controller ->
+            applyQueuePlaybackOverridesIfNeeded(controller)
+            val queueIds = songs.map { it.id }
+            val insertIndex = (controller.currentMediaItemIndex + 1 + _playQueueSongIds.value.size)
+                .coerceIn(0, controller.mediaItemCount)
+            controller.addMediaItems(insertIndex, songs.map { it.toMediaItem() })
+            _playQueueSongIds.update { it + queueIds }
         }
     }
 
@@ -347,6 +372,67 @@ class MusicViewModel @Inject constructor(
     
     fun clearPlaylist() {
         mediaController?.clearMediaItems()
+        _playQueueSongIds.value = emptyList()
+        clearQueuePlaybackOverrides()
+    }
+
+    private fun consumePlayQueue(currentSongId: Long?) {
+        if (currentSongId == null) return
+        _playQueueSongIds.update { queue ->
+            if (queue.isNotEmpty() && queue.first() == currentSongId) {
+                queue.drop(1)
+            } else {
+                queue
+            }
+        }
+        if (_playQueueSongIds.value.isEmpty()) {
+            restorePlaybackModeAfterQueue()
+        }
+    }
+
+    private fun applyQueuePlaybackOverridesIfNeeded(controller: MediaController) {
+        if (_playQueueSongIds.value.isNotEmpty()) return
+        queuedPlaybackRestoreRepeatMode = controller.repeatMode
+        queuedPlaybackRestoreShuffleModeEnabled = controller.shuffleModeEnabled
+        if (controller.repeatMode == Player.REPEAT_MODE_ONE) {
+            controller.repeatMode = Player.REPEAT_MODE_ALL
+        }
+        if (controller.shuffleModeEnabled) {
+            controller.shuffleModeEnabled = false
+        }
+    }
+
+    private fun restorePlaybackModeAfterQueue() {
+        mediaController?.let { controller ->
+            queuedPlaybackRestoreRepeatMode?.let { controller.repeatMode = it }
+            queuedPlaybackRestoreShuffleModeEnabled?.let { controller.shuffleModeEnabled = it }
+        }
+        clearQueuePlaybackOverrides()
+    }
+
+    private fun clearQueuePlaybackOverrides() {
+        queuedPlaybackRestoreRepeatMode = null
+        queuedPlaybackRestoreShuffleModeEnabled = null
+    }
+
+    private fun maybeSeekToQueuedSong(currentSongId: Long?, reason: Int): Boolean {
+        if (isSeekingToQueuedSong) {
+            isSeekingToQueuedSong = false
+            return false
+        }
+        val nextQueueSongId = _playQueueSongIds.value.firstOrNull() ?: return false
+        if (!shouldForceQueueTransition(reason, currentSongId, nextQueueSongId)) return false
+        val controller = mediaController ?: return false
+        val targetIndex = (0 until controller.mediaItemCount)
+            .firstOrNull { controller.getMediaItemAt(it).mediaId == nextQueueSongId.toString() }
+            ?: return false
+        if (targetIndex == controller.currentMediaItemIndex) return false
+        isSeekingToQueuedSong = true
+        controller.seekToDefaultPosition(targetIndex)
+        if (!controller.isPlaying) {
+            controller.play()
+        }
+        return true
     }
 
     fun toggleCurrentSongFavorite() {
@@ -383,6 +469,13 @@ class MusicViewModel @Inject constructor(
         }
         sleepTimer?.cancel()
     }
+}
+
+internal fun shouldForceQueueTransition(reason: Int, currentSongId: Long?, queuedSongId: Long): Boolean {
+    if (currentSongId == null) return false
+    if (currentSongId == queuedSongId) return false
+    return reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
+        reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
 }
 
 data class MusicUiState(

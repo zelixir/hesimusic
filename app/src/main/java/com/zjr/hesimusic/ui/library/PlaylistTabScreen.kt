@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.activity.compose.BackHandler
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -38,13 +39,18 @@ fun PlaylistTabScreen(
     isBatchMode: Boolean,
     selectedSongIds: Set<Long>,
     onBatchSongToggle: (Song) -> Unit,
-    onPlaylistSongsVisibleChanged: (Boolean) -> Unit
+    onPlaylistSongsVisibleChanged: (Boolean) -> Unit,
+    queueDisplayBySongId: Map<Long, String> = emptyMap()
 ) {
+    val musicUiState by musicViewModel.uiState.collectAsState()
     val playlists by viewModel.playlists.collectAsState()
     var selectedPlaylistId by remember(initialSelectedPlaylistId) { mutableLongStateOf(initialSelectedPlaylistId ?: 0L) }
     var selectedPlaylistForAction by remember { mutableStateOf<Playlist?>(null) }
     LaunchedEffect(selectedPlaylistId) {
         onPlaylistSongsVisibleChanged(selectedPlaylistId != 0L)
+    }
+    BackHandler(enabled = selectedPlaylistId != 0L && !isBatchMode) {
+        selectedPlaylistId = 0L
     }
 
     if (selectedPlaylistId == 0L) {
@@ -78,6 +84,11 @@ fun PlaylistTabScreen(
                 onSongLongClick = { song -> onSongLongClick(song, selectedPlaylistId, songs) },
                 isBatchMode = isBatchMode,
                 selectedSongIds = selectedSongIds,
+                queueDisplayBySongId = if (musicUiState.playlistContext == PlaylistContext(PlaylistType.PLAYLIST, selectedPlaylistId.toString())) {
+                    queueDisplayBySongId
+                } else {
+                    emptyMap()
+                },
                 onBatchSongToggle = onBatchSongToggle,
                 modifier = Modifier.fillMaxSize()
             )

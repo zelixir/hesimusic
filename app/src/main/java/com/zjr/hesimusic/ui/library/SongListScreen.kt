@@ -2,6 +2,7 @@ package com.zjr.hesimusic.ui.library
 
 import android.util.Log
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -55,6 +56,7 @@ fun SongListScreen(
     val songs by songsFlow.collectAsState(initial = emptyList())
     val context = LocalContext.current
     val musicUiState by musicViewModel.uiState.collectAsState()
+    val playQueueSongIds by musicViewModel.playQueueSongIds.collectAsState()
     val sleepTimerState by musicViewModel.sleepTimerState.collectAsState()
     val playlists by viewModel.playlists.collectAsState()
     var selectedSongForActions by remember { mutableStateOf<Song?>(null) }
@@ -72,6 +74,16 @@ fun SongListScreen(
             Log.d("SongListScreen", "Playing song at index $index with context: $context")
             musicViewModel.playList(list, index, context)
         }
+    }
+    val currentListContext = when (type) {
+        "artist" -> PlaylistContext(PlaylistType.ARTIST, value)
+        "album" -> PlaylistContext(PlaylistType.ALBUM, value)
+        else -> PlaylistContext.GLOBAL
+    }
+    val isCurrentPlayingList = musicUiState.playlistContext == currentListContext
+    BackHandler(enabled = isBatchMode) {
+        isBatchMode = false
+        batchSelectedSongIds = emptySet()
     }
 
     Scaffold(
@@ -95,6 +107,15 @@ fun SongListScreen(
                         batchSelectedSongIds = if (checked) songs.map { it.id }.toSet() else emptySet()
                     },
                     onAddToPlaylist = { showBatchAddDialog = true },
+                    onAddToQueue = {
+                        val selectedSongs = songs.filter { it.id in batchSelectedSongIds }
+                        if (selectedSongs.isEmpty()) {
+                            Toast.makeText(context, "请先选择歌曲", Toast.LENGTH_SHORT).show()
+                        } else {
+                            musicViewModel.addSongsToPlayQueue(selectedSongs)
+                            Toast.makeText(context, "已加入队列 ${selectedSongs.size} 首歌曲", Toast.LENGTH_SHORT).show()
+                        }
+                    }.takeIf { isCurrentPlayingList },
                     onFavoriteAction = {
                         val selectedSongs = songs.filter { it.id in batchSelectedSongIds }
                         if (selectedSongs.isEmpty()) {
@@ -156,6 +177,7 @@ fun SongListScreen(
                 onSongLongClick = { selectedSongForActions = it },
                 isBatchMode = isBatchMode,
                 selectedSongIds = batchSelectedSongIds,
+                queueDisplayBySongId = if (isCurrentPlayingList) buildQueueDisplayBySongId(playQueueSongIds) else emptyMap(),
                 onBatchSongToggle = { song ->
                     batchSelectedSongIds = if (song.id in batchSelectedSongIds) {
                         batchSelectedSongIds - song.id

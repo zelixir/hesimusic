@@ -17,6 +17,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
@@ -31,6 +32,8 @@ fun MusicListItem(
     icon: ImageVector = Icons.Default.MusicNote,
     isCurrent: Boolean = false,
     index: Int? = null,
+    indexText: String? = null,
+    indexTextColor: Color? = null,
     titleTextStyle: TextStyle = MaterialTheme.typography.bodyLarge,
     subtitleTextStyle: TextStyle = MaterialTheme.typography.bodyMedium,
     onLongClick: (() -> Unit)? = null,
@@ -55,11 +58,14 @@ fun MusicListItem(
                 .fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (index != null) {
+            val resolvedIndexText = indexText ?: index?.toString()
+            if (resolvedIndexText != null) {
                 Text(
-                    text = index.toString(),
+                    text = resolvedIndexText,
                     style = MaterialTheme.typography.bodyLarge,
-                    color = subtitleColor,
+                    color = indexTextColor ?: subtitleColor,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.width(40.dp)
                 )
             }
