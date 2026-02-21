@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.activity.compose.BackHandler
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -47,6 +48,9 @@ fun PlaylistTabScreen(
     var selectedPlaylistForAction by remember { mutableStateOf<Playlist?>(null) }
     LaunchedEffect(selectedPlaylistId) {
         onPlaylistSongsVisibleChanged(selectedPlaylistId != 0L)
+    }
+    BackHandler(enabled = selectedPlaylistId != 0L && !isBatchMode) {
+        selectedPlaylistId = 0L
     }
 
     if (selectedPlaylistId == 0L) {

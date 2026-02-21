@@ -2,6 +2,7 @@ package com.zjr.hesimusic.ui.library
 
 import android.util.Log
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -80,6 +81,10 @@ fun SongListScreen(
         else -> PlaylistContext.GLOBAL
     }
     val isCurrentPlayingList = musicUiState.playlistContext == currentListContext
+    BackHandler(enabled = isBatchMode) {
+        isBatchMode = false
+        batchSelectedSongIds = emptySet()
+    }
 
     Scaffold(
         topBar = {

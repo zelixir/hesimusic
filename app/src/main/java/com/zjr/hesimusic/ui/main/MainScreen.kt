@@ -130,6 +130,10 @@ fun MainScreen(
         batchFavoriteActionText = "加入收藏"
     }
 
+    BackHandler(enabled = isBatchMode) {
+        exitBatchMode()
+    }
+
     LaunchedEffect(pagerState.currentPage) {
         if (isBatchMode && batchModeTabIndex != pagerState.currentPage) {
             exitBatchMode()
