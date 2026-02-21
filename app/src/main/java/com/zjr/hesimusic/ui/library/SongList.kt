@@ -85,7 +85,7 @@ fun SongList(
         appLogger?.timing(TAG, "Song flattening", flattenDuration)
         result
     }
-    var hasAutoScrolledToCurrentSong by remember { mutableStateOf(false) }
+    var hasAutoScrolledToCurrentSong = remember { mutableStateOf(false) }
 
     // Calculate the starting index for each group for display
     val groupStartingIndices = remember(grouped) {
@@ -114,7 +114,7 @@ fun SongList(
     // Auto-scroll to currently playing song once when list is ready.
     // Also listens to currentPlayingSongId so late restore after startup can still scroll.
     LaunchedEffect(grouped, currentPlayingSongId) {
-        if (shouldAutoScrollToCurrentSong(hasAutoScrolledToCurrentSong, currentPlayingSongId, grouped)) {
+        if (shouldAutoScrollToCurrentSong(hasAutoScrolledToCurrentSong.value, currentPlayingSongId, grouped)) {
             // Find the song in the flattened list
             // Note: MediaItem.mediaId is set as song.id.toString() in SongMapper.toMediaItem()
             val currentSong = flattenedSongs.find { it.id.toString() == currentPlayingSongId }
@@ -125,7 +125,7 @@ fun SongList(
                 if (scrollIndex != null) {
                     // Scroll to the item instantly (no animation), centered if possible
                     listState.scrollToItem(scrollIndex, scrollOffset = SCROLL_OFFSET_TO_CENTER_ITEM)
-                    hasAutoScrolledToCurrentSong = true
+                    hasAutoScrolledToCurrentSong.value = true
                     Log.d(TAG, "Auto-scrolled to current song at index $scrollIndex")
                 }
             }
