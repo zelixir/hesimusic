@@ -21,11 +21,20 @@ class ScanRepository @Inject constructor(
 ) {
     fun scanAndSave(
         scanFolders: Set<String> = emptySet(),
-        excludedFolders: Set<String> = emptySet()
+        excludedFolders: Set<String> = emptySet(),
+        skipShortSongs: Boolean = false,
+        skipAmrMid: Boolean = false,
+        skipHiddenFolders: Boolean = false
     ): Flow<ScanStatus> = flow {
         emit(ScanStatus.Scanning("Starting...", 0))
         try {
-            val songs = fileScanner.scan(scanFolders, excludedFolders) { path, count ->
+            val songs = fileScanner.scan(
+                scanFolders = scanFolders,
+                excludedFolders = excludedFolders,
+                skipShortSongs = skipShortSongs,
+                skipAmrMid = skipAmrMid,
+                skipHiddenFolders = skipHiddenFolders
+            ) { path, count ->
                 emit(ScanStatus.Scanning(path, count))
             }
             emit(ScanStatus.Scanning("Saving to database...", songs.size))
