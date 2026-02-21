@@ -19,6 +19,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.ui.common.FastScrollbar
@@ -27,6 +28,7 @@ import com.zjr.hesimusic.utils.AlphabetIndexer
 import com.zjr.hesimusic.utils.AppLogger
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import kotlinx.coroutines.launch
 
 /**
@@ -36,6 +38,7 @@ import kotlinx.coroutines.launch
 private const val SCROLL_OFFSET_TO_CENTER_ITEM = -200
 private const val TAG = "SongList"
 private const val BATCH_SELECTED_PREFIX = "✓ "
+private const val QUEUE_DISPLAY_MAX_CHARS_PER_LINE = 4
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -47,6 +50,7 @@ fun SongList(
     isBatchMode: Boolean = false,
     selectedSongIds: Set<Long> = emptySet(),
     onBatchSongToggle: ((Song) -> Unit)? = null,
+    queueDisplayBySongId: Map<Long, String> = emptyMap(),
     modifier: Modifier = Modifier,
     appLogger: AppLogger? = null
 ) {
@@ -84,6 +88,7 @@ fun SongList(
         appLogger?.timing(TAG, "Song flattening", flattenDuration)
         result
     }
+    var hasAutoScrolledToCurrentSong = remember { mutableStateOf(false) }
 
     // Calculate the starting index for each group for display
     val groupStartingIndices = remember(grouped) {
@@ -109,11 +114,10 @@ fun SongList(
 
     val sections = remember(grouped) { grouped.keys.toList() }
 
-    // Auto-scroll to currently playing song when list initializes or when search closes
-    // Only triggers when grouped changes (not when currentPlayingSongId changes)
-    // to avoid scrolling when user manually switches songs
-    LaunchedEffect(grouped) {
-        if (currentPlayingSongId != null && grouped.isNotEmpty()) {
+    // Auto-scroll to currently playing song once when list is ready.
+    // Also listens to currentPlayingSongId so late restore after startup can still scroll.
+    LaunchedEffect(grouped, currentPlayingSongId) {
+        if (shouldAutoScrollToCurrentSong(hasAutoScrolledToCurrentSong.value, currentPlayingSongId, grouped)) {
             // Find the song in the flattened list
             // Note: MediaItem.mediaId is set as song.id.toString() in SongMapper.toMediaItem()
             val currentSong = flattenedSongs.find { it.id.toString() == currentPlayingSongId }
@@ -124,6 +128,7 @@ fun SongList(
                 if (scrollIndex != null) {
                     // Scroll to the item instantly (no animation), centered if possible
                     listState.scrollToItem(scrollIndex, scrollOffset = SCROLL_OFFSET_TO_CENTER_ITEM)
+                    hasAutoScrolledToCurrentSong.value = true
                     Log.d(TAG, "Auto-scrolled to current song at index $scrollIndex")
                 }
             }
@@ -156,11 +161,14 @@ fun SongList(
                 ) { index, song ->
                     val globalIndex = (groupStartingIndices[initial] ?: 0) + index + 1
                     val isSelectedInBatch = song.id in selectedSongIds
+                    val queueDisplay = queueDisplayBySongId[song.id]
                     MusicListItem(
                         title = if (isBatchMode && isSelectedInBatch) "$BATCH_SELECTED_PREFIX${song.title}" else song.title,
                         subtitle = "${song.artist} - ${song.album}",
                         isCurrent = if (isBatchMode) isSelectedInBatch else song.id.toString() == currentPlayingSongId,
                         index = if (isBatchMode) null else globalIndex,
+                        indexText = if (isBatchMode) null else queueDisplay,
+                        indexTextColor = if (queueDisplay != null) Color.Red else null,
                         onClick = { 
                             if (isBatchMode) {
                                 onBatchSongToggle?.invoke(song)
@@ -193,6 +201,26 @@ fun SongList(
     }
 }
 
+internal fun buildQueueDisplayBySongId(queueSongIds: List<Long>): Map<Long, String> {
+    if (queueSongIds.isEmpty()) return emptyMap()
+    val positionsBySongId = linkedMapOf<Long, MutableList<Int>>()
+    queueSongIds.forEachIndexed { index, songId ->
+        positionsBySongId.getOrPut(songId) { mutableListOf() }.add(index + 1)
+    }
+    return positionsBySongId.mapValues { (_, positions) ->
+        formatQueuePositionsForDisplay(positions)
+    }
+}
+
+internal fun formatQueuePositionsForDisplay(positions: List<Int>): String {
+    if (positions.isEmpty()) return ""
+    val raw = positions.joinToString(",")
+    if (raw.length <= QUEUE_DISPLAY_MAX_CHARS_PER_LINE) return raw
+    val firstLine = raw.take(QUEUE_DISPLAY_MAX_CHARS_PER_LINE)
+    val secondLine = raw.drop(QUEUE_DISPLAY_MAX_CHARS_PER_LINE).take(QUEUE_DISPLAY_MAX_CHARS_PER_LINE)
+    return if (secondLine.isEmpty()) firstLine else "$firstLine\n$secondLine"
+}
+
 /**
  * Calculates the scroll index for a song in a grouped LazyColumn.
  * Accounts for sticky headers (1 per group) and items within each group.
@@ -210,4 +238,12 @@ private fun calculateScrollIndex(grouped: Map<Char, List<Song>>, targetSong: Son
         scrollIndex += 1 + songsInGroup.size
     }
     return null
+}
+
+internal fun shouldAutoScrollToCurrentSong(
+    hasAutoScrolledToCurrentSong: Boolean,
+    currentPlayingSongId: String?,
+    grouped: Map<Char, List<Song>>
+): Boolean {
+    return !hasAutoScrolledToCurrentSong && currentPlayingSongId != null && grouped.isNotEmpty()
 }

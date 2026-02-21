@@ -33,7 +33,10 @@ class ScanViewModel @Inject constructor(
     private fun loadFolderSettings() {
         _uiState.value = _uiState.value.copy(
             scanFolders = scanPreferences.getScanFolders(),
-            excludedFolders = scanPreferences.getExcludedFolders()
+            excludedFolders = scanPreferences.getExcludedFolders(),
+            skipShortSongs = scanPreferences.getSkipShortSongs(),
+            skipAmrMid = scanPreferences.getSkipAmrMid(),
+            skipHiddenFolders = scanPreferences.getSkipHiddenFolders()
         )
     }
 
@@ -45,6 +48,21 @@ class ScanViewModel @Inject constructor(
     fun updateExcludedFolders(folders: Set<String>) {
         scanPreferences.saveExcludedFolders(folders)
         _uiState.value = _uiState.value.copy(excludedFolders = folders)
+    }
+
+    fun updateSkipShortSongs(enabled: Boolean) {
+        scanPreferences.saveSkipShortSongs(enabled)
+        _uiState.value = _uiState.value.copy(skipShortSongs = enabled)
+    }
+
+    fun updateSkipAmrMid(enabled: Boolean) {
+        scanPreferences.saveSkipAmrMid(enabled)
+        _uiState.value = _uiState.value.copy(skipAmrMid = enabled)
+    }
+
+    fun updateSkipHiddenFolders(enabled: Boolean) {
+        scanPreferences.saveSkipHiddenFolders(enabled)
+        _uiState.value = _uiState.value.copy(skipHiddenFolders = enabled)
     }
 
     fun startScan() {
@@ -66,9 +84,18 @@ class ScanViewModel @Inject constructor(
         startTimer()
 
         val excludedFolders = _uiState.value.excludedFolders
+        val skipShortSongs = _uiState.value.skipShortSongs
+        val skipAmrMid = _uiState.value.skipAmrMid
+        val skipHiddenFolders = _uiState.value.skipHiddenFolders
 
         viewModelScope.launch {
-            repository.scanAndSave(scanFolders, excludedFolders).collect { status ->
+            repository.scanAndSave(
+                scanFolders = scanFolders,
+                excludedFolders = excludedFolders,
+                skipShortSongs = skipShortSongs,
+                skipAmrMid = skipAmrMid,
+                skipHiddenFolders = skipHiddenFolders
+            ).collect { status ->
                 when (status) {
                     is ScanStatus.Idle -> {
                         // Should not happen during scan
@@ -135,5 +162,8 @@ data class ScanUiState(
     val currentPath: String = "",
     val elapsedTimeMs: Long = 0,
     val scanFolders: Set<String> = emptySet(),
-    val excludedFolders: Set<String> = emptySet()
+    val excludedFolders: Set<String> = emptySet(),
+    val skipShortSongs: Boolean = false,
+    val skipAmrMid: Boolean = false,
+    val skipHiddenFolders: Boolean = false
 )

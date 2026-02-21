@@ -7,16 +7,22 @@ import com.zjr.hesimusic.utils.AppLogger
 import java.io.File
 import javax.inject.Inject
 
+private const val MIN_SCAN_DURATION_MS = 60_000L
+
 class FileScanner @Inject constructor(
     private val cueParser: CueParser,
     private val tagLibHelper: TagLibHelper,
     private val appLogger: AppLogger
 ) {
     private val supportedExtensions = setOf("mp3", "flac", "wav", "m4a", "aac", "ogg")
+    private val amrMidExtensions = setOf("amr", "mid")
 
     suspend fun scan(
         scanFolders: Set<String> = emptySet(),
         excludedFolders: Set<String> = emptySet(),
+        skipShortSongs: Boolean = false,
+        skipAmrMid: Boolean = false,
+        skipHiddenFolders: Boolean = false,
         onProgress: suspend (String, Int) -> Unit
     ): List<Song> {
         val startTime = System.currentTimeMillis()
@@ -36,7 +42,16 @@ class FileScanner @Inject constructor(
         val audioFiles = mutableListOf<File>()
 
         for (rootDir in rootDirectories) {
-            scanDirectory(rootDir, cueFiles, audioFiles, songs.size, excludedFolders, onProgress)
+            scanDirectory(
+                rootDir,
+                cueFiles,
+                audioFiles,
+                songs.size,
+                excludedFolders,
+                skipAmrMid,
+                skipHiddenFolders,
+                onProgress
+            )
         }
 
         // 2. Process CUE files
@@ -62,7 +77,7 @@ class FileScanner @Inject constructor(
                             val nextTrack = fileTracks.getOrNull(index + 1)
                             val endMs = nextTrack?.startMs ?: -1L // -1 means end of file
 
-                            songs.add(Song(
+                            val song = Song(
                                 title = track.title,
                                 artist = track.performer,
                                 album = track.album,
@@ -78,8 +93,11 @@ class FileScanner @Inject constructor(
                                 endPosition = endMs,
                                 titleInitial = AlphabetIndexer.getInitial(track.title).toString(),
                                 folderPath = audioFile.parent ?: ""
-                            ))
-                            onProgress(cueFile.parent ?: cueFile.absolutePath, songs.size)
+                            )
+                            if (!shouldSkipByDuration(song.duration, skipShortSongs)) {
+                                songs.add(song)
+                                onProgress(cueFile.parent ?: cueFile.absolutePath, songs.size)
+                            }
                         }
                     }
                 }
@@ -100,7 +118,7 @@ class FileScanner @Inject constructor(
                         val duration = metadata["DURATION"]?.toDoubleOrNull()?.toLong() ?: 0L // TagLib returns ms as string from double? No, I cast to long in C++ but let's be safe. C++ code: std::to_string(properties->length() * 1000) which is int/long.
                         val finalTitle = title.ifEmpty { file.nameWithoutExtension }
 
-                        songs.add(Song(
+                        val song = Song(
                             title = finalTitle,
                             artist = artist.ifEmpty { "Unknown Artist" },
                             album = album.ifEmpty { "Unknown Album" },
@@ -114,10 +132,13 @@ class FileScanner @Inject constructor(
                             dateAdded = file.lastModified(),
                             titleInitial = AlphabetIndexer.getInitial(finalTitle).toString(),
                             folderPath = file.parent ?: ""
-                        ))
+                        )
+                        if (!shouldSkipByDuration(song.duration, skipShortSongs)) {
+                            songs.add(song)
+                        }
                     } else {
                          val fallbackTitle = file.nameWithoutExtension
-                         songs.add(Song(
+                         val song = Song(
                             title = fallbackTitle,
                             artist = "Unknown Artist",
                             album = "Unknown Album",
@@ -129,7 +150,10 @@ class FileScanner @Inject constructor(
                             dateAdded = file.lastModified(),
                             titleInitial = AlphabetIndexer.getInitial(fallbackTitle).toString(),
                             folderPath = file.parent ?: ""
-                        ))
+                        )
+                        if (!shouldSkipByDuration(song.duration, skipShortSongs)) {
+                            songs.add(song)
+                        }
                     }
                     onProgress(file.parent ?: file.absolutePath, songs.size)
                 } catch (e: Exception) {
@@ -151,6 +175,8 @@ class FileScanner @Inject constructor(
         audioFiles: MutableList<File>,
         currentSongCount: Int,
         excludedFolders: Set<String>,
+        skipAmrMid: Boolean,
+        skipHiddenFolders: Boolean,
         onProgress: suspend (String, Int) -> Unit
     ) {
         val files = dir.listFiles() ?: return
@@ -163,18 +189,22 @@ class FileScanner @Inject constructor(
                 }
                 
                 val shouldEnter = !isExcluded &&
+                    !shouldSkipHiddenFolder(file, skipHiddenFolders) &&
                     !file.path.contains("/Recordings/", ignoreCase = true) && 
                     !file.path.contains("/sound_recorder/")
                     
                 if (shouldEnter) {
                     onProgress(file.absolutePath, currentSongCount)
-                    scanDirectory(file, cueFiles, audioFiles, currentSongCount, excludedFolders, onProgress)
+                    scanDirectory(file, cueFiles, audioFiles, currentSongCount, excludedFolders, skipAmrMid, skipHiddenFolders, onProgress)
                 }
             } else {
                 val ext = file.extension.lowercase()
                 if (ext == "cue") {
                     cueFiles.add(file)
-                } else if (supportedExtensions.contains(ext)) {
+                } else if (
+                    supportedExtensions.contains(ext) ||
+                    shouldIncludeAmrMid(ext, skipAmrMid)
+                ) {
                     audioFiles.add(file)
                 }
             }
@@ -189,4 +219,16 @@ class FileScanner @Inject constructor(
         }
         return res.trim()
     }
+}
+
+internal fun shouldSkipByDuration(durationMs: Long, skipShortSongs: Boolean): Boolean {
+    return skipShortSongs && durationMs in 0 until MIN_SCAN_DURATION_MS
+}
+
+internal fun shouldIncludeAmrMid(extension: String, skipAmrMid: Boolean): Boolean {
+    return !skipAmrMid && (extension == "amr" || extension == "mid")
+}
+
+internal fun shouldSkipHiddenFolder(folder: File, skipHiddenFolders: Boolean): Boolean {
+    return skipHiddenFolders && (folder.isHidden || folder.name.startsWith("."))
 }

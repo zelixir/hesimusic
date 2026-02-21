@@ -15,6 +15,9 @@ class ScanPreferences @Inject constructor(
     companion object {
         private const val KEY_SCAN_FOLDERS = "scan_folders"
         private const val KEY_EXCLUDED_FOLDERS = "excluded_folders"
+        private const val KEY_SKIP_SHORT_SONGS = "skip_short_songs"
+        private const val KEY_SKIP_AMR_MID = "skip_amr_mid"
+        private const val KEY_SKIP_HIDDEN_FOLDERS = "skip_hidden_folders"
     }
 
     fun saveScanFolders(folders: Set<String>) {
@@ -31,6 +34,30 @@ class ScanPreferences @Inject constructor(
 
     fun getExcludedFolders(): Set<String> {
         return prefs.getStringSet(KEY_EXCLUDED_FOLDERS, emptySet()) ?: emptySet()
+    }
+
+    fun saveSkipShortSongs(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_SKIP_SHORT_SONGS, enabled).apply()
+    }
+
+    fun getSkipShortSongs(): Boolean {
+        return prefs.getBoolean(KEY_SKIP_SHORT_SONGS, false)
+    }
+
+    fun saveSkipAmrMid(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_SKIP_AMR_MID, enabled).apply()
+    }
+
+    fun getSkipAmrMid(): Boolean {
+        return prefs.getBoolean(KEY_SKIP_AMR_MID, false)
+    }
+
+    fun saveSkipHiddenFolders(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_SKIP_HIDDEN_FOLDERS, enabled).apply()
+    }
+
+    fun getSkipHiddenFolders(): Boolean {
+        return prefs.getBoolean(KEY_SKIP_HIDDEN_FOLDERS, false)
     }
 
     fun addScanFolder(folder: String) {

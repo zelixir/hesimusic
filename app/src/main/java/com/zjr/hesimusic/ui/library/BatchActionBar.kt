@@ -1,11 +1,13 @@
 package com.zjr.hesimusic.ui.library
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.Alignment
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
@@ -27,10 +29,12 @@ fun BatchActionBar(
     allSelected: Boolean,
     onSelectAllChange: (Boolean) -> Unit,
     onAddToPlaylist: () -> Unit,
+    onAddToQueue: (() -> Unit)? = null,
     onFavoriteAction: () -> Unit,
     onExit: () -> Unit,
     onRemoveFromPlaylist: (() -> Unit)? = null
 ) {
+    val scrollState = rememberScrollState()
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -41,8 +45,9 @@ fun BatchActionBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .horizontalScroll(scrollState)
                 .padding(horizontal = 8.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(
@@ -63,6 +68,11 @@ fun BatchActionBar(
             }
             TextButton(onClick = onAddToPlaylist) {
                 Text("加入歌单")
+            }
+            if (onAddToQueue != null) {
+                TextButton(onClick = onAddToQueue) {
+                    Text("加入队列")
+                }
             }
             TextButton(onClick = onFavoriteAction) {
                 Text(favoriteActionText)
