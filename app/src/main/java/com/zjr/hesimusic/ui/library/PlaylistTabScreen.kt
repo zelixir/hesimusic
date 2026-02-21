@@ -19,6 +19,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -44,7 +45,9 @@ fun PlaylistTabScreen(
 ) {
     val musicUiState by musicViewModel.uiState.collectAsState()
     val playlists by viewModel.playlists.collectAsState()
-    var selectedPlaylistId by remember(initialSelectedPlaylistId) { mutableLongStateOf(initialSelectedPlaylistId ?: 0L) }
+    var selectedPlaylistId by rememberSaveable(initialSelectedPlaylistId) {
+        mutableLongStateOf(initialSelectedPlaylistId ?: 0L)
+    }
     var selectedPlaylistForAction by remember { mutableStateOf<Playlist?>(null) }
     LaunchedEffect(selectedPlaylistId) {
         onPlaylistSongsVisibleChanged(selectedPlaylistId != 0L)
