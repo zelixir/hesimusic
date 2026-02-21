@@ -27,6 +27,7 @@ import com.zjr.hesimusic.utils.AlphabetIndexer
 import com.zjr.hesimusic.utils.AppLogger
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import kotlinx.coroutines.launch
 
 /**
@@ -84,6 +85,7 @@ fun SongList(
         appLogger?.timing(TAG, "Song flattening", flattenDuration)
         result
     }
+    var hasAutoScrolledToCurrentSong by remember(grouped) { mutableStateOf(false) }
 
     // Calculate the starting index for each group for display
     val groupStartingIndices = remember(grouped) {
@@ -109,11 +111,10 @@ fun SongList(
 
     val sections = remember(grouped) { grouped.keys.toList() }
 
-    // Auto-scroll to currently playing song when list initializes or when search closes
-    // Only triggers when grouped changes (not when currentPlayingSongId changes)
-    // to avoid scrolling when user manually switches songs
-    LaunchedEffect(grouped) {
-        if (currentPlayingSongId != null && grouped.isNotEmpty()) {
+    // Auto-scroll to currently playing song once when list is ready.
+    // Also listens to currentPlayingSongId so late restore after startup can still scroll.
+    LaunchedEffect(grouped, currentPlayingSongId) {
+        if (shouldAutoScrollToCurrentSong(hasAutoScrolledToCurrentSong, currentPlayingSongId, grouped)) {
             // Find the song in the flattened list
             // Note: MediaItem.mediaId is set as song.id.toString() in SongMapper.toMediaItem()
             val currentSong = flattenedSongs.find { it.id.toString() == currentPlayingSongId }
@@ -124,6 +125,7 @@ fun SongList(
                 if (scrollIndex != null) {
                     // Scroll to the item instantly (no animation), centered if possible
                     listState.scrollToItem(scrollIndex, scrollOffset = SCROLL_OFFSET_TO_CENTER_ITEM)
+                    hasAutoScrolledToCurrentSong = true
                     Log.d(TAG, "Auto-scrolled to current song at index $scrollIndex")
                 }
             }
@@ -210,4 +212,12 @@ private fun calculateScrollIndex(grouped: Map<Char, List<Song>>, targetSong: Son
         scrollIndex += 1 + songsInGroup.size
     }
     return null
+}
+
+internal fun shouldAutoScrollToCurrentSong(
+    hasAutoScrolledToCurrentSong: Boolean,
+    currentPlayingSongId: String?,
+    grouped: Map<Char, List<Song>>
+): Boolean {
+    return !hasAutoScrolledToCurrentSong && currentPlayingSongId != null && grouped.isNotEmpty()
 }
