@@ -5,12 +5,18 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -34,11 +40,16 @@ import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
 import com.zjr.hesimusic.data.preferences.resolveDarkTheme
 import com.zjr.hesimusic.utils.AppLogger
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.delay
 
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import javax.inject.Inject
+
+private const val STARTUP_IMAGE_DISPLAY_DURATION_MILLIS = 1200L
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
@@ -68,11 +79,33 @@ class MainActivity : ComponentActivity() {
         setContent {
             val appThemeMode by playbackPreferences.appThemeModeFlow.collectAsState()
             val appThemePalette by playbackPreferences.appThemePaletteFlow.collectAsState()
+            val customThemeColor by playbackPreferences.customThemeColorFlow.collectAsState()
+            val startupImageUri by playbackPreferences.startupImageUriFlow.collectAsState()
             val isSystemDarkTheme = isSystemInDarkTheme()
             HesimusicTheme(
                 darkTheme = resolveDarkTheme(appThemeMode, isSystemDarkTheme),
-                palette = appThemePalette
+                palette = appThemePalette,
+                customColor = customThemeColor
             ) {
+                var hasShownStartup by rememberSaveable { mutableStateOf(false) }
+                if (!hasShownStartup && !startupImageUri.isNullOrBlank()) {
+                    LaunchedEffect(startupImageUri) {
+                        delay(STARTUP_IMAGE_DISPLAY_DURATION_MILLIS)
+                        hasShownStartup = true
+                    }
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        AsyncImage(
+                            model = ImageRequest.Builder(this@MainActivity)
+                                .data(startupImageUri)
+                                .crossfade(true)
+                                .build(),
+                            contentDescription = stringResource(R.string.settings_startup_image_title),
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    }
+                    return@HesimusicTheme
+                }
                 val navController = rememberNavController()
                 
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->

@@ -24,4 +24,10 @@ class AppThemeModeTest {
         assertEquals(AppThemePalette.BLUE, parseAppThemePalette(null))
         assertEquals(AppThemePalette.BLUE, parseAppThemePalette("UNKNOWN"))
     }
+
+    @Test
+    fun `parseCustomThemeColor returns default when value is zero`() {
+        assertEquals(0xFF1A8DCE.toInt(), parseCustomThemeColor(0))
+        assertEquals(0xFF123456.toInt(), parseCustomThemeColor(0xFF123456.toInt()))
+    }
 }

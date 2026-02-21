@@ -17,6 +17,9 @@ class SettingsViewModel @Inject constructor(
     val showMediaNotification: StateFlow<Boolean> = playbackPreferences.showMediaNotificationFlow
     val appThemeMode: StateFlow<AppThemeMode> = playbackPreferences.appThemeModeFlow
     val appThemePalette: StateFlow<AppThemePalette> = playbackPreferences.appThemePaletteFlow
+    val customThemeColor: StateFlow<Int> = playbackPreferences.customThemeColorFlow
+    val startupImageUri: StateFlow<String?> = playbackPreferences.startupImageUriFlow
+    val listBackgroundImageUri: StateFlow<String?> = playbackPreferences.listBackgroundImageUriFlow
 
     fun updateMinAlbumTrackCount(value: Int) {
         playbackPreferences.saveMinAlbumTrackCount(value)
@@ -36,5 +39,17 @@ class SettingsViewModel @Inject constructor(
 
     fun updateAppThemePalette(value: AppThemePalette) {
         playbackPreferences.saveAppThemePalette(value)
+    }
+
+    fun updateCustomThemeColor(value: Int) {
+        playbackPreferences.saveCustomThemeColor(value)
+    }
+
+    fun updateStartupImageUri(value: String?) {
+        playbackPreferences.saveStartupImageUri(value)
+    }
+
+    fun updateListBackgroundImageUri(value: String?) {
+        playbackPreferences.saveListBackgroundImageUri(value)
     }
 }
