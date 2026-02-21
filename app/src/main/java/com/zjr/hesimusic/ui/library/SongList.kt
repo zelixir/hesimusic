@@ -85,7 +85,7 @@ fun SongList(
         appLogger?.timing(TAG, "Song flattening", flattenDuration)
         result
     }
-    var hasAutoScrolledToCurrentSong by remember(grouped) { mutableStateOf(false) }
+    var hasAutoScrolledToCurrentSong by remember { mutableStateOf(false) }
 
     // Calculate the starting index for each group for display
     val groupStartingIndices = remember(grouped) {
