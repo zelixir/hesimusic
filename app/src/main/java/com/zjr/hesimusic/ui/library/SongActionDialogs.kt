@@ -41,7 +41,8 @@ fun SongActionHost(
     onBatchManage: (Song) -> Unit,
     onHideSong: (Song) -> Unit,
     onDeleteSong: (Song, (Boolean) -> Unit) -> Unit,
-    onLoadMetadata: (Song, (Map<String, String>) -> Unit) -> Unit
+    onLoadMetadata: (Song, (Map<String, String>) -> Unit) -> Unit,
+    onAddToQueue: ((Song) -> Unit)? = null
 ) {
     val context = LocalContext.current
     var showAddDialog by remember(selectedSong) { mutableStateOf(false) }
@@ -57,6 +58,21 @@ fun SongActionHost(
             title = { Text(selectedSong.title) },
             text = {
                 Column {
+                    if (onAddToQueue != null) {
+                        Text(
+                            text = "加入播放队列",
+                            style = menuTextStyle,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onAddToQueue(selectedSong)
+                                    Toast.makeText(context, "已加入播放队列", Toast.LENGTH_SHORT).show()
+                                    onDismiss()
+                                }
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                    }
                     Text(
                         text = "添加到歌单",
                         style = menuTextStyle,
