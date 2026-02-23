@@ -101,6 +101,7 @@ fun MainScreen(
     val focusRequester = remember { FocusRequester() }
     val playlists by viewModel.playlists.collectAsState()
     var selectedSongForActions by remember { mutableStateOf<Song?>(null) }
+    var selectedSongPlaylistContext by remember { mutableStateOf<PlaylistContext?>(null) }
     var batchModeSongs by remember { mutableStateOf<List<Song>>(emptyList()) }
     var batchModePlaylistId by remember { mutableStateOf<Long?>(null) }
     var isBatchMode by remember { mutableStateOf(false) }
@@ -375,6 +376,7 @@ fun MainScreen(
                             },
                             onSongLongClick = {
                                 selectedSongForActions = it
+                                selectedSongPlaylistContext = PlaylistContext.GLOBAL
                                 batchModeSongs = songs
                                 batchModePlaylistId = null
                                 batchFavoriteActionText = favoriteActionTextForTab(0)
@@ -404,6 +406,7 @@ fun MainScreen(
                             initialSelectedPlaylistId = restoredPlaylistId,
                             onSongLongClick = { song, playlistId, songs ->
                                 selectedSongForActions = song
+                                selectedSongPlaylistContext = PlaylistContext(PlaylistType.PLAYLIST, playlistId.toString())
                                 batchModeSongs = songs
                                 batchModePlaylistId = playlistId
                                 batchFavoriteActionText = favoriteActionTextForTab(1)
@@ -434,6 +437,7 @@ fun MainScreen(
                             },
                             onSongLongClick = {
                                 selectedSongForActions = it
+                                selectedSongPlaylistContext = PlaylistContext.FAVORITES
                                 batchModeSongs = favoriteSongs
                                 batchModePlaylistId = null
                                 batchFavoriteActionText = favoriteActionTextForTab(2)
@@ -498,7 +502,10 @@ fun MainScreen(
                 },
                 onHideSong = { song -> viewModel.hideSong(song) },
                 onDeleteSong = { song, onResult -> viewModel.deleteSongFile(song, onResult) },
-                onLoadMetadata = { song, onLoaded -> viewModel.loadSongMetadata(song, onLoaded) }
+                onLoadMetadata = { song, onLoaded -> viewModel.loadSongMetadata(song, onLoaded) },
+                onAddToQueue = if (selectedSongPlaylistContext == musicUiState.playlistContext) { song ->
+                    musicViewModel.addSongsToPlayQueue(listOf(song))
+                } else null
             )
             if (showBatchAddDialog) {
                 AddToPlaylistDialog(

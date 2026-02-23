@@ -203,7 +203,10 @@ fun SongListScreen(
                 },
                 onHideSong = { song -> viewModel.hideSong(song) },
                 onDeleteSong = { song, onResult -> viewModel.deleteSongFile(song, onResult) },
-                onLoadMetadata = { song, onLoaded -> viewModel.loadSongMetadata(song, onLoaded) }
+                onLoadMetadata = { song, onLoaded -> viewModel.loadSongMetadata(song, onLoaded) },
+                onAddToQueue = if (isCurrentPlayingList) { song ->
+                    musicViewModel.addSongsToPlayQueue(listOf(song))
+                } else null
             )
             if (showBatchAddDialog) {
                 AddToPlaylistDialog(
