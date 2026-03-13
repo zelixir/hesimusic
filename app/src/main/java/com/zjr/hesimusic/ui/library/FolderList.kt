@@ -17,6 +17,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -41,7 +42,7 @@ fun FolderList(
     onSongClick: (List<Song>, Int, String) -> Unit,
     appLogger: AppLogger? = null
 ) {
-    var currentPath by remember(initialPath, startPath) { mutableStateOf(startPath ?: initialPath) }
+    var currentPath by rememberSaveable(initialPath, startPath) { mutableStateOf(startPath ?: initialPath) }
     val items by viewModel.getFolderContents(currentPath).collectAsState(initial = emptyList())
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()

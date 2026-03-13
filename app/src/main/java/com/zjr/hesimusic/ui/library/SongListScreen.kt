@@ -42,6 +42,7 @@ fun SongListScreen(
     settingsViewModel: SettingsViewModel = hiltViewModel(),
     onBack: () -> Unit,
     onSongClick: (Song) -> Unit,
+    onPlayerClick: () -> Unit,
     onScanClick: () -> Unit,
     onBackupRestoreClick: () -> Unit,
     onSettingsClick: () -> Unit,
@@ -160,7 +161,7 @@ fun SongListScreen(
                         musicViewModel.setShuffleModeEnabled(newShuffle)
                         musicViewModel.setRepeatMode(newRepeat)
                     },
-                    onClick = { /* TODO: Navigate to player if needed, or just expand */ },
+                    onClick = onPlayerClick,
                     onScanClick = onScanClick,
                     onBackupRestoreClick = onBackupRestoreClick,
                     onSettingsClick = onSettingsClick,
