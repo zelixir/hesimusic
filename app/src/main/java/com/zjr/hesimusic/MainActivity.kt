@@ -216,6 +216,7 @@ class MainActivity : ComponentActivity() {
                                 value = value,
                                 onBack = { navController.popBackStack() },
                                 onSongClick = { /* TODO: Play */ },
+                                onPlayerClick = { navController.navigate("player") },
                                 onScanClick = { navController.navigate("scan") },
                                 onBackupRestoreClick = { navController.navigate("backup_restore") },
                                 onSettingsClick = { navController.navigate("settings") },
