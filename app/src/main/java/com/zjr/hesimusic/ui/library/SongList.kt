@@ -172,7 +172,7 @@ fun SongList(
                         onClick = {
                             if (isBatchMode) {
                                 onBatchSongToggle?.invoke(song)
-                            } else if (index != -1) {
+                            } else {
                                 onSongClick(flattenedSongs, index)
                             }
                         },
@@ -213,9 +213,9 @@ fun SongList(
                                 if (isBatchMode) {
                                     onBatchSongToggle?.invoke(song)
                                 } else {
-                                    val flattenedIndex = flattenedSongs.indexOf(song)
-                                    if (flattenedIndex != -1) {
-                                        onSongClick(flattenedSongs, flattenedIndex)
+                                    val songIndex = flattenedSongs.indexOf(song)
+                                    if (songIndex != -1) {
+                                        onSongClick(flattenedSongs, songIndex)
                                     }
                                 }
                             },
