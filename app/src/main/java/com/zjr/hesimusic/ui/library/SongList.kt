@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.MaterialTheme
@@ -47,6 +46,7 @@ fun SongList(
     currentPlayingSongId: String? = null,
     onSongClick: (List<Song>, Int) -> Unit,
     onSongLongClick: ((Song) -> Unit)? = null,
+    preferTrackNumberOrdering: Boolean = false,
     isBatchMode: Boolean = false,
     selectedSongIds: Set<Long> = emptySet(),
     onBatchSongToggle: ((Song) -> Unit)? = null,
@@ -56,16 +56,26 @@ fun SongList(
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val useTrackNumberOrdering = remember(songs, preferTrackNumberOrdering) {
+        shouldUseTrackNumberOrdering(preferTrackNumberOrdering, songs)
+    }
 
     // Log list size for performance tracking
-    LaunchedEffect(songs.size) {
+    LaunchedEffect(songs.size, useTrackNumberOrdering) {
         Log.d(TAG, "SongList rendering with ${songs.size} songs")
         appLogger?.info(TAG, "SongList rendering with ${songs.size} songs")
     }
 
+    val trackOrderedSongs = remember(songs, useTrackNumberOrdering) {
+        if (useTrackNumberOrdering) orderSongsByTrackNumber(songs) else emptyList()
+    }
+
     // Synchronous grouping to avoid initial empty state
-    val grouped by remember(songs) {
+    val grouped by remember(songs, useTrackNumberOrdering) {
         derivedStateOf {
+            if (useTrackNumberOrdering) {
+                return@derivedStateOf sortedMapOf<Char, List<Song>>()
+            }
             val groupingStartTime = System.currentTimeMillis()
             // Group songs by titleInitial, then sort groups alphabetically
             val result = songs.groupBy { song ->
@@ -80,9 +90,9 @@ fun SongList(
         }
     }
     
-    val flattenedSongs = remember(grouped) {
+    val flattenedSongs = remember(grouped, trackOrderedSongs, useTrackNumberOrdering) {
         val flattenStartTime = System.currentTimeMillis()
-        val result = grouped.values.flatten()
+        val result = if (useTrackNumberOrdering) trackOrderedSongs else grouped.values.flatten()
         val flattenDuration = System.currentTimeMillis() - flattenStartTime
         Log.d(TAG, "Song flattening completed in ${flattenDuration}ms")
         appLogger?.timing(TAG, "Song flattening", flattenDuration)
@@ -116,14 +126,18 @@ fun SongList(
 
     // Auto-scroll to currently playing song once when list is ready.
     // Also listens to currentPlayingSongId so late restore after startup can still scroll.
-    LaunchedEffect(grouped, currentPlayingSongId) {
-        if (shouldAutoScrollToCurrentSong(hasAutoScrolledToCurrentSong.value, currentPlayingSongId, grouped)) {
+    LaunchedEffect(grouped, flattenedSongs, currentPlayingSongId, useTrackNumberOrdering) {
+        if (!hasAutoScrolledToCurrentSong.value && currentPlayingSongId != null && flattenedSongs.isNotEmpty()) {
             // Find the song in the flattened list
             // Note: MediaItem.mediaId is set as song.id.toString() in SongMapper.toMediaItem()
             val currentSong = flattenedSongs.find { it.id.toString() == currentPlayingSongId }
             if (currentSong != null) {
-                // Calculate scroll index by finding which group contains the song
-                val scrollIndex = calculateScrollIndex(grouped, currentSong)
+                val scrollIndex = if (useTrackNumberOrdering) {
+                    flattenedSongs.indexOf(currentSong).takeIf { it != -1 }
+                } else {
+                    // Calculate scroll index by finding which group contains the song
+                    calculateScrollIndex(grouped, currentSong)
+                }
                 
                 if (scrollIndex != null) {
                     // Scroll to the item instantly (no animation), centered if possible
@@ -140,52 +154,79 @@ fun SongList(
             state = listState,
             modifier = Modifier.fillMaxSize()
         ) {
-            grouped.forEach { (initial, songsInGroup) ->
-                stickyHeader {
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.82f)
-                    ) {
-                        Text(
-                            text = initial.toString(),
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                            style = MaterialTheme.typography.titleSmall
-                        )
-                    }
-                }
-                
+            if (useTrackNumberOrdering) {
                 itemsIndexed(
-                    items = songsInGroup,
+                    items = flattenedSongs,
                     key = { _, item -> item.id },
                     contentType = { _, _ -> "song" }
                 ) { index, song ->
-                    val globalIndex = (groupStartingIndices[initial] ?: 0) + index + 1
                     val isSelectedInBatch = song.id in selectedSongIds
                     val queueDisplay = queueDisplayBySongId[song.id]
                     MusicListItem(
                         title = if (isBatchMode && isSelectedInBatch) "$BATCH_SELECTED_PREFIX${song.title}" else song.title,
                         subtitle = "${song.artist} - ${song.album}",
                         isCurrent = if (isBatchMode) isSelectedInBatch else song.id.toString() == currentPlayingSongId,
-                        index = if (isBatchMode) null else globalIndex,
+                        index = if (isBatchMode) null else index + 1,
                         indexText = if (isBatchMode) null else queueDisplay,
                         indexTextColor = if (queueDisplay != null) Color.Red else null,
-                        onClick = { 
+                        onClick = {
                             if (isBatchMode) {
                                 onBatchSongToggle?.invoke(song)
                             } else {
-                                val index = flattenedSongs.indexOf(song)
-                                if (index != -1) {
-                                    onSongClick(flattenedSongs, index)
-                                }
+                                onSongClick(flattenedSongs, index)
                             }
                         },
                         onLongClick = if (!isBatchMode && onSongLongClick != null) ({ onSongLongClick(song) }) else null
                     )
                 }
+            } else {
+                grouped.forEach { (initial, songsInGroup) ->
+                    stickyHeader {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.82f)
+                        ) {
+                            Text(
+                                text = initial.toString(),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                style = MaterialTheme.typography.titleSmall
+                            )
+                        }
+                    }
+
+                    itemsIndexed(
+                        items = songsInGroup,
+                        key = { _, item -> item.id },
+                        contentType = { _, _ -> "song" }
+                    ) { index, song ->
+                        val globalIndex = (groupStartingIndices[initial] ?: 0) + index + 1
+                        val isSelectedInBatch = song.id in selectedSongIds
+                        val queueDisplay = queueDisplayBySongId[song.id]
+                        MusicListItem(
+                            title = if (isBatchMode && isSelectedInBatch) "$BATCH_SELECTED_PREFIX${song.title}" else song.title,
+                            subtitle = "${song.artist} - ${song.album}",
+                            isCurrent = if (isBatchMode) isSelectedInBatch else song.id.toString() == currentPlayingSongId,
+                            index = if (isBatchMode) null else globalIndex,
+                            indexText = if (isBatchMode) null else queueDisplay,
+                            indexTextColor = if (queueDisplay != null) Color.Red else null,
+                            onClick = {
+                                if (isBatchMode) {
+                                    onBatchSongToggle?.invoke(song)
+                                } else {
+                                    val songIndex = flattenedSongs.indexOf(song)
+                                    if (songIndex != -1) {
+                                        onSongClick(flattenedSongs, songIndex)
+                                    }
+                                }
+                            },
+                            onLongClick = if (!isBatchMode && onSongLongClick != null) ({ onSongLongClick(song) }) else null
+                        )
+                    }
+                }
             }
         }
 
-        if (sections.isNotEmpty()) {
+        if (!useTrackNumberOrdering && sections.isNotEmpty()) {
             FastScrollbar(
                 sections = sections,
                 onSectionSelected = { index ->
@@ -200,6 +241,14 @@ fun SongList(
         }
     }
 }
+
+internal fun shouldUseTrackNumberOrdering(
+    preferTrackNumberOrdering: Boolean,
+    songs: List<Song>
+): Boolean = preferTrackNumberOrdering && songs.isNotEmpty() && songs.all { it.trackNumber > 0 }
+
+internal fun orderSongsByTrackNumber(songs: List<Song>): List<Song> =
+    songs.sortedBy { it.trackNumber }
 
 internal fun buildQueueDisplayBySongId(queueSongIds: List<Long>): Map<Long, String> {
     if (queueSongIds.isEmpty()) return emptyMap()
