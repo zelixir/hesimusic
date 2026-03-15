@@ -181,6 +181,7 @@ fun SongListScreen(
                 currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
                 onSongClick = handleSongClick,
                 onSongLongClick = { selectedSongForActions = it },
+                preferTrackNumberOrdering = type == "album",
                 isBatchMode = isBatchMode,
                 selectedSongIds = batchSelectedSongIds,
                 queueDisplayBySongId = if (isCurrentPlayingList) buildQueueDisplayBySongId(playQueueSongIds) else emptyMap(),
