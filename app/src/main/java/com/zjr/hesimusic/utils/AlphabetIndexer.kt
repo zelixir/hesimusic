@@ -14,9 +14,11 @@ object AlphabetIndexer {
         toneType = HanyuPinyinToneType.WITHOUT_TONE
     }
 
-    private val cache = android.util.LruCache<Char, Char>(1000)
+    private const val CACHE_SIZE = 1000
+    private val cacheLock = Any()
+    private val cache = linkedMapOf<Char, Char>()
     
-    // Pattern to match track numbers at the start of a string: \d+\.\s+
+    // Pattern to match track numbers at the start of a string: \d+\.\s*
     private val trackNumberPattern = Regex("""^\d+\.\s*""")
 
     private fun isChinese(c: Char): Boolean {
@@ -37,10 +39,16 @@ object AlphabetIndexer {
     }
 
     fun getInitial(c: Char): Char {
-        cache.get(c)?.let { return it }
-
+        synchronized(cacheLock) {
+            cache[c]?.let { return it }
+        }
         val initial = computeInitial(c)
-        cache.put(c, initial)
+        synchronized(cacheLock) {
+            if (cache.size >= CACHE_SIZE) {
+                cache.entries.firstOrNull()?.key?.let(cache::remove)
+            }
+            cache[c] = initial
+        }
         return initial
     }
 
@@ -67,7 +75,7 @@ object AlphabetIndexer {
 
     /**
      * Strip track number prefix from text if present.
-     * Track number pattern: \d+\.\s+ (e.g., "01. ", "2. ", "123. ")
+     * Track number pattern: \d+\.\s* (e.g., "01. ", "2. ", "123. ", "01.Song")
      */
     fun stripTrackNumber(text: String): String {
         return trackNumberPattern.replace(text, "")
@@ -75,10 +83,17 @@ object AlphabetIndexer {
 
     fun getInitial(text: String?): Char {
         if (text.isNullOrEmpty()) return '#'
-        // Strip track number before getting initial
+        val hasTrackNumberPrefix = trackNumberPattern.containsMatchIn(text)
         val cleanedText = stripTrackNumber(text)
         if (cleanedText.isEmpty()) return '#'
-        return getInitial(cleanedText[0])
+        val leadingChar = if (hasTrackNumberPrefix) {
+            cleanedText.firstOrNull { candidate ->
+                candidate.isLetter() || isChinese(candidate) || getKanaInitial(candidate) != null
+            }
+        } else {
+            cleanedText.firstOrNull()
+        } ?: return '#'
+        return getInitial(leadingChar)
     }
 
     private fun getKanaInitial(c: Char): Char? {

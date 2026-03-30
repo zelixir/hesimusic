@@ -15,7 +15,7 @@ class SongListQueueDisplayTest {
 
     @Test
     fun `format queue positions uses max 4 chars per line and 2 lines`() {
-        assertEquals("1,2,3", formatQueuePositionsForDisplay(listOf(1, 2, 3)))
+        assertEquals("1,2,\n3", formatQueuePositionsForDisplay(listOf(1, 2, 3)))
         assertEquals("1,2,\n3,4,", formatQueuePositionsForDisplay(listOf(1, 2, 3, 4, 5)))
     }
 }
