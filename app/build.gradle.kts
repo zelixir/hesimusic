@@ -6,6 +6,9 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+val releaseVersionCode = providers.gradleProperty("releaseVersionCode").orNull?.toIntOrNull() ?: 1
+val releaseVersionName = providers.gradleProperty("releaseVersionName").orNull ?: "0.1"
+
 android {
     namespace = "com.zjr.hesimusic"
     compileSdk = 36
@@ -14,8 +17,8 @@ android {
         applicationId = "com.zjr.hesimusic"
         minSdk = 31
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = releaseVersionCode
+        versionName = releaseVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         
