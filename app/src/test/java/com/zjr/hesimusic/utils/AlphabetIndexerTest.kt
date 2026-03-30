@@ -23,7 +23,7 @@ class AlphabetIndexerTest {
         
         // Test edge cases
         assertEquals("", AlphabetIndexer.stripTrackNumber("01. "))
-        assertEquals("01.Song", AlphabetIndexer.stripTrackNumber("01.Song")) // No space after dot
+        assertEquals("Song", AlphabetIndexer.stripTrackNumber("01.Song")) // No space after dot
         assertEquals("1-Song", AlphabetIndexer.stripTrackNumber("1-Song")) // Different separator
     }
 
@@ -31,6 +31,7 @@ class AlphabetIndexerTest {
     fun testGetInitial_withTrackNumbers() {
         // Test English titles with track numbers
         assertEquals('S', AlphabetIndexer.getInitial("01. Song Title"))
+        assertEquals('S', AlphabetIndexer.getInitial("01.Song Title"))
         assertEquals('A', AlphabetIndexer.getInitial("1. Amazing"))
         assertEquals('T', AlphabetIndexer.getInitial("123. Test Track"))
         

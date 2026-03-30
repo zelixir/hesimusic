@@ -18,8 +18,8 @@ object AlphabetIndexer {
     private val cacheLock = Any()
     private val cache = linkedMapOf<Char, Char>()
     
-    // Pattern to match track numbers at the start of a string: \d+\.\s+
-    private val trackNumberPattern = Regex("""^\d+\.\s+""")
+    // Pattern to match track numbers at the start of a string: \d+\.\s*
+    private val trackNumberPattern = Regex("""^\d+\.\s*""")
 
     private fun isChinese(c: Char): Boolean {
         return (c.code in 0x4E00..0x9FA5) || c.code == 0x3007
@@ -75,7 +75,7 @@ object AlphabetIndexer {
 
     /**
      * Strip track number prefix from text if present.
-     * Track number pattern: \d+\.\s+ (e.g., "01. ", "2. ", "123. ")
+     * Track number pattern: \d+\.\s* (e.g., "01. ", "2. ", "123. ", "01.Song")
      */
     fun stripTrackNumber(text: String): String {
         return trackNumberPattern.replace(text, "")
