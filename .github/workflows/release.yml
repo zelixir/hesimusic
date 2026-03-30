@@ -7,6 +7,9 @@ on:
         description: Release version, for example 1.0.0
         required: true
         type: string
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: write
@@ -14,9 +17,6 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
-    env:
-      RELEASE_VERSION: ${{ inputs.version }}
-      RELEASE_VERSION_CODE: ${{ github.run_number }}
 
     steps:
       - name: Checkout code
@@ -36,6 +36,18 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6.0.1
 
+      - name: Resolve release version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            version="$INPUT_VERSION"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
       - name: Install Android SDK components
         run: |
           yes | sdkmanager --licenses > /dev/null
@@ -49,20 +61,20 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew test assembleRelease \
-            -PreleaseVersionName="$RELEASE_VERSION" \
-            -PreleaseVersionCode="$RELEASE_VERSION_CODE"
+            -PreleaseVersionName="${{ steps.version.outputs.value }}" \
+            -PreleaseVersionCode="${{ github.run_number }}"
 
       - name: Prepare release asset
         run: |
           mkdir -p dist
           apk_path="$(find app/build/outputs/apk/release -maxdepth 1 -name '*.apk' | head -n 1)"
-          cp "$apk_path" "dist/hesimusic-v${RELEASE_VERSION}.apk"
+          cp "$apk_path" "dist/hesimusic-v${{ steps.version.outputs.value }}.apk"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2.6.1
         with:
-          tag_name: v${{ inputs.version }}
-          name: v${{ inputs.version }}
+          tag_name: v${{ steps.version.outputs.value }}
+          name: v${{ steps.version.outputs.value }}
           target_commitish: ${{ github.sha }}
           files: dist/*.apk
           fail_on_unmatched_files: true
