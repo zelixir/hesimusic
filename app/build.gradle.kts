@@ -8,12 +8,22 @@ plugins {
 
 val releaseVersionCode = providers.gradleProperty("releaseVersionCode").orNull?.toIntOrNull() ?: 1
 val releaseVersionName = providers.gradleProperty("releaseVersionName").orNull ?: "0.1"
+val releaseStoreFilePath = providers.environmentVariable("HESI_RELEASE_STORE_FILE").orNull
+val releaseStorePassword = providers.environmentVariable("HESI_RELEASE_STORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("HESI_RELEASE_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("HESI_RELEASE_KEY_PASSWORD").orNull
 val hasReleaseSigningCredentials = listOf(
-    "HESI_RELEASE_STORE_FILE",
-    "HESI_RELEASE_STORE_PASSWORD",
-    "HESI_RELEASE_KEY_ALIAS",
-    "HESI_RELEASE_KEY_PASSWORD"
-).all { providers.environmentVariable(it).orNull != null }
+    releaseStoreFilePath,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+).all { it != null }
+
+if (hasReleaseSigningCredentials) {
+    require(file(releaseStoreFilePath!!).exists()) {
+        "HESI_RELEASE_STORE_FILE points to a missing keystore file: $releaseStoreFilePath"
+    }
+}
 
 android {
     namespace = "com.zjr.hesimusic"
@@ -46,10 +56,10 @@ android {
     signingConfigs {
         if (hasReleaseSigningCredentials) {
             create("release") {
-                storeFile = file(providers.environmentVariable("HESI_RELEASE_STORE_FILE").get())
-                storePassword = providers.environmentVariable("HESI_RELEASE_STORE_PASSWORD").get()
-                keyAlias = providers.environmentVariable("HESI_RELEASE_KEY_ALIAS").get()
-                keyPassword = providers.environmentVariable("HESI_RELEASE_KEY_PASSWORD").get()
+                storeFile = file(releaseStoreFilePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
             }
         }
     }
