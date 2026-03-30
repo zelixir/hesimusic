@@ -8,6 +8,22 @@ plugins {
 
 val releaseVersionCode = providers.gradleProperty("releaseVersionCode").orNull?.toIntOrNull() ?: 1
 val releaseVersionName = providers.gradleProperty("releaseVersionName").orNull ?: "0.1"
+val releaseStoreFilePath = providers.environmentVariable("HESI_RELEASE_STORE_FILE").orNull
+val releaseStorePassword = providers.environmentVariable("HESI_RELEASE_STORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("HESI_RELEASE_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("HESI_RELEASE_KEY_PASSWORD").orNull
+val hasReleaseSigningCredentials = listOf(
+    releaseStoreFilePath,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+).all { it != null }
+
+if (hasReleaseSigningCredentials) {
+    require(file(releaseStoreFilePath!!).exists()) {
+        "HESI_RELEASE_STORE_FILE points to a missing keystore file: $releaseStoreFilePath"
+    }
+}
 
 android {
     namespace = "com.zjr.hesimusic"
@@ -37,6 +53,17 @@ android {
         }
     }
 
+    signingConfigs {
+        if (hasReleaseSigningCredentials) {
+            create("release") {
+                storeFile = file(releaseStoreFilePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -44,6 +71,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = if (hasReleaseSigningCredentials) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
     compileOptions {
