@@ -13,8 +13,6 @@ on:
         default: false
         type: boolean
   push:
-    branches:
-      - "copilot/fix-release-action-failure"
     tags:
       - "v*"
 
@@ -51,10 +49,8 @@ jobs:
         run: |
           if [ -n "$INPUT_VERSION" ]; then
             version="$INPUT_VERSION"
-          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            version="${GITHUB_REF_NAME#v}"
           else
-            version="0.0.${GITHUB_RUN_NUMBER}"
+            version="${GITHUB_REF_NAME#v}"
           fi
           echo "value=$version" >> "$GITHUB_OUTPUT"
 
