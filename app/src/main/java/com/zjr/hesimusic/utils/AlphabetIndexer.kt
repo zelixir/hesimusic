@@ -15,6 +15,7 @@ object AlphabetIndexer {
     }
 
     private const val CACHE_SIZE = 1000
+    private val cacheLock = Any()
     private val cache = linkedMapOf<Char, Char>()
     
     // Pattern to match track numbers at the start of a string: \d+\.\s+
@@ -38,13 +39,16 @@ object AlphabetIndexer {
     }
 
     fun getInitial(c: Char): Char {
-        cache.get(c)?.let { return it }
-
-        val initial = computeInitial(c)
-        if (cache.size >= CACHE_SIZE) {
-            cache.entries.firstOrNull()?.key?.let(cache::remove)
+        synchronized(cacheLock) {
+            cache[c]?.let { return it }
         }
-        cache[c] = initial
+        val initial = computeInitial(c)
+        synchronized(cacheLock) {
+            if (cache.size >= CACHE_SIZE) {
+                cache.entries.firstOrNull()?.key?.let(cache::remove)
+            }
+            cache[c] = initial
+        }
         return initial
     }
 
@@ -87,7 +91,7 @@ object AlphabetIndexer {
                 candidate.isLetter() || isChinese(candidate) || getKanaInitial(candidate) != null
             }
         } else {
-            cleanedText.first()
+            cleanedText.firstOrNull()
         } ?: return '#'
         return getInitial(leadingChar)
     }
