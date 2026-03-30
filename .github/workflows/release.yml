@@ -57,10 +57,16 @@ jobs:
             "cmake;3.22.1" \
             "ndk;27.2.12479018"
 
-      - name: Build release APK
+      - name: Run unit tests
         run: |
           chmod +x gradlew
-          ./gradlew test assembleRelease \
+          ./gradlew test \
+            -PreleaseVersionName="${{ steps.version.outputs.value }}" \
+            -PreleaseVersionCode="${{ github.run_number }}"
+
+      - name: Build release APK
+        run: |
+          ./gradlew assembleRelease \
             -PreleaseVersionName="${{ steps.version.outputs.value }}" \
             -PreleaseVersionCode="${{ github.run_number }}"
 
