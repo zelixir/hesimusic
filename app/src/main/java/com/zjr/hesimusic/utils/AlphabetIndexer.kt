@@ -14,10 +14,11 @@ object AlphabetIndexer {
         toneType = HanyuPinyinToneType.WITHOUT_TONE
     }
 
-    private val cache = android.util.LruCache<Char, Char>(1000)
+    private const val CACHE_SIZE = 1000
+    private val cache = linkedMapOf<Char, Char>()
     
     // Pattern to match track numbers at the start of a string: \d+\.\s+
-    private val trackNumberPattern = Regex("""^\d+\.\s*""")
+    private val trackNumberPattern = Regex("""^\d+\.\s+""")
 
     private fun isChinese(c: Char): Boolean {
         return (c.code in 0x4E00..0x9FA5) || c.code == 0x3007
@@ -40,7 +41,10 @@ object AlphabetIndexer {
         cache.get(c)?.let { return it }
 
         val initial = computeInitial(c)
-        cache.put(c, initial)
+        if (cache.size >= CACHE_SIZE) {
+            cache.entries.firstOrNull()?.key?.let(cache::remove)
+        }
+        cache[c] = initial
         return initial
     }
 
@@ -75,10 +79,17 @@ object AlphabetIndexer {
 
     fun getInitial(text: String?): Char {
         if (text.isNullOrEmpty()) return '#'
-        // Strip track number before getting initial
+        val hasTrackNumberPrefix = trackNumberPattern.containsMatchIn(text)
         val cleanedText = stripTrackNumber(text)
         if (cleanedText.isEmpty()) return '#'
-        return getInitial(cleanedText[0])
+        val leadingChar = if (hasTrackNumberPrefix) {
+            cleanedText.firstOrNull { candidate ->
+                candidate.isLetter() || isChinese(candidate) || getKanaInitial(candidate) != null
+            }
+        } else {
+            cleanedText.first()
+        } ?: return '#'
+        return getInitial(leadingChar)
     }
 
     private fun getKanaInitial(c: Char): Char? {

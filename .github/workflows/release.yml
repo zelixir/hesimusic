@@ -7,6 +7,11 @@ on:
         description: Release version, for example 1.0.0
         required: true
         type: string
+      skip_tests:
+        description: Skip unit tests before building the release
+        required: false
+        default: false
+        type: boolean
   push:
     tags:
       - "v*"
@@ -58,6 +63,7 @@ jobs:
             "ndk;27.2.12479018"
 
       - name: Run unit tests
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.skip_tests }}
         run: |
           chmod +x gradlew
           ./gradlew test \
@@ -66,6 +72,7 @@ jobs:
 
       - name: Build release APK
         run: |
+          chmod +x gradlew
           ./gradlew assembleRelease \
             -PreleaseVersionName="${{ steps.version.outputs.value }}" \
             -PreleaseVersionCode="${{ github.run_number }}"
