@@ -90,6 +90,7 @@ class AdbDatabaseReceiver : BroadcastReceiver() {
         "playlistEntries" to playlistEntries,
         "favorites" to favorites,
         "hiddenSongs" to hiddenSongs,
+        "smartPlaylists" to smartPlaylists,
         "logs" to logs
     )
 

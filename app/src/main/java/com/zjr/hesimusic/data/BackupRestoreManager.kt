@@ -23,25 +23,28 @@ data class BackupSummary(
     val playlistEntries: Int,
     val favorites: Int,
     val hiddenSongs: Int,
+    val smartPlaylists: Int,
     val logs: Int
 )
 
 @Singleton
 class BackupRestoreManager @Inject constructor(
     private val appDatabase: AppDatabase,
+    private val smartPlaylistRepository: com.zjr.hesimusic.data.repository.SmartPlaylistRepository,
     @ApplicationContext private val context: Context
 ) {
     private val preferenceFileNames = listOf("playback_prefs", "scan_prefs")
 
     suspend fun exportJson(): JSONObject = withContext(Dispatchers.IO) {
         JSONObject().apply {
-            put("version", 2)
+            put("version", 3)
             put("songs", songsToJson(appDatabase.songDao().getAllSongsList()))
             put("favorites", favoritesToJson(appDatabase.favoriteDao().getAllFavoritesList()))
             put("logs", logsToJson(appDatabase.logDao().getAllLogsList()))
             put("hiddenSongs", hiddenSongsToJson(appDatabase.hiddenSongDao().getAllHiddenSongsList()))
             put("playlists", playlistsToJson(appDatabase.playlistDao().getAllPlaylistsList()))
             put("playlistEntries", playlistEntriesToJson(appDatabase.playlistEntryDao().getAllPlaylistEntriesList()))
+            put("smartPlaylists", smartPlaylistsToJson(appDatabase.smartPlaylistDao().getAllList()))
             put("preferences", preferencesToJson())
         }
     }
@@ -49,13 +52,25 @@ class BackupRestoreManager @Inject constructor(
     suspend fun importJson(backupJson: JSONObject): BackupSummary = withContext(Dispatchers.IO) {
         val backupVersion = backupJson.optInt("version", 1)
         if (backupVersion < 1) error("不支持的备份版本: $backupVersion")
-        if (backupVersion > 2) error("备份版本过新，当前版本暂不支持: $backupVersion")
+        if (backupVersion > 3) error("备份版本过新，当前版本暂不支持: $backupVersion")
         val songs = jsonToSongs(backupJson.optJSONArray("songs") ?: JSONArray())
         val favorites = jsonToFavorites(backupJson.optJSONArray("favorites") ?: JSONArray())
         val logs = jsonToLogs(backupJson.optJSONArray("logs") ?: JSONArray())
         val hiddenSongs = jsonToHiddenSongs(backupJson.optJSONArray("hiddenSongs") ?: JSONArray())
         val playlists = jsonToPlaylists(backupJson.optJSONArray("playlists") ?: JSONArray())
         val playlistEntries = jsonToPlaylistEntries(backupJson.optJSONArray("playlistEntries") ?: JSONArray())
+        // v3 起包含 SQL 歌单；旧版本备份没有该字段则跳过。逐条校验，坏 SQL 跳过不阻断整体导入。
+        val smartPlaylists = jsonToSmartPlaylists(backupJson.optJSONArray("smartPlaylists") ?: JSONArray())
+        val smartPlaylistErrors = mutableListOf<String>()
+        val validSmartPlaylists = smartPlaylists.filter { playlist ->
+            val error = smartPlaylistRepository.validateAgainstDatabase(playlist.sqlText)
+            if (error != null) {
+                smartPlaylistErrors += "${playlist.name}: $error"
+                false
+            } else {
+                true
+            }
+        }
         appDatabase.withTransaction {
             appDatabase.songDao().deleteAll()
             appDatabase.playlistEntryDao().deleteAll()
@@ -63,20 +78,26 @@ class BackupRestoreManager @Inject constructor(
             appDatabase.favoriteDao().deleteAll()
             appDatabase.logDao().deleteAllLogs()
             appDatabase.hiddenSongDao().deleteAll()
+            appDatabase.smartPlaylistDao().deleteAll()
             if (songs.isNotEmpty()) appDatabase.songDao().insertAll(songs)
             if (playlists.isNotEmpty()) appDatabase.playlistDao().insertAll(playlists)
             if (playlistEntries.isNotEmpty()) appDatabase.playlistEntryDao().insertAll(playlistEntries)
             if (favorites.isNotEmpty()) appDatabase.favoriteDao().insertAll(favorites)
             if (logs.isNotEmpty()) appDatabase.logDao().insertAll(logs)
             if (hiddenSongs.isNotEmpty()) appDatabase.hiddenSongDao().insertAll(hiddenSongs)
+            if (validSmartPlaylists.isNotEmpty()) appDatabase.smartPlaylistDao().insertAll(validSmartPlaylists)
         }
         restorePreferences(backupJson.optJSONObject("preferences"))
+        if (smartPlaylistErrors.isNotEmpty()) {
+            android.util.Log.w("BackupRestore", "跳过无效 SQL 歌单: $smartPlaylistErrors")
+        }
         BackupSummary(
             songs = songs.size,
             playlists = playlists.size,
             playlistEntries = playlistEntries.size,
             favorites = favorites.size,
             hiddenSongs = hiddenSongs.size,
+            smartPlaylists = validSmartPlaylists.size,
             logs = logs.size
         )
     }
@@ -170,6 +191,30 @@ class BackupRestoreManager @Inject constructor(
             )
         }
     }
+
+    private fun smartPlaylistsToJson(playlists: List<com.zjr.hesimusic.data.model.SmartPlaylist>) = JSONArray().apply {
+        playlists.forEach { playlist ->
+            put(
+                JSONObject().apply {
+                    put("id", playlist.id)
+                    put("name", playlist.name)
+                    put("createdAt", playlist.createdAt)
+                    put("sql", playlist.sqlText)
+                }
+            )
+        }
+    }
+
+    private fun jsonToSmartPlaylists(jsonArray: JSONArray): List<com.zjr.hesimusic.data.model.SmartPlaylist> =
+        List(jsonArray.length()) { index ->
+            val item = jsonArray.getJSONObject(index)
+            com.zjr.hesimusic.data.model.SmartPlaylist(
+                id = item.optLong("id", 0L),
+                name = item.getString("name"),
+                createdAt = item.optLong("createdAt", System.currentTimeMillis()),
+                sqlText = item.getString("sql")
+            )
+        }
 
     private fun preferencesToJson(): JSONObject = JSONObject().apply {
         preferenceFileNames.forEach { name ->

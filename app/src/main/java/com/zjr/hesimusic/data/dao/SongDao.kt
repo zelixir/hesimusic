@@ -4,8 +4,15 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.RawQuery
+import androidx.sqlite.db.SupportSQLiteQuery
 import com.zjr.hesimusic.data.model.Album
 import com.zjr.hesimusic.data.model.Artist
+import com.zjr.hesimusic.data.model.Favorite
+import com.zjr.hesimusic.data.model.HiddenSong
+import com.zjr.hesimusic.data.model.LogEntry
+import com.zjr.hesimusic.data.model.Playlist
+import com.zjr.hesimusic.data.model.PlaylistEntry
 import com.zjr.hesimusic.data.model.Song
 import kotlinx.coroutines.flow.Flow
 
@@ -49,4 +56,19 @@ interface SongDao {
 
     @Query("DELETE FROM songs WHERE filePath = :filePath")
     suspend fun deleteByFilePath(filePath: String)
+
+    /**
+     * SQL 歌单视图的实时求值。 观察全部业务表：视图 SQL 可能引用任意表，
+     * 任何相关数据变化都应触发重算。
+     */
+    @RawQuery(
+        observedEntities = [
+            Song::class, Favorite::class, HiddenSong::class,
+            LogEntry::class, Playlist::class, PlaylistEntry::class
+        ]
+    )
+    fun observeSmartPlaylistQuery(query: SupportSQLiteQuery): Flow<List<Song>>
+
+    @RawQuery(observedEntities = [Song::class])
+    suspend fun countSmartPlaylistQuery(query: SupportSQLiteQuery): Long
 }

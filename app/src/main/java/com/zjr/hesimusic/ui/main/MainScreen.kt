@@ -56,6 +56,7 @@ import com.zjr.hesimusic.ui.library.ArtistList
 import com.zjr.hesimusic.ui.library.BatchActionBar
 import com.zjr.hesimusic.ui.library.FolderList
 import com.zjr.hesimusic.ui.library.LibraryViewModel
+import com.zjr.hesimusic.ui.library.smartPlaylistContext
 import com.zjr.hesimusic.ui.library.SongList
 import com.zjr.hesimusic.ui.library.SongActionHost
 import com.zjr.hesimusic.ui.library.AddToPlaylistDialog
@@ -104,6 +105,7 @@ fun MainScreen(
     var selectedSongPlaylistContext by remember { mutableStateOf<PlaylistContext?>(null) }
     var batchModeSongs by remember { mutableStateOf<List<Song>>(emptyList()) }
     var batchModePlaylistId by remember { mutableStateOf<Long?>(null) }
+    var batchModeSmartId by remember { mutableStateOf<Long?>(null) }
     var isBatchMode by remember { mutableStateOf(false) }
     var batchModeTabIndex by remember { mutableStateOf<Int?>(null) }
     var isPlaylistSongsVisible by remember { mutableStateOf(false) }
@@ -132,6 +134,7 @@ fun MainScreen(
         batchSelectedSongIds = emptySet()
         batchModeSongs = emptyList()
         batchModePlaylistId = null
+        batchModeSmartId = null
         batchFavoriteActionText = "加入收藏"
     }
 
@@ -187,10 +190,12 @@ fun MainScreen(
         bottomBar = {
             if (isBatchMode) {
                 val playlistId = batchModePlaylistId
+                val smartId = batchModeSmartId
                 val canAddToQueue = when (batchModeTabIndex) {
                     0 -> musicUiState.playlistContext == PlaylistContext.GLOBAL
-                    PLAYLIST_TAB_INDEX -> playlistId != null &&
-                        musicUiState.playlistContext == PlaylistContext(PlaylistType.PLAYLIST, playlistId.toString())
+                    PLAYLIST_TAB_INDEX -> (playlistId != null &&
+                        musicUiState.playlistContext == PlaylistContext(PlaylistType.PLAYLIST, playlistId.toString())) ||
+                        (smartId != null && musicUiState.playlistContext == smartPlaylistContext(smartId))
                     2 -> musicUiState.playlistContext == PlaylistContext.FAVORITES
                     else -> false
                 }
@@ -409,6 +414,15 @@ fun MainScreen(
                                 selectedSongPlaylistContext = PlaylistContext(PlaylistType.PLAYLIST, playlistId.toString())
                                 batchModeSongs = songs
                                 batchModePlaylistId = playlistId
+                                batchModeSmartId = null
+                                batchFavoriteActionText = favoriteActionTextForTab(1)
+                            },
+                            onSmartSongLongClick = { song, smartId, songs ->
+                                selectedSongForActions = song
+                                selectedSongPlaylistContext = smartPlaylistContext(smartId)
+                                batchModeSongs = songs
+                                batchModePlaylistId = null
+                                batchModeSmartId = smartId
                                 batchFavoriteActionText = favoriteActionTextForTab(1)
                             },
                             isBatchMode = isBatchMode && pagerState.currentPage == PLAYLIST_TAB_INDEX,

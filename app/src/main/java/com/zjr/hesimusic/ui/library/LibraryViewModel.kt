@@ -8,11 +8,13 @@ import com.zjr.hesimusic.data.model.FileSystemItem
 import com.zjr.hesimusic.data.model.HiddenSong
 import com.zjr.hesimusic.data.model.Playlist
 import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.data.model.SmartPlaylist
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
 import com.zjr.hesimusic.data.repository.HiddenSongRepository
 import com.zjr.hesimusic.data.repository.LibraryRepository
 import com.zjr.hesimusic.data.repository.FavoriteRepository
 import com.zjr.hesimusic.data.repository.PlaylistRepository
+import com.zjr.hesimusic.data.repository.SmartPlaylistRepository
 import com.zjr.hesimusic.data.repository.SongRepository
 import com.zjr.hesimusic.data.scanner.TagLibHelper
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -38,6 +40,7 @@ class LibraryViewModel @Inject constructor(
     private val playlistRepository: PlaylistRepository,
     private val favoriteRepository: FavoriteRepository,
     private val songRepository: SongRepository,
+    private val smartPlaylistRepository: SmartPlaylistRepository,
     private val tagLibHelper: TagLibHelper,
     private val playbackPreferences: PlaybackPreferences
 ) : ViewModel() {
@@ -85,6 +88,9 @@ class LibraryViewModel @Inject constructor(
     val playlists: StateFlow<List<Playlist>> = playlistRepository.getPlaylists()
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
+    val smartPlaylists: StateFlow<List<SmartPlaylist>> = smartPlaylistRepository.getAll()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
     val hiddenSongs: StateFlow<List<HiddenSong>> = hiddenSongRepository.getHiddenSongs()
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
@@ -112,6 +118,23 @@ class LibraryViewModel @Inject constructor(
     }
 
     fun getPlaylistSongCount(playlistId: Long) = playlistRepository.getPlaylistSongCount(playlistId)
+
+    fun getSmartPlaylistSongs(smartPlaylistId: Long) = combine(
+        smartPlaylistRepository.observeSongs(smartPlaylistId),
+        hiddenSongRepository.getHiddenSongs()
+    ) { songs, hidden ->
+        val hiddenKeys = hidden.map { it.filePath to it.startPosition }.toSet()
+        songs.filterNot { (it.filePath to it.startPosition) in hiddenKeys }
+    }
+
+    fun getSmartPlaylistSongCount(smartPlaylistId: Long) =
+        smartPlaylistRepository.observeSongCount(smartPlaylistId)
+
+    fun deleteSmartPlaylist(smartPlaylistId: Long) {
+        viewModelScope.launch {
+            smartPlaylistRepository.deleteById(smartPlaylistId)
+        }
+    }
 
     fun updateSearchQuery(query: String) {
         _searchQuery.value = query

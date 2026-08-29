@@ -43,6 +43,12 @@
         </service>
 
         <provider
+            android:name=".adb.AdbDbProvider"
+            android:authorities="com.zjr.hesimusic.adbdb"
+            android:exported="true"
+            tools:ignore="ExportedContentProvider" />
+
+        <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
             android:exported="false"

@@ -9,17 +9,19 @@ import com.zjr.hesimusic.data.dao.HiddenSongDao
 import com.zjr.hesimusic.data.dao.LogDao
 import com.zjr.hesimusic.data.dao.PlaylistDao
 import com.zjr.hesimusic.data.dao.PlaylistEntryDao
+import com.zjr.hesimusic.data.dao.SmartPlaylistDao
 import com.zjr.hesimusic.data.dao.SongDao
 import com.zjr.hesimusic.data.model.Favorite
 import com.zjr.hesimusic.data.model.HiddenSong
 import com.zjr.hesimusic.data.model.LogEntry
 import com.zjr.hesimusic.data.model.Playlist
 import com.zjr.hesimusic.data.model.PlaylistEntry
+import com.zjr.hesimusic.data.model.SmartPlaylist
 import com.zjr.hesimusic.data.model.Song
 
 @Database(
-    entities = [Song::class, Playlist::class, PlaylistEntry::class, Favorite::class, LogEntry::class, HiddenSong::class],
-    version = 6,
+    entities = [Song::class, Playlist::class, PlaylistEntry::class, Favorite::class, LogEntry::class, HiddenSong::class, SmartPlaylist::class],
+    version = 7,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -29,6 +31,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun favoriteDao(): FavoriteDao
     abstract fun logDao(): LogDao
     abstract fun hiddenSongDao(): HiddenSongDao
+    abstract fun smartPlaylistDao(): SmartPlaylistDao
     
     companion object {
         private const val TAG = "AppDatabase"
@@ -148,6 +151,27 @@ abstract class AppDatabase : RoomDatabase() {
 
                 val duration = System.currentTimeMillis() - startTime
                 android.util.Log.d(TAG, "MIGRATION_5_6 completed in ${duration}ms")
+            }
+        }
+
+        /**
+         * Migration from version 6 to 7:
+         * - Add smart_playlists table for SQL-defined smart views
+         */
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                android.util.Log.d(TAG, "Running MIGRATION_6_7")
+
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS smart_playlists (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        name TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        sqlText TEXT NOT NULL
+                    )
+                """.trimIndent())
+
+                android.util.Log.d(TAG, "MIGRATION_6_7 completed")
             }
         }
     }
