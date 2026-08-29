@@ -87,9 +87,9 @@ object AlphabetIndexer {
         val cleanedText = stripTrackNumber(text)
         if (cleanedText.isEmpty()) return '#'
         val leadingChar = if (hasTrackNumberPrefix) {
-            cleanedText.firstOrNull { candidate ->
-                candidate.isLetter() || isChinese(candidate) || getKanaInitial(candidate) != null
-            }
+            // Skip only continuation numbering after the track number; a symbol-led
+            // title (e.g. "01. @Special") still groups under '#'.
+            cleanedText.firstOrNull { !it.isDigit() && !it.isWhitespace() }
         } else {
             cleanedText.firstOrNull()
         } ?: return '#'
