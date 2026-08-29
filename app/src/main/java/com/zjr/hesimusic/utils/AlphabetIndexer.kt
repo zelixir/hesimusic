@@ -81,6 +81,47 @@ object AlphabetIndexer {
         return trackNumberPattern.replace(text, "")
     }
 
+    private const val SORT_KEY_CACHE_SIZE = 4096
+    private val sortKeyCacheLock = Any()
+    private val sortKeyCache = linkedMapOf<Char, String>()
+
+    /**
+     * 歌曲二级排序键：去掉曲目号前缀后逐字符映射——汉字转全拼（取第一个读音），
+     * 日文假名取所在行字母，其余字符原样小写。供同首字母分组内的拼音/单词排序使用。
+     */
+    fun sortKey(text: String): String {
+        val cleaned = stripTrackNumber(text).trim()
+        if (cleaned.isEmpty()) return ""
+        val sb = StringBuilder(cleaned.length)
+        for (c in cleaned) {
+            sb.append(charSortKey(c))
+        }
+        return sb.toString()
+    }
+
+    private fun charSortKey(c: Char): String {
+        synchronized(sortKeyCacheLock) {
+            sortKeyCache[c]?.let { return it }
+        }
+        val key = computeCharSortKey(c)
+        synchronized(sortKeyCacheLock) {
+            if (sortKeyCache.size >= SORT_KEY_CACHE_SIZE) {
+                sortKeyCache.entries.firstOrNull()?.key?.let(sortKeyCache::remove)
+            }
+            sortKeyCache[c] = key
+        }
+        return key
+    }
+
+    private fun computeCharSortKey(c: Char): String {
+        if (c in 'a'..'z') return c.toString()
+        if (c in 'A'..'Z') return c.lowercaseChar().toString()
+        if (isChinese(c)) return toPinyin(c).lowercase().ifEmpty { c.lowercaseChar().toString() }
+        val kanaInitial = getKanaInitial(c)
+        if (kanaInitial != null) return kanaInitial.lowercaseChar().toString()
+        return c.lowercaseChar().toString()
+    }
+
     fun getInitial(text: String?): Char {
         if (text.isNullOrEmpty()) return '#'
         val hasTrackNumberPrefix = trackNumberPattern.containsMatchIn(text)

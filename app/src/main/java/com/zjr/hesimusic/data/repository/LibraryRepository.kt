@@ -111,7 +111,7 @@ private fun getFolderItemSortInitial(item: FileSystemItem): Char = when (item) {
 }
 
 private fun getFolderItemSortLabel(item: FileSystemItem): String =
-    AlphabetIndexer.stripTrackNumber(getFolderItemDisplayName(item)).lowercase()
+    AlphabetIndexer.sortKey(getFolderItemDisplayName(item))
 
 private fun getFolderItemDisplayName(item: FileSystemItem): String = when (item) {
     is FileSystemItem.Folder -> item.name

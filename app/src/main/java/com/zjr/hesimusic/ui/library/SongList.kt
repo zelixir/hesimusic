@@ -77,11 +77,14 @@ fun SongList(
                 return@derivedStateOf sortedMapOf<Char, List<Song>>()
             }
             val groupingStartTime = System.currentTimeMillis()
-            // Group songs by titleInitial, then sort groups alphabetically
+            // Group songs by titleInitial, then sort groups alphabetically.
+            // Within each group, apply secondary sort by full-pinyin/word key.
             val result = songs.groupBy { song ->
                 // Use pre-computed titleInitial field
                 val initial = song.titleInitial.firstOrNull() ?: '#'
                 if (initial.isLetter() || initial == '#') initial else '#'
+            }.mapValues { (_, groupSongs) ->
+                groupSongs.sortedWith(compareBy({ AlphabetIndexer.sortKey(it.title) }, { it.id }))
             }.toSortedMap()
             val groupingDuration = System.currentTimeMillis() - groupingStartTime
             Log.d(TAG, "Song grouping completed in ${groupingDuration}ms, ${result.size} groups")
