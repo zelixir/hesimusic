@@ -7,6 +7,7 @@ import com.zjr.hesimusic.data.model.Album
 import com.zjr.hesimusic.data.model.Artist
 import com.zjr.hesimusic.data.model.FileSystemItem
 import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.utils.AlphabetIndexer
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
@@ -85,13 +86,34 @@ class LibraryRepository @Inject constructor(
                 val name = File(path).name
                 items.add(FileSystemItem.Folder(name, path, count))
             }
-            
-            items.sortedWith(compareBy({ it is FileSystemItem.MusicFile }, { 
-                when(it) {
-                    is FileSystemItem.Folder -> it.name.lowercase()
-                    is FileSystemItem.MusicFile -> it.song.title.lowercase()
-                }
-            }))
+
+            sortFolderItems(items)
         }
     }
+}
+
+internal fun sortFolderItems(items: List<FileSystemItem>): List<FileSystemItem> =
+    items.sortedWith(
+        compareBy<FileSystemItem>(
+            { it is FileSystemItem.MusicFile },
+            { getFolderItemSortInitial(it) },
+            { getFolderItemSortLabel(it) },
+            { getFolderItemDisplayName(it).lowercase() }
+        )
+    )
+
+private fun getFolderItemSortInitial(item: FileSystemItem): Char = when (item) {
+    is FileSystemItem.Folder -> AlphabetIndexer.getInitial(item.name)
+    is FileSystemItem.MusicFile -> item.song.titleInitial
+        .firstOrNull()
+        ?.let(AlphabetIndexer::getInitial)
+        ?: AlphabetIndexer.getInitial(item.song.title)
+}
+
+private fun getFolderItemSortLabel(item: FileSystemItem): String =
+    AlphabetIndexer.stripTrackNumber(getFolderItemDisplayName(item)).lowercase()
+
+private fun getFolderItemDisplayName(item: FileSystemItem): String = when (item) {
+    is FileSystemItem.Folder -> item.name
+    is FileSystemItem.MusicFile -> item.song.title
 }
