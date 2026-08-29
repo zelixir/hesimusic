@@ -40,12 +40,14 @@ $Uri = "content://com.zjr.hesimusic.adbdb"
 $Pkg = "com.zjr.hesimusic"
 
 function Invoke-Db([string]$Method, [string]$DbArg = "") {
-    # 设备 shell 会对参数做二次解析：整体用单引号包住，内部单引号按 '\'' 转义
+    # 设备 shell 会对参数做二次解析：整体用单引号包住，内部单引号按 '\'' 转义；
+    # 双引号转义为 \"（PowerShell 原样传给 adb，adb 的 CRT 解析还原为 "，设备单引号内保持字面量）
     $cmd = "content call --uri $Uri --method $Method"
     if ($DbArg -ne "") {
         $escaped = $DbArg.Replace("'", "'\''")
         $cmd = "$cmd --arg '$escaped'"
     }
+    $cmd = $cmd.Replace('"', '\"')
     $raw = & $Adb shell $cmd
     Write-Output ($raw -join "`n")
 }
