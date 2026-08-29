@@ -4,10 +4,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
@@ -35,6 +39,7 @@ class MusicService : MediaSessionService() {
         const val KEY_AUDIO_SESSION_ID = "AUDIO_SESSION_ID"
         private const val SILENT_CHANNEL_ID = "silent_media_service"
         private const val SILENT_NOTIFICATION_ID = 2001
+        private const val PLAYBACK_ERROR_TOAST_INTERVAL_MS = 3000L
     }
 
     @Inject
@@ -234,7 +239,50 @@ class MusicService : MediaSessionService() {
                     saveQueueState()
                 }
             }
+
+            override fun onPlayerError(error: PlaybackException) {
+                Log.e(TAG, "onPlayerError: code=${error.errorCode}", error)
+                showPlaybackErrorToast(error)
+            }
         })
+    }
+
+    private var lastPlaybackErrorToastTime = 0L
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * 播放失败时弹 Toast 告知用户（否则点击播放无反应，用户无从得知原因）。
+     * 连续报错（如整个队列都不可读）按时间间隔节流。
+     */
+    private fun showPlaybackErrorToast(error: PlaybackException) {
+        mainHandler.post {
+            val now = System.currentTimeMillis()
+            if (now - lastPlaybackErrorToastTime < PLAYBACK_ERROR_TOAST_INTERVAL_MS) return@post
+            lastPlaybackErrorToastTime = now
+
+            val title = player.currentMediaItem?.mediaMetadata?.title?.toString()
+            val message = when {
+                isStorageAccessError(error) ->
+                    "无法播放${title.orEmpty().ifEmpty { "歌曲" }}：无法读取音频文件，请在系统设置中授予「所有文件访问」权限"
+                else -> "播放失败（${error.errorCode}）${title?.let { ": $it" }.orEmpty()}"
+            }
+            Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun isStorageAccessError(error: PlaybackException): Boolean {
+        if (error.errorCode == PlaybackException.ERROR_CODE_IO_NO_PERMISSION ||
+            error.errorCode == PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND
+        ) {
+            return true
+        }
+        // EACCES 等底层错误可能被包在多层 cause 里
+        var cause: Throwable? = error.cause
+        while (cause != null) {
+            if (cause.message?.contains("EACCES") == true) return true
+            cause = cause.cause
+        }
+        return false
     }
 
     private fun updateSessionAudioSessionId(audioSessionId: Int = player.audioSessionId) {
