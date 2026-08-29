@@ -30,6 +30,9 @@ interface SmartPlaylistDao {
     @Query("SELECT * FROM smart_playlists WHERE name = :name LIMIT 1")
     suspend fun getByName(name: String): SmartPlaylist?
 
+    @Query("UPDATE smart_playlists SET name = :name WHERE id = :id")
+    suspend fun renameById(id: Long, name: String)
+
     @Query("DELETE FROM smart_playlists WHERE id = :id")
     suspend fun deleteById(id: Long)
 

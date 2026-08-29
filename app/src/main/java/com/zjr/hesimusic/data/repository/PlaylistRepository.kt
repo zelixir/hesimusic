@@ -35,4 +35,10 @@ class PlaylistRepository @Inject constructor(
     suspend fun deletePlaylist(playlistId: Long) {
         playlistDao.deletePlaylist(playlistId)
     }
+
+    suspend fun renamePlaylist(playlistId: Long, name: String) {
+        val trimmedName = name.trim()
+        require(trimmedName.isNotEmpty()) { "歌单名称不能为空" }
+        playlistDao.renamePlaylistById(playlistId, trimmedName)
+    }
 }

@@ -66,6 +66,10 @@ adb shell content call --uri $U --method delete_view --arg '{"name":"近年日�
 adb shell content call --uri $U --method query --arg "SELECT id,name FROM playlists"
 adb shell content call --uri $U --method exec --arg "INSERT INTO playlists(name) VALUES('通勤')"
 
+# 重命名（静态歌单与 SQL 歌单同理；界面上也可长按歌单重命名）
+adb shell content call --uri $U --method exec --arg "UPDATE playlists SET name = '新名字' WHERE id = 3"
+adb shell content call --uri $U --method exec --arg "UPDATE smart_playlists SET name = '新名字' WHERE id = 2"
+
 # 表结构
 adb shell content call --uri $U --method schema
 

@@ -12,6 +12,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -64,6 +65,8 @@ fun PlaylistTabScreen(
     var selectedSmartId by rememberSaveable { mutableLongStateOf(0L) }
     var selectedPlaylistForAction by remember { mutableStateOf<Playlist?>(null) }
     var selectedSmartForAction by remember { mutableStateOf<SmartPlaylist?>(null) }
+    var renamingPlaylist by remember { mutableStateOf<Playlist?>(null) }
+    var renamingSmart by remember { mutableStateOf<SmartPlaylist?>(null) }
     LaunchedEffect(selectedPlaylistId, selectedSmartId) {
         onPlaylistSongsVisibleChanged(selectedPlaylistId != 0L || selectedSmartId != 0L)
     }
@@ -155,17 +158,29 @@ fun PlaylistTabScreen(
             onDismissRequest = { selectedPlaylistForAction = null },
             title = { Text(playlist.name) },
             text = {
-                Text(
-                    text = "删除歌单",
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 8.dp)
-                        .clickable {
-                            viewModel.deletePlaylist(playlist.id)
-                            selectedPlaylistForAction = null
-                        }
-                )
+                Column {
+                    Text(
+                        text = "重命名",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp)
+                            .clickable {
+                                selectedPlaylistForAction = null
+                                renamingPlaylist = playlist
+                            }
+                    )
+                    Text(
+                        text = "删除歌单",
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp)
+                            .clickable {
+                                viewModel.deletePlaylist(playlist.id)
+                                selectedPlaylistForAction = null
+                            }
+                    )
+                }
             },
             confirmButton = {
                 TextButton(onClick = { selectedPlaylistForAction = null }) {
@@ -180,17 +195,29 @@ fun PlaylistTabScreen(
             onDismissRequest = { selectedSmartForAction = null },
             title = { Text(smart.name) },
             text = {
-                Text(
-                    text = "删除 SQL 歌单（不影响歌曲文件）",
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 8.dp)
-                        .clickable {
-                            viewModel.deleteSmartPlaylist(smart.id)
-                            selectedSmartForAction = null
-                        }
-                )
+                Column {
+                    Text(
+                        text = "重命名",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp)
+                            .clickable {
+                                selectedSmartForAction = null
+                                renamingSmart = smart
+                            }
+                    )
+                    Text(
+                        text = "删除 SQL 歌单（不影响歌曲文件）",
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp)
+                            .clickable {
+                                viewModel.deleteSmartPlaylist(smart.id)
+                                selectedSmartForAction = null
+                            }
+                    )
+                }
             },
             confirmButton = {
                 TextButton(onClick = { selectedSmartForAction = null }) {
@@ -199,4 +226,54 @@ fun PlaylistTabScreen(
             }
         )
     }
+
+    renamingPlaylist?.let { playlist ->
+        RenameDialog(
+            initialName = playlist.name,
+            onConfirm = { newName -> viewModel.renamePlaylist(playlist.id, newName) },
+            onDismiss = { renamingPlaylist = null }
+        )
+    }
+
+    renamingSmart?.let { smart ->
+        RenameDialog(
+            initialName = smart.name,
+            onConfirm = { newName -> viewModel.renameSmartPlaylist(smart.id, newName) },
+            onDismiss = { renamingSmart = null }
+        )
+    }
+}
+
+@Composable
+private fun RenameDialog(
+    initialName: String,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var text by remember { mutableStateOf(initialName) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("重命名歌单") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        confirmButton = {
+            TextButton(
+                enabled = text.isNotBlank(),
+                onClick = { onConfirm(text); onDismiss() }
+            ) {
+                Text("确认")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
 }

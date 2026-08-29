@@ -127,6 +127,12 @@ class SmartPlaylistRepository @Inject constructor(
 
     suspend fun deleteById(id: Long) = dao.deleteById(id)
 
+    suspend fun rename(id: Long, name: String) {
+        val trimmedName = name.trim()
+        require(trimmedName.isNotEmpty()) { "歌单名称不能为空" }
+        dao.renameById(id, trimmedName)
+    }
+
     suspend fun deleteAll() = dao.deleteAll()
 
     suspend fun insertAll(playlists: List<SmartPlaylist>) = dao.insertAll(playlists)

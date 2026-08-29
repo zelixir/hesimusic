@@ -206,6 +206,18 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
+    fun renamePlaylist(playlistId: Long, name: String) {
+        viewModelScope.launch {
+            runCatching { playlistRepository.renamePlaylist(playlistId, name) }
+        }
+    }
+
+    fun renameSmartPlaylist(smartPlaylistId: Long, name: String) {
+        viewModelScope.launch {
+            runCatching { smartPlaylistRepository.rename(smartPlaylistId, name) }
+        }
+    }
+
     fun hideSong(song: Song) {
         viewModelScope.launch {
             hiddenSongRepository.hideSong(song)
