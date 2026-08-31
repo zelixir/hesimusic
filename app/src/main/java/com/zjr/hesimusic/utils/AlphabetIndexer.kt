@@ -87,7 +87,8 @@ object AlphabetIndexer {
 
     /**
      * 歌曲二级排序键：去掉曲目号前缀后逐字符映射——汉字转全拼（取第一个读音），
-     * 日文假名取所在行字母，其余字符原样小写。供同首字母分组内的拼音/单词排序使用。
+     * 日文假名取罗马音（Hepburn，如 さ→sa、し→shi），其余字符原样小写。
+     * 供同首字母分组内的拼音/单词排序使用。
      */
     fun sortKey(text: String): String {
         val cleaned = stripTrackNumber(text).trim()
@@ -117,9 +118,131 @@ object AlphabetIndexer {
         if (c in 'a'..'z') return c.toString()
         if (c in 'A'..'Z') return c.lowercaseChar().toString()
         if (isChinese(c)) return toPinyin(c).lowercase().ifEmpty { c.lowercaseChar().toString() }
+        val kanaRomaji = getKanaRomaji(c)
+        if (kanaRomaji != null) return kanaRomaji
         val kanaInitial = getKanaInitial(c)
         if (kanaInitial != null) return kanaInitial.lowercaseChar().toString()
         return c.lowercaseChar().toString()
+    }
+
+    /**
+     * Hepburn romaji for kana (hiragana & katakana), used in secondary sort keys:
+     * さ→sa, し→shi, つ→tsu, ん→n, ヴ→vu …. Small kana (ゃ・っ・ぁ…) map to their
+     * full syllable so keys stay in gojūon order (e.g. しゃ→shiya). Returns null
+     * for non-kana characters.
+     */
+    private fun getKanaRomaji(c: Char): String? {
+        return when (c) {
+            // A row (incl. small ぁぃぅぇぉ)
+            '\u3041', '\u3042', '\u30a1', '\u30a2' -> "a"
+            '\u3043', '\u3044', '\u30a3', '\u30a4' -> "i"
+            '\u3045', '\u3046', '\u30a5', '\u30a6' -> "u"
+            '\u3047', '\u3048', '\u30a7', '\u30a8' -> "e"
+            '\u3049', '\u304a', '\u30a9', '\u30aa' -> "o"
+
+            // K row (incl. small ヵヶ)
+            '\u304b', '\u30ab', '\u30f5' -> "ka"
+            '\u304d', '\u30ad' -> "ki"
+            '\u304f', '\u30af' -> "ku"
+            '\u3051', '\u30b1', '\u30f6' -> "ke"
+            '\u3053', '\u30b3' -> "ko"
+
+            // S row (し = shi)
+            '\u3055', '\u30b5' -> "sa"
+            '\u3057', '\u30b7' -> "shi"
+            '\u3059', '\u30b9' -> "su"
+            '\u305b', '\u30bb' -> "se"
+            '\u305d', '\u30bd' -> "so"
+
+            // T row (ち = chi, つ/っ = tsu)
+            '\u305f', '\u30bf' -> "ta"
+            '\u3061', '\u30c1' -> "chi"
+            '\u3063', '\u30c3', '\u3064', '\u30c4' -> "tsu"
+            '\u3066', '\u30c6' -> "te"
+            '\u3068', '\u30c8' -> "to"
+
+            // N row
+            '\u306a', '\u30ca' -> "na"
+            '\u306b', '\u30cb' -> "ni"
+            '\u306c', '\u30cc' -> "nu"
+            '\u306d', '\u30cd' -> "ne"
+            '\u306e', '\u30ce' -> "no"
+
+            // H row (ふ = fu)
+            '\u306f', '\u30cf' -> "ha"
+            '\u3072', '\u30d2' -> "hi"
+            '\u3075', '\u30d5' -> "fu"
+            '\u3078', '\u30d8' -> "he"
+            '\u307b', '\u30db' -> "ho"
+
+            // M row
+            '\u307e', '\u30de' -> "ma"
+            '\u307f', '\u30df' -> "mi"
+            '\u3080', '\u30e0' -> "mu"
+            '\u3081', '\u30e1' -> "me"
+            '\u3082', '\u30e2' -> "mo"
+
+            // Y row (incl. small ゃゅょ)
+            '\u3083', '\u3084', '\u30e3', '\u30e4' -> "ya"
+            '\u3085', '\u3086', '\u30e5', '\u30e6' -> "yu"
+            '\u3087', '\u3088', '\u30e7', '\u30e8' -> "yo"
+
+            // R row
+            '\u3089', '\u30e9' -> "ra"
+            '\u308a', '\u30ea' -> "ri"
+            '\u308b', '\u30eb' -> "ru"
+            '\u308c', '\u30ec' -> "re"
+            '\u308d', '\u30ed' -> "ro"
+
+            // W row (incl. small ゎヮ, archaic ゐゑヰヱ)
+            '\u308e', '\u308f', '\u30ee', '\u30ef' -> "wa"
+            '\u3090', '\u30f0' -> "wi"
+            '\u3091', '\u30f1' -> "we"
+            '\u3092', '\u30f2' -> "wo"
+            '\u3093', '\u30f3' -> "n"
+
+            // G row
+            '\u304c', '\u30ac' -> "ga"
+            '\u304e', '\u30ae' -> "gi"
+            '\u3050', '\u30b0' -> "gu"
+            '\u3052', '\u30b2' -> "ge"
+            '\u3054', '\u30b4' -> "go"
+
+            // Z row (じ/ぢ = ji, ず/づ = zu)
+            '\u3056', '\u30b6' -> "za"
+            '\u3058', '\u30b8', '\u3062', '\u30c2' -> "ji"
+            '\u305a', '\u30ba', '\u3065', '\u30c5' -> "zu"
+            '\u305c', '\u30bc' -> "ze"
+            '\u305e', '\u30be' -> "zo"
+
+            // D row
+            '\u3060', '\u30c0' -> "da"
+            '\u3067', '\u30c7' -> "de"
+            '\u3069', '\u30c9' -> "do"
+
+            // B row
+            '\u3070', '\u30d0' -> "ba"
+            '\u3073', '\u30d3' -> "bi"
+            '\u3076', '\u30d6' -> "bu"
+            '\u3079', '\u30d9' -> "be"
+            '\u307c', '\u30dc' -> "bo"
+
+            // P row
+            '\u3071', '\u30d1' -> "pa"
+            '\u3074', '\u30d4' -> "pi"
+            '\u3077', '\u30d7' -> "pu"
+            '\u307a', '\u30da' -> "pe"
+            '\u307d', '\u30dd' -> "po"
+
+            // V (katakana only)
+            '\u30f4' -> "vu"
+            '\u30f7' -> "va"
+            '\u30f8' -> "vi"
+            '\u30f9' -> "ve"
+            '\u30fa' -> "vo"
+
+            else -> null
+        }
     }
 
     fun getInitial(text: String?): Char {
