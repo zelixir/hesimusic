@@ -89,8 +89,11 @@ class MainActivity : ComponentActivity() {
                 customColor = customThemeColor
             ) {
                 var hasShownStartup by rememberSaveable { mutableStateOf(false) }
-                if (!hasShownStartup && !startupImageUri.isNullOrBlank()) {
+                if (!hasShownStartup && shouldShowStartupImage(startupImageUri)) {
                     LaunchedEffect(startupImageUri) {
+                        // Mark this image as shown immediately (before the delay),
+                        // so background activity destruction/restarts cannot replay it.
+                        playbackPreferences.saveStartupImageShownUri(startupImageUri)
                         delay(STARTUP_IMAGE_DISPLAY_DURATION_MILLIS)
                         hasShownStartup = true
                     }
@@ -236,5 +239,24 @@ class MainActivity : ComponentActivity() {
         val totalDuration = System.currentTimeMillis() - activityStartTime
         appLogger.timing(TAG, "Total MainActivity onCreate", totalDuration)
         appLogger.info(TAG, "MainActivity initialized successfully")
+    }
+
+    /**
+     * Whether the startup cover image should be shown. The cover is displayed
+     * at most once per image, persisted across restarts: [PlaybackPreferences]
+     * remembers which image was already shown, and the cover replays only after
+     * the user picks a different startup image. This is immune to background
+     * activity destruction (OEM background cleaners like MIUI can recreate the
+     * activity without restoring Compose saved state, which previously made the
+     * cover replay on every background return).
+     */
+    private fun shouldShowStartupImage(startupImageUri: String?): Boolean {
+        if (startupImageUri.isNullOrBlank()) return false
+        if (startupImageUri == playbackPreferences.getStartupImageShownUri()) {
+            Log.d(TAG, "Skipping startup image: already shown for this image")
+            return false
+        }
+        Log.d(TAG, "Showing startup image")
+        return true
     }
 }
