@@ -370,8 +370,6 @@ fun MainScreen(
                 when (page) {
                     0 -> {
                         val songs by viewModel.songs.collectAsState()
-                        Log.d("MainScreen", "SongList (Global): displaying ${songs.size} songs")
-                        appLogger?.info("MainScreen", "SongList (Global): displaying ${songs.size} songs")
                         SongList(
                             songs = songs,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
@@ -440,8 +438,6 @@ fun MainScreen(
                     }
                     2 -> {
                         val favoriteSongs by viewModel.favoriteSongs.collectAsState()
-                        Log.d("MainScreen", "SongList (Favorites): displaying ${favoriteSongs.size} songs")
-                        appLogger?.info("MainScreen", "SongList (Favorites): displaying ${favoriteSongs.size} songs")
                         SongList(
                             songs = favoriteSongs,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
@@ -474,8 +470,6 @@ fun MainScreen(
                         )
                     }
                     3 -> {
-                        Log.d("MainScreen", "FolderList view activated")
-                        appLogger?.info("MainScreen", "FolderList view activated")
                         FolderList(
                             viewModel = viewModel,
                             initialPath = "/storage/emulated/0",
@@ -490,14 +484,10 @@ fun MainScreen(
                     }
                     4 -> {
                         val artists by viewModel.artists.collectAsState()
-                        Log.d("MainScreen", "ArtistList: displaying ${artists.size} artists")
-                        appLogger?.info("MainScreen", "ArtistList: displaying ${artists.size} artists")
                         ArtistList(artists = artists, onArtistClick = onArtistClick, appLogger = appLogger)
                     }
                     5 -> {
                         val albums by viewModel.albums.collectAsState()
-                        Log.d("MainScreen", "AlbumList: displaying ${albums.size} albums")
-                        appLogger?.info("MainScreen", "AlbumList: displaying ${albums.size} albums")
                         AlbumList(albums = albums, onAlbumClick = onAlbumClick, appLogger = appLogger)
                     }
                 }
