@@ -105,7 +105,6 @@ class PlaybackPreferences @Inject constructor(
         private const val KEY_APP_THEME_PALETTE = "app_theme_palette"
         private const val KEY_CUSTOM_THEME_COLOR = "custom_theme_color"
         private const val KEY_STARTUP_IMAGE_URI = "startup_image_uri"
-        private const val KEY_STARTUP_IMAGE_SHOWN_URI = "startup_image_uri_shown"
         private const val KEY_LIST_BACKGROUND_IMAGE_URI = "list_background_image_uri"
     }
     
@@ -281,24 +280,6 @@ class PlaybackPreferences @Inject constructor(
         return prefs.getString(KEY_LIST_BACKGROUND_IMAGE_URI, null)
     }
 
-    /**
-     * Record which startup cover image has already been displayed once.
-     * The cover is shown at most once per image: it replays only after the
-     * user picks a different startup image in settings. Persisted across
-     * process/activity restarts so background-cleaning OEMs (MIUI etc.)
-     * cannot make it replay on every background return.
-     */
-    fun saveStartupImageShownUri(uri: String?) {
-        prefs.edit().putString(KEY_STARTUP_IMAGE_SHOWN_URI, uri).apply()
-    }
-
-    /**
-     * The URI of the startup cover image that was already shown, null if none.
-     */
-    fun getStartupImageShownUri(): String? {
-        return prefs.getString(KEY_STARTUP_IMAGE_SHOWN_URI, null)
-    }
-    
     /**
      * Save the playlist context (type and value).
      * This is called when the user starts playing from a specific list.

@@ -54,7 +54,17 @@ private const val STARTUP_IMAGE_DISPLAY_DURATION_MILLIS = 1200L
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
-    
+
+    companion object {
+        /**
+         * The startup cover image shown during this process's lifetime, null if none.
+         * Kept in memory on purpose: process death (force-stop, OEM killers) resets it
+         * so the cover replays on cold start, while a background activity recreation
+         * (process still alive) keeps it and skips the cover.
+         */
+        private var startupCoverShownUri: String? = null
+    }
+
     @Inject
     lateinit var appLogger: AppLogger
     @Inject
@@ -93,7 +103,7 @@ class MainActivity : ComponentActivity() {
                     LaunchedEffect(startupImageUri) {
                         // Mark this image as shown immediately (before the delay),
                         // so background activity destruction/restarts cannot replay it.
-                        playbackPreferences.saveStartupImageShownUri(startupImageUri)
+                        startupCoverShownUri = startupImageUri
                         delay(STARTUP_IMAGE_DISPLAY_DURATION_MILLIS)
                         hasShownStartup = true
                     }
@@ -242,18 +252,17 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Whether the startup cover image should be shown. The cover is displayed
-     * at most once per image, persisted across restarts: [PlaybackPreferences]
-     * remembers which image was already shown, and the cover replays only after
-     * the user picks a different startup image. This is immune to background
-     * activity destruction (OEM background cleaners like MIUI can recreate the
-     * activity without restoring Compose saved state, which previously made the
-     * cover replay on every background return).
+     * Whether the startup cover image should be shown. The cover is displayed at
+     * most once per image per process: [startupCoverShownUri] remembers in memory
+     * which image this process already showed, so the cover replays after process
+     * death (cold start, force-stop + relaunch) or when the user picks a different
+     * startup image, but not when an OEM background cleaner merely recreates the
+     * activity without killing the process (which resets Compose saved state).
      */
     private fun shouldShowStartupImage(startupImageUri: String?): Boolean {
         if (startupImageUri.isNullOrBlank()) return false
-        if (startupImageUri == playbackPreferences.getStartupImageShownUri()) {
-            Log.d(TAG, "Skipping startup image: already shown for this image")
+        if (startupImageUri == startupCoverShownUri) {
+            Log.d(TAG, "Skipping startup image: already shown in this process")
             return false
         }
         Log.d(TAG, "Showing startup image")
