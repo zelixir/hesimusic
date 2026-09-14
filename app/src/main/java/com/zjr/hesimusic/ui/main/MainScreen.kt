@@ -49,7 +49,9 @@ import com.zjr.hesimusic.data.model.Artist
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.preferences.PlaylistContext
 import com.zjr.hesimusic.data.preferences.PlaylistType
+import com.zjr.hesimusic.data.preferences.SongSortMode
 import com.zjr.hesimusic.ui.common.MusicViewModel
+import com.zjr.hesimusic.ui.common.SortModeMenuButton
 import com.zjr.hesimusic.ui.common.ListBackground
 import com.zjr.hesimusic.ui.library.AlbumList
 import com.zjr.hesimusic.ui.library.ArtistList
@@ -115,6 +117,23 @@ fun MainScreen(
     var hasRestoredLibraryContext by remember { mutableStateOf(false) }
     var restoredFolderPath by remember { mutableStateOf<String?>(null) }
     var restoredPlaylistId by remember { mutableStateOf<Long?>(null) }
+
+    // 歌曲级列表（歌曲/收藏/文件夹）的排序模式，按列表维度持久化
+    val songTabSortKey = when (pagerState.currentPage) {
+        0 -> "main_songs"
+        2 -> "favorites"
+        3 -> "folder"
+        else -> null
+    }
+    var songSortMode by remember(songTabSortKey) {
+        mutableStateOf(songTabSortKey?.let { viewModel.getSortMode(it) } ?: SongSortMode.TITLE_INITIAL)
+    }
+    fun toggleSongSortMode() {
+        val key = songTabSortKey ?: return
+        val newMode = songSortMode.toggled()
+        viewModel.setSortMode(key, newMode)
+        songSortMode = newMode
+    }
 
     // Request focus when search becomes active
     LaunchedEffect(isSearchActive) {
@@ -352,6 +371,14 @@ fun MainScreen(
                     ) {
                         Icon(Icons.Default.Search, contentDescription = "搜索")
                     }
+                    // 歌曲级列表的排序模式切换按钮
+                    if (songTabSortKey != null) {
+                        SortModeMenuButton(
+                            sortMode = songSortMode,
+                            onToggle = { toggleSongSortMode() },
+                            modifier = Modifier.align(Alignment.CenterVertically)
+                        )
+                    }
                 }
             }
 
@@ -372,6 +399,7 @@ fun MainScreen(
                         val songs by viewModel.songs.collectAsState()
                         SongList(
                             songs = songs,
+                            sortMode = songSortMode,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
                             onSongClick = { list, index -> 
                                 Log.d("MainScreen", "SongList (Global): playing song at index $index")
@@ -440,6 +468,7 @@ fun MainScreen(
                         val favoriteSongs by viewModel.favoriteSongs.collectAsState()
                         SongList(
                             songs = favoriteSongs,
+                            sortMode = songSortMode,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
                             onSongClick = { list, index -> 
                                 Log.d("MainScreen", "SongList (Favorites): playing song at index $index")
@@ -472,6 +501,7 @@ fun MainScreen(
                     3 -> {
                         FolderList(
                             viewModel = viewModel,
+                            sortMode = songSortMode,
                             initialPath = "/storage/emulated/0",
                             startPath = restoredFolderPath,
                             currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,

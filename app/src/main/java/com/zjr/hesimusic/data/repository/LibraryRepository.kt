@@ -102,6 +102,30 @@ internal fun sortFolderItems(items: List<FileSystemItem>): List<FileSystemItem> 
         )
     )
 
+/**
+ * 音轨号模式下的文件夹列表排序：文件夹条目仍在歌曲前并按原有首字母逻辑排，
+ * 歌曲条目按 trackNumber 升序（0/缺失排最后，同级按标题）。
+ */
+internal fun sortFolderItemsByTrackNumber(items: List<FileSystemItem>): List<FileSystemItem> {
+    val folders = items.filterIsInstance<FileSystemItem.Folder>().sortedWith(
+        compareBy(
+            { getFolderItemSortInitial(it) },
+            { getFolderItemSortLabel(it) },
+            { it.name.lowercase() }
+        )
+    )
+    val songs = items.filterIsInstance<FileSystemItem.MusicFile>()
+        .sortedWith(
+            compareBy(
+                { if (it.song.trackNumber > 0) 0 else 1 },
+                { it.song.trackNumber },
+                { AlphabetIndexer.sortKey(it.song.title) },
+                { it.song.id }
+            )
+        )
+    return folders + songs
+}
+
 private fun getFolderItemSortInitial(item: FileSystemItem): Char = when (item) {
     is FileSystemItem.Folder -> AlphabetIndexer.getInitial(item.name)
     is FileSystemItem.MusicFile -> item.song.titleInitial

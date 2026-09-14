@@ -10,6 +10,8 @@ import com.zjr.hesimusic.data.model.Playlist
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.model.SmartPlaylist
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
+import com.zjr.hesimusic.data.preferences.SortPreferences
+import com.zjr.hesimusic.data.preferences.SongSortMode
 import com.zjr.hesimusic.data.repository.HiddenSongRepository
 import com.zjr.hesimusic.data.repository.LibraryRepository
 import com.zjr.hesimusic.data.repository.FavoriteRepository
@@ -42,7 +44,8 @@ class LibraryViewModel @Inject constructor(
     private val songRepository: SongRepository,
     private val smartPlaylistRepository: SmartPlaylistRepository,
     private val tagLibHelper: TagLibHelper,
-    private val playbackPreferences: PlaybackPreferences
+    private val playbackPreferences: PlaybackPreferences,
+    private val sortPreferences: SortPreferences
 ) : ViewModel() {
 
     private val _searchQuery = MutableStateFlow("")
@@ -104,7 +107,13 @@ class LibraryViewModel @Inject constructor(
     }
 
     fun getFolderContents(path: String) = repository.getFolderContents(path)
-    
+
+    /** 读取指定列表的排序模式偏好。 */
+    fun getSortMode(listKey: String): SongSortMode = sortPreferences.getSortMode(listKey)
+
+    /** 保存指定列表的排序模式偏好。 */
+    fun setSortMode(listKey: String, mode: SongSortMode) = sortPreferences.setSortMode(listKey, mode)
+
     fun getSongsByArtist(artist: String) = repository.getSongsByArtist(artist)
     
     fun getSongsByAlbum(album: String) = repository.getSongsByAlbum(album)

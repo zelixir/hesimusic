@@ -2,6 +2,7 @@ package com.zjr.hesimusic.ui.library
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -24,6 +25,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.zjr.hesimusic.data.model.Playlist
@@ -33,6 +35,7 @@ import com.zjr.hesimusic.data.preferences.PlaylistContext
 import com.zjr.hesimusic.data.preferences.PlaylistType
 import com.zjr.hesimusic.ui.common.MusicListItem
 import com.zjr.hesimusic.ui.common.MusicViewModel
+import com.zjr.hesimusic.ui.common.SortModeMenuButton
 
 /** SQL 歌单在 PlaylistContext 中的 value 前缀，与静态歌单的纯数字 id 区分。 */
 const val SMART_PLAYLIST_VALUE_PREFIX = "smart:"
@@ -101,12 +104,25 @@ fun PlaylistTabScreen(
         val smartId = selectedSmartId
         val songs by viewModel.getSmartPlaylistSongs(smartId).collectAsState(initial = emptyList())
         val smartContext = smartPlaylistContext(smartId)
+        // 歌曲列表排序模式（按列表维度持久化）
+        var sortMode by remember { mutableStateOf(viewModel.getSortMode("smart:$smartId")) }
         Column(modifier = Modifier.fillMaxSize()) {
-            TextButton(onClick = { selectedSmartId = 0L }, modifier = Modifier.padding(horizontal = 8.dp)) {
-                Text("返回歌单列表")
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { selectedSmartId = 0L }, modifier = Modifier.padding(horizontal = 8.dp)) {
+                    Text("返回歌单列表")
+                }
+                SortModeMenuButton(
+                    sortMode = sortMode,
+                    onToggle = {
+                        val newMode = sortMode.toggled()
+                        viewModel.setSortMode("smart:$smartId", newMode)
+                        sortMode = newMode
+                    }
+                )
             }
             SongList(
                 songs = songs,
+                sortMode = sortMode,
                 currentPlayingSongId = currentPlayingSongId,
                 onSongClick = { list, index ->
                     musicViewModel.playList(list, index, smartContext)
@@ -125,12 +141,25 @@ fun PlaylistTabScreen(
         }
     } else {
         val songs by viewModel.getSongsByPlaylist(selectedPlaylistId).collectAsState(initial = emptyList())
+        // 歌曲列表排序模式（按列表维度持久化）
+        var sortMode by remember { mutableStateOf(viewModel.getSortMode("playlist:$selectedPlaylistId")) }
         Column(modifier = Modifier.fillMaxSize()) {
-            TextButton(onClick = { selectedPlaylistId = 0L }, modifier = Modifier.padding(horizontal = 8.dp)) {
-                Text("返回歌单列表")
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { selectedPlaylistId = 0L }, modifier = Modifier.padding(horizontal = 8.dp)) {
+                    Text("返回歌单列表")
+                }
+                SortModeMenuButton(
+                    sortMode = sortMode,
+                    onToggle = {
+                        val newMode = sortMode.toggled()
+                        viewModel.setSortMode("playlist:$selectedPlaylistId", newMode)
+                        sortMode = newMode
+                    }
+                )
             }
             SongList(
                 songs = songs,
+                sortMode = sortMode,
                 currentPlayingSongId = currentPlayingSongId,
                 onSongClick = { list, index ->
                     musicViewModel.playList(

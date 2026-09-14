@@ -29,6 +29,7 @@ import com.zjr.hesimusic.data.preferences.PlaylistContext
 import com.zjr.hesimusic.data.preferences.PlaylistType
 import com.zjr.hesimusic.ui.common.ListBackground
 import com.zjr.hesimusic.ui.common.MusicViewModel
+import com.zjr.hesimusic.ui.common.SortModeMenuButton
 import com.zjr.hesimusic.ui.main.BottomPlayerBar
 import com.zjr.hesimusic.ui.settings.SettingsViewModel
 
@@ -56,7 +57,20 @@ fun SongListScreen(
         "album" -> viewModel.getSongsByAlbum(value)
         else -> viewModel.songs // Fallback
     }
-    
+
+    // 歌曲列表排序模式（按列表维度持久化）
+    val sortListKey = when (type) {
+        "artist" -> "artist:$value"
+        "album" -> "album:$value"
+        else -> "all"
+    }
+    var sortMode by remember { mutableStateOf(viewModel.getSortMode(sortListKey)) }
+    val toggleSortMode = {
+        val newMode = sortMode.toggled()
+        viewModel.setSortMode(sortListKey, newMode)
+        sortMode = newMode
+    }
+
     val songs by songsFlow.collectAsState(initial = emptyList())
     val context = LocalContext.current
     val musicUiState by musicViewModel.uiState.collectAsState()
@@ -99,6 +113,9 @@ fun SongListScreen(
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
+                },
+                actions = {
+                    SortModeMenuButton(sortMode = sortMode, onToggle = toggleSortMode)
                 }
             )
         },
@@ -181,7 +198,7 @@ fun SongListScreen(
                 currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
                 onSongClick = handleSongClick,
                 onSongLongClick = { selectedSongForActions = it },
-                preferTrackNumberOrdering = type == "album",
+                sortMode = sortMode,
                 isBatchMode = isBatchMode,
                 selectedSongIds = batchSelectedSongIds,
                 queueDisplayBySongId = if (isCurrentPlayingList) buildQueueDisplayBySongId(playQueueSongIds) else emptyMap(),

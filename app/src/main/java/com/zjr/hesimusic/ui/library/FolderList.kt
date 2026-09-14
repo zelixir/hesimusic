@@ -23,6 +23,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import com.zjr.hesimusic.data.model.FileSystemItem
 import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.data.preferences.SongSortMode
+import com.zjr.hesimusic.data.repository.sortFolderItemsByTrackNumber
 import com.zjr.hesimusic.ui.common.FastScrollbar
 import com.zjr.hesimusic.ui.common.MusicListItem
 import com.zjr.hesimusic.utils.AlphabetIndexer
@@ -39,11 +41,16 @@ fun FolderList(
     initialPath: String = "/storage/emulated/0",
     startPath: String? = null,
     currentPlayingSongId: String? = null,
+    sortMode: SongSortMode = SongSortMode.TITLE_INITIAL,
     onSongClick: (List<Song>, Int, String) -> Unit,
     appLogger: AppLogger? = null
 ) {
     var currentPath by rememberSaveable(initialPath, startPath) { mutableStateOf(startPath ?: initialPath) }
-    val items by viewModel.getFolderContents(currentPath).collectAsState(initial = emptyList())
+    val fetchedItems by viewModel.getFolderContents(currentPath).collectAsState(initial = emptyList())
+    // 音轨号模式下歌曲按 trackNumber 排（文件夹条目仍在歌曲前按原逻辑）
+    val items = remember(fetchedItems, sortMode) {
+        if (sortMode == SongSortMode.TRACK_NUMBER) sortFolderItemsByTrackNumber(fetchedItems) else fetchedItems
+    }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
@@ -150,7 +157,7 @@ fun FolderList(
             }
         }
 
-        if (sections.isNotEmpty()) {
+        if (sortMode == SongSortMode.TITLE_INITIAL && sections.isNotEmpty()) {
             FastScrollbar(
                 sections = sections,
                 onSectionSelected = { index ->

@@ -21,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.data.preferences.SongSortMode
 import com.zjr.hesimusic.ui.common.FastScrollbar
 import com.zjr.hesimusic.ui.common.MusicListItem
 import com.zjr.hesimusic.utils.AlphabetIndexer
@@ -46,7 +47,7 @@ fun SongList(
     currentPlayingSongId: String? = null,
     onSongClick: (List<Song>, Int) -> Unit,
     onSongLongClick: ((Song) -> Unit)? = null,
-    preferTrackNumberOrdering: Boolean = false,
+    sortMode: SongSortMode = SongSortMode.TITLE_INITIAL,
     isBatchMode: Boolean = false,
     selectedSongIds: Set<Long> = emptySet(),
     onBatchSongToggle: ((Song) -> Unit)? = null,
@@ -56,9 +57,7 @@ fun SongList(
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    val useTrackNumberOrdering = remember(songs, preferTrackNumberOrdering) {
-        shouldUseTrackNumberOrdering(preferTrackNumberOrdering, songs)
-    }
+    val useTrackNumberOrdering = sortMode == SongSortMode.TRACK_NUMBER
 
     // Log list size for performance tracking
     LaunchedEffect(songs.size, useTrackNumberOrdering) {
@@ -245,13 +244,16 @@ fun SongList(
     }
 }
 
-internal fun shouldUseTrackNumberOrdering(
-    preferTrackNumberOrdering: Boolean,
-    songs: List<Song>
-): Boolean = preferTrackNumberOrdering && songs.isNotEmpty() && songs.all { it.trackNumber > 0 }
-
+/** 音轨号排序：trackNumber 升序，0/缺失排最后，同级按标题。 */
 internal fun orderSongsByTrackNumber(songs: List<Song>): List<Song> =
-    songs.sortedBy { it.trackNumber }
+    songs.sortedWith(
+        compareBy(
+            { if (it.trackNumber > 0) 0 else 1 },
+            { it.trackNumber },
+            { AlphabetIndexer.sortKey(it.title) },
+            { it.id }
+        )
+    )
 
 internal fun buildQueueDisplayBySongId(queueSongIds: List<Long>): Map<Long, String> {
     if (queueSongIds.isEmpty()) return emptyMap()
