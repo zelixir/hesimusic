@@ -17,6 +17,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.zjr.hesimusic.R
+import com.zjr.hesimusic.data.mapper.mediaIdToSongId
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
 import com.zjr.hesimusic.data.repository.SongRepository
@@ -319,7 +320,7 @@ class MusicService : MediaSessionService() {
         val index = player.currentMediaItemIndex
         val position = player.currentPosition
         val mediaItem = player.currentMediaItem
-        val songId = mediaItem?.mediaId?.toLongOrNull() ?: -1L
+        val songId = mediaItem?.mediaId?.let { mediaIdToSongId(it) } ?: -1L
         
         playbackPreferences.saveCurrentSongIndex(index)
         playbackPreferences.saveCurrentSongId(songId)
@@ -333,7 +334,8 @@ class MusicService : MediaSessionService() {
         }
         
         val mediaItems = List(player.mediaItemCount) { i -> player.getMediaItemAt(i) }
-        val ids = mediaItems.mapNotNull { it.mediaId.toLongOrNull() }
+        // mapNotNull via mediaIdToSongId keeps queued copies persisted as their song id
+        val ids = mediaItems.mapNotNull { mediaIdToSongId(it.mediaId) }
         playbackPreferences.saveQueue(ids)
     }
 

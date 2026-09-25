@@ -12,6 +12,8 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
+import com.zjr.hesimusic.data.mapper.buildQueueMediaId
+import com.zjr.hesimusic.data.mapper.mediaIdToSongId
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
@@ -25,8 +27,11 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -58,8 +63,14 @@ class MusicViewModel @Inject constructor(
     // Expose the saved playlist context for UI to use when restoring state
     private val _savedPlaylistContext = MutableStateFlow<PlaylistContext?>(null)
     val savedPlaylistContext: StateFlow<PlaylistContext?> = _savedPlaylistContext.asStateFlow()
-    private val _playQueueSongIds = MutableStateFlow<List<Long>>(emptyList())
-    val playQueueSongIds: StateFlow<List<Long>> = _playQueueSongIds.asStateFlow()
+
+    // Queue entries carry their own unique mediaId so they stay distinguishable from
+    // base-playlist copies of the same song while they sit in the player timeline.
+    private val _playQueue = MutableStateFlow<List<QueuedItem>>(emptyList())
+    val playQueueSongIds: StateFlow<List<Long>> = _playQueue
+        .map { queue -> queue.map { it.songId } }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    private var queueMediaIdSequence = 0L
     private var queuedPlaybackRestoreRepeatMode: Int? = null
     private var queuedPlaybackRestoreShuffleModeEnabled: Boolean? = null
     private var isSeekingToQueuedSong = false
@@ -138,11 +149,11 @@ class MusicViewModel @Inject constructor(
 
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                     Log.d(TAG, "onMediaItemTransition: mediaId=${mediaItem?.mediaId}, reason=$reason")
-                    val currentSongId = mediaItem?.mediaId?.toLongOrNull()
-                    if (maybeSeekToQueuedSong(currentSongId, reason)) {
+                    val landedMediaId = mediaItem?.mediaId
+                    if (maybeSeekToQueuedSong(landedMediaId, reason)) {
                         return
                     }
-                    consumePlayQueue(currentSongId)
+                    consumePlayQueue(landedMediaId)
                     updateState()
                     // Update favorite status when song changes
                     updateCurrentSongFavoriteStatus()
@@ -159,6 +170,7 @@ class MusicViewModel @Inject constructor(
                 }
                 
                 override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+                    pruneQueueMissingItems()
                     updateState()
                 }
             })
@@ -222,6 +234,10 @@ class MusicViewModel @Inject constructor(
             val audioSessionId = controller.sessionExtras.getInt(MusicService.KEY_AUDIO_SESSION_ID, 0)
             // Extract file path from current media item URI
             val currentFilePath = controller.currentMediaItem?.localConfiguration?.uri?.path
+            // Map the mediaId back to a song id so queued copies (unique mediaId) still
+            // highlight their song in the UI lists
+            val currentPlayingSongId = controller.currentMediaItem?.mediaId
+                ?.let { mediaIdToSongId(it)?.toString() }
             // Extract start position from clipping configuration (for CUE tracks)
             // This corresponds to Song.startPosition which is set in SongMapper.toMediaItem()
             // For non-CUE tracks, clippingConfiguration is not set so we default to 0L
@@ -252,7 +268,8 @@ class MusicViewModel @Inject constructor(
                         playlist = playlist,
                         audioSessionId = audioSessionId,
                         currentSongFilePath = currentFilePath,
-                        currentSongStartPosition = currentStartPosition
+                        currentSongStartPosition = currentStartPosition,
+                        currentPlayingSongId = currentPlayingSongId
                     )
                 }
             }
@@ -293,7 +310,7 @@ class MusicViewModel @Inject constructor(
                 Log.d(TAG, "playList: saved context $it")
                 _uiState.update { state -> state.copy(playlistContext = it) }
             }
-            _playQueueSongIds.value = emptyList()
+            _playQueue.value = emptyList()
             clearQueuePlaybackOverrides()
         }
     }
@@ -302,11 +319,16 @@ class MusicViewModel @Inject constructor(
         if (songs.isEmpty()) return
         mediaController?.let { controller ->
             applyQueuePlaybackOverridesIfNeeded(controller)
-            val queueIds = songs.map { it.id }
-            val insertIndex = (controller.currentMediaItemIndex + 1 + _playQueueSongIds.value.size)
+            val insertIndex = (controller.currentMediaItemIndex + 1 + _playQueue.value.size)
                 .coerceIn(0, controller.mediaItemCount)
-            controller.addMediaItems(insertIndex, songs.map { it.toMediaItem() })
-            _playQueueSongIds.update { it + queueIds }
+            // Register queue entries before touching the timeline so the upcoming
+            // onTimelineChanged callback still sees them as existing items
+            val mediaItems = songs.map { song ->
+                val mediaId = buildQueueMediaId(queueMediaIdSequence++, song.id)
+                _playQueue.update { it + QueuedItem(mediaId, song.id) }
+                song.toMediaItem().buildUpon().setMediaId(mediaId).build()
+            }
+            controller.addMediaItems(insertIndex, mediaItems)
         }
     }
 
@@ -372,26 +394,35 @@ class MusicViewModel @Inject constructor(
     
     fun clearPlaylist() {
         mediaController?.clearMediaItems()
-        _playQueueSongIds.value = emptyList()
+        _playQueue.value = emptyList()
         clearQueuePlaybackOverrides()
     }
 
-    private fun consumePlayQueue(currentSongId: Long?) {
-        if (currentSongId == null) return
-        _playQueueSongIds.update { queue ->
-            if (queue.isNotEmpty() && queue.first() == currentSongId) {
-                queue.drop(1)
-            } else {
-                queue
+    private fun consumePlayQueue(landedMediaId: String?) {
+        val head = _playQueue.value.firstOrNull() ?: return
+        when (resolveQueueHeadHit(landedMediaId, head)) {
+            QueueHeadHit.QUEUED_COPY -> _playQueue.update { it.drop(1) }
+            QueueHeadHit.OTHER_COPY -> {
+                _playQueue.update { it.drop(1) }
+                // The song was heard through another copy (e.g. the original base-playlist
+                // item after a manual skip backwards); remove the queued copy so it does
+                // not resurface later as an unexpected replay
+                mediaController?.let { controller ->
+                    val queuedIndex = queueItemIndex(controller, head.mediaId)
+                    if (queuedIndex != null && queuedIndex != controller.currentMediaItemIndex) {
+                        controller.removeMediaItem(queuedIndex)
+                    }
+                }
             }
+            QueueHeadHit.NONE -> return
         }
-        if (_playQueueSongIds.value.isEmpty()) {
+        if (_playQueue.value.isEmpty()) {
             restorePlaybackModeAfterQueue()
         }
     }
 
     private fun applyQueuePlaybackOverridesIfNeeded(controller: MediaController) {
-        if (_playQueueSongIds.value.isNotEmpty()) return
+        if (_playQueue.value.isNotEmpty()) return
         queuedPlaybackRestoreRepeatMode = controller.repeatMode
         queuedPlaybackRestoreShuffleModeEnabled = controller.shuffleModeEnabled
         if (controller.repeatMode == Player.REPEAT_MODE_ONE) {
@@ -415,17 +446,16 @@ class MusicViewModel @Inject constructor(
         queuedPlaybackRestoreShuffleModeEnabled = null
     }
 
-    private fun maybeSeekToQueuedSong(currentSongId: Long?, reason: Int): Boolean {
+    private fun maybeSeekToQueuedSong(landedMediaId: String?, reason: Int): Boolean {
         if (isSeekingToQueuedSong) {
             isSeekingToQueuedSong = false
             return false
         }
-        val nextQueueSongId = _playQueueSongIds.value.firstOrNull() ?: return false
-        if (!shouldForceQueueTransition(reason, currentSongId, nextQueueSongId)) return false
+        val head = _playQueue.value.firstOrNull() ?: return false
+        if (resolveQueueHeadHit(landedMediaId, head) != QueueHeadHit.NONE) return false
+        if (!shouldForceQueueTransition(reason, landedMediaId?.let { mediaIdToSongId(it) }, head.songId)) return false
         val controller = mediaController ?: return false
-        val targetIndex = (0 until controller.mediaItemCount)
-            .firstOrNull { controller.getMediaItemAt(it).mediaId == nextQueueSongId.toString() }
-            ?: return false
+        val targetIndex = queueItemIndex(controller, head.mediaId) ?: return false
         if (targetIndex == controller.currentMediaItemIndex) return false
         isSeekingToQueuedSong = true
         controller.seekToDefaultPosition(targetIndex)
@@ -433,6 +463,24 @@ class MusicViewModel @Inject constructor(
             controller.play()
         }
         return true
+    }
+
+    private fun queueItemIndex(controller: MediaController, mediaId: String): Int? =
+        (0 until controller.mediaItemCount)
+            .firstOrNull { controller.getMediaItemAt(it).mediaId == mediaId }
+
+    private fun pruneQueueMissingItems() {
+        val controller = mediaController ?: return
+        val before = _playQueue.value
+        if (before.isEmpty()) return
+        val existingMediaIds = (0 until controller.mediaItemCount)
+            .mapTo(HashSet()) { controller.getMediaItemAt(it).mediaId }
+        val after = before.filter { it.mediaId in existingMediaIds }
+        if (after.size == before.size) return
+        _playQueue.value = after
+        if (after.isEmpty()) {
+            restorePlaybackModeAfterQueue()
+        }
     }
 
     fun toggleCurrentSongFavorite() {
@@ -478,6 +526,22 @@ internal fun shouldForceQueueTransition(reason: Int, currentSongId: Long?, queue
         reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
 }
 
+internal data class QueuedItem(val mediaId: String, val songId: Long)
+
+internal enum class QueueHeadHit { QUEUED_COPY, OTHER_COPY, NONE }
+
+/**
+ * Which queue-head entry a transition landed on. Distinguishing the queued copy from
+ * other copies of the same song (plain mediaId) is what keeps queue bookkeeping correct
+ * when the currently playing song is queued again.
+ */
+internal fun resolveQueueHeadHit(landedMediaId: String?, head: QueuedItem?): QueueHeadHit {
+    if (landedMediaId == null || head == null) return QueueHeadHit.NONE
+    if (landedMediaId == head.mediaId) return QueueHeadHit.QUEUED_COPY
+    if (mediaIdToSongId(landedMediaId) == head.songId) return QueueHeadHit.OTHER_COPY
+    return QueueHeadHit.NONE
+}
+
 data class MusicUiState(
     val isPlaying: Boolean = false,
     val currentMediaItem: MediaItem? = null,
@@ -491,6 +555,7 @@ data class MusicUiState(
     val audioSessionId: Int = 0,
     val currentSongFilePath: String? = null,
     val currentSongStartPosition: Long = 0L,
+    val currentPlayingSongId: String? = null,
     val isCurrentSongFavorite: Boolean = false,
     val artworkBytes: ByteArray? = null,
     val playlistContext: PlaylistContext? = null
@@ -514,6 +579,7 @@ data class MusicUiState(
         if (audioSessionId != other.audioSessionId) return false
         if (currentSongFilePath != other.currentSongFilePath) return false
         if (currentSongStartPosition != other.currentSongStartPosition) return false
+        if (currentPlayingSongId != other.currentPlayingSongId) return false
         if (isCurrentSongFavorite != other.isCurrentSongFavorite) return false
         if (playlistContext != other.playlistContext) return false
         if (artworkBytes != null) {
@@ -537,6 +603,7 @@ data class MusicUiState(
         result = 31 * result + audioSessionId
         result = 31 * result + (currentSongFilePath?.hashCode() ?: 0)
         result = 31 * result + currentSongStartPosition.hashCode()
+        result = 31 * result + (currentPlayingSongId?.hashCode() ?: 0)
         result = 31 * result + isCurrentSongFavorite.hashCode()
         result = 31 * result + (playlistContext?.hashCode() ?: 0)
         result = 31 * result + (artworkBytes?.contentHashCode() ?: 0)

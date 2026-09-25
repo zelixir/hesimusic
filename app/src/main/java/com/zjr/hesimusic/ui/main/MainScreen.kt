@@ -400,7 +400,7 @@ fun MainScreen(
                         SongList(
                             songs = songs,
                             sortMode = songSortMode,
-                            currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
+                            currentPlayingSongId = musicUiState.currentPlayingSongId,
                             onSongClick = { list, index -> 
                                 Log.d("MainScreen", "SongList (Global): playing song at index $index")
                                 musicViewModel.playList(list, index, PlaylistContext.GLOBAL)
@@ -433,7 +433,7 @@ fun MainScreen(
                         com.zjr.hesimusic.ui.library.PlaylistTabScreen(
                             viewModel = viewModel,
                             musicViewModel = musicViewModel,
-                            currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
+                            currentPlayingSongId = musicUiState.currentPlayingSongId,
                             initialSelectedPlaylistId = restoredPlaylistId,
                             onSongLongClick = { song, playlistId, songs ->
                                 selectedSongForActions = song
@@ -469,7 +469,7 @@ fun MainScreen(
                         SongList(
                             songs = favoriteSongs,
                             sortMode = songSortMode,
-                            currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
+                            currentPlayingSongId = musicUiState.currentPlayingSongId,
                             onSongClick = { list, index -> 
                                 Log.d("MainScreen", "SongList (Favorites): playing song at index $index")
                                 musicViewModel.playList(list, index, PlaylistContext.FAVORITES)
@@ -504,7 +504,7 @@ fun MainScreen(
                             sortMode = songSortMode,
                             initialPath = "/storage/emulated/0",
                             startPath = restoredFolderPath,
-                            currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
+                            currentPlayingSongId = musicUiState.currentPlayingSongId,
                             onSongClick = { list, index, folderPath -> 
                                 Log.d("MainScreen", "FolderList: playing song at index $index in folder $folderPath")
                                 musicViewModel.playList(list, index, PlaylistContext(PlaylistType.FOLDER, folderPath))

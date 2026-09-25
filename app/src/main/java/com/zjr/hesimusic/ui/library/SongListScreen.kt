@@ -195,7 +195,7 @@ fun SongListScreen(
             Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
             SongList(
                 songs = songs,
-                currentPlayingSongId = musicUiState.currentMediaItem?.mediaId,
+                currentPlayingSongId = musicUiState.currentPlayingSongId,
                 onSongClick = handleSongClick,
                 onSongLongClick = { selectedSongForActions = it },
                 sortMode = sortMode,

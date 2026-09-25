@@ -13,3 +13,6 @@ _codeql_detected_source_root
 
 # Local personal data backups pulled from device
 /backups/
+
+# Zvec-Grep (zg) local semantic search index
+/.zvec-grep/
