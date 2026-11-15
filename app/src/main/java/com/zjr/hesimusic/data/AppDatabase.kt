@@ -11,6 +11,7 @@ import com.zjr.hesimusic.data.dao.PlaylistDao
 import com.zjr.hesimusic.data.dao.PlaylistEntryDao
 import com.zjr.hesimusic.data.dao.SmartPlaylistDao
 import com.zjr.hesimusic.data.dao.SongDao
+import com.zjr.hesimusic.data.dao.SongLoopDao
 import com.zjr.hesimusic.data.model.Favorite
 import com.zjr.hesimusic.data.model.HiddenSong
 import com.zjr.hesimusic.data.model.LogEntry
@@ -18,14 +19,16 @@ import com.zjr.hesimusic.data.model.Playlist
 import com.zjr.hesimusic.data.model.PlaylistEntry
 import com.zjr.hesimusic.data.model.SmartPlaylist
 import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.data.model.SongLoop
 
 @Database(
-    entities = [Song::class, Playlist::class, PlaylistEntry::class, Favorite::class, LogEntry::class, HiddenSong::class, SmartPlaylist::class],
-    version = 7,
+    entities = [Song::class, Playlist::class, PlaylistEntry::class, Favorite::class, LogEntry::class, HiddenSong::class, SmartPlaylist::class, SongLoop::class],
+    version = 9,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun songDao(): SongDao
+    abstract fun songLoopDao(): SongLoopDao
     abstract fun playlistDao(): PlaylistDao
     abstract fun playlistEntryDao(): PlaylistEntryDao
     abstract fun favoriteDao(): FavoriteDao
@@ -172,6 +175,49 @@ abstract class AppDatabase : RoomDatabase() {
                 """.trimIndent())
 
                 android.util.Log.d(TAG, "MIGRATION_6_7 completed")
+            }
+        }
+
+        /**
+         * Migration from version 7 to 8:
+         * - Add song_loop table for seamless loop analysis results (docs/loop-seamless.md §2.3)
+         */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                android.util.Log.d(TAG, "Running MIGRATION_7_8")
+
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `song_loop` (
+                        `songId` INTEGER NOT NULL,
+                        `loopStartSamples` INTEGER NOT NULL,
+                        `loopEndSamples` INTEGER NOT NULL,
+                        `sampleRate` INTEGER NOT NULL,
+                        `loopStartMs` INTEGER NOT NULL,
+                        `loopEndMs` INTEGER NOT NULL,
+                        `score` REAL NOT NULL,
+                        `noteDistance` REAL NOT NULL,
+                        `loudnessDifference` REAL NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`songId`)
+                    )
+                """.trimIndent())
+
+                android.util.Log.d(TAG, "MIGRATION_7_8 completed")
+            }
+        }
+
+        /**
+         * Migration from version 8 to 9:
+         * - Add song_loop.confirmed column for temporary/final two-tier results (v6 §10.1)
+         *   (existing rows treated as user-confirmed, default 1)
+         */
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                android.util.Log.d(TAG, "Running MIGRATION_8_9")
+
+                db.execSQL("ALTER TABLE `song_loop` ADD COLUMN `confirmed` INTEGER NOT NULL DEFAULT 1")
+
+                android.util.Log.d(TAG, "MIGRATION_8_9 completed")
             }
         }
     }

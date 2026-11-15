@@ -21,6 +21,8 @@ import com.zjr.hesimusic.data.mapper.mediaIdToSongId
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
 import com.zjr.hesimusic.data.repository.SongRepository
+import com.zjr.hesimusic.loop.LoopRuntime
+import com.zjr.hesimusic.loop.audio.LoopAudioController
 import com.zjr.hesimusic.utils.AppLogger
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
@@ -54,6 +56,18 @@ class MusicService : MediaSessionService() {
 
     @Inject
     lateinit var appLogger: AppLogger
+
+    @Inject
+    lateinit var loopPlaybackCoordinator: LoopPlaybackCoordinator
+
+    @Inject
+    lateinit var loopRuntime: LoopRuntime
+
+    @Inject
+    lateinit var loopAudioController: LoopAudioController
+
+    /** 对外（MediaSession/UI/通知）的位置与时长口径层；见 LoopSessionPlayer。 */
+    private lateinit var sessionPlayer: LoopSessionPlayer
 
     private var mediaSession: MediaSession? = null
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -120,7 +134,11 @@ class MusicService : MediaSessionService() {
             }
         }
 
-        mediaSession = MediaSession.Builder(this, forwardingPlayer)
+        // 位置/时长投影层：只重写位置/时长/seek，其余全部透传给上面的 forwardingPlayer
+        // （队列首尾绕回播放仍由 forwardingPlayer 的 seekToNext/Previous 负责）。
+        sessionPlayer = LoopSessionPlayer(forwardingPlayer, loopRuntime, loopAudioController)
+
+        mediaSession = MediaSession.Builder(this, sessionPlayer)
             .setCallback(MusicSessionCallback())
             .build()
         updateSessionAudioSessionId()
@@ -209,6 +227,14 @@ class MusicService : MediaSessionService() {
             } finally {
                 isRestoringState = false  // Allow saving state again
             }
+
+            // restore 完成后重算一次（契约 §2.4）：窗口命中则应用形态，并从展示位置起播
+            loopPlaybackCoordinator.refresh(
+                songIdOf(player.currentMediaItem),
+                player.repeatMode,
+                player,
+                "restore",
+            )
         }
     }
 
@@ -222,6 +248,28 @@ class MusicService : MediaSessionService() {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 Log.d(TAG, "onMediaItemTransition: mediaId=${mediaItem?.mediaId}, reason=$reason")
                 saveCurrentState()
+                // 事件入口之一：只触发一次窗口重算（不在这里做任何 loop 专属判断）
+                serviceScope.launch {
+                    loopPlaybackCoordinator.refresh(
+                        songIdOf(mediaItem),
+                        player.repeatMode,
+                        player,
+                        "transition",
+                    )
+                }
+            }
+
+            override fun onRepeatModeChanged(repeatMode: Int) {
+                Log.d(TAG, "onRepeatModeChanged: repeatMode=$repeatMode")
+                // repeat 只代表用户意图：引擎从不回写它，这里只重算一次窗口
+                serviceScope.launch {
+                    loopPlaybackCoordinator.refresh(
+                        songIdOf(player.currentMediaItem),
+                        player.repeatMode,
+                        player,
+                        "repeat",
+                    )
+                }
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -318,7 +366,8 @@ class MusicService : MediaSessionService() {
         }
         
         val index = player.currentMediaItemIndex
-        val position = player.currentPosition
+        // 展示口径持久化：重启恢复后位置仍落在 [A,B) 内（契约 §5）
+        val position = sessionPlayer.currentPosition
         val mediaItem = player.currentMediaItem
         val songId = mediaItem?.mediaId?.let { mediaIdToSongId(it) } ?: -1L
         
@@ -338,6 +387,10 @@ class MusicService : MediaSessionService() {
         val ids = mediaItems.mapNotNull { mediaIdToSongId(it.mediaId) }
         playbackPreferences.saveQueue(ids)
     }
+
+    /** mediaId -> songId（普通 id 与 queue:seq:id 两种形态都支持）。 */
+    private fun songIdOf(mediaItem: MediaItem?): Long? =
+        mediaItem?.mediaId?.let { mediaIdToSongId(it) }
 
     private fun createSilentNotificationChannel() {
         val channel = NotificationChannel(
@@ -373,6 +426,7 @@ class MusicService : MediaSessionService() {
         Log.d(TAG, "onDestroy: MusicService destroyed, saving final state")
         saveCurrentState() // Save one last time
         saveQueueState()   // Also save queue state
+        loopPlaybackCoordinator.release()
         serviceScope.cancel()
         mediaSession?.run {
             player.release()

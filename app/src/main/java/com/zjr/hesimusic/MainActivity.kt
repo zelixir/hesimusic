@@ -2,6 +2,7 @@ package com.zjr.hesimusic
 
 import android.os.Bundle
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -9,26 +10,37 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.media3.common.Player
+import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import androidx.compose.ui.platform.LocalContext
+import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
 import com.zjr.hesimusic.ui.about.AboutScreen
+import com.zjr.hesimusic.ui.common.UiNavigationHooks
 import com.zjr.hesimusic.ui.debug.TagDebugScreen
 import com.zjr.hesimusic.ui.equalizer.EqualizerScreen
 import com.zjr.hesimusic.ui.library.SongListScreen
 import com.zjr.hesimusic.ui.logs.LogScreen
+import com.zjr.hesimusic.ui.loop.LoopScreen
 import com.zjr.hesimusic.ui.main.MainScreen
 import com.zjr.hesimusic.ui.player.PlayerScreen
 import com.zjr.hesimusic.ui.scan.ScanScreen
@@ -45,6 +57,7 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -69,6 +82,8 @@ class MainActivity : ComponentActivity() {
     lateinit var appLogger: AppLogger
     @Inject
     lateinit var playbackPreferences: PlaybackPreferences
+    @Inject
+    lateinit var loopAnalysisManager: LoopAnalysisManager
     
     private val TAG = "MainActivity"
     
@@ -121,7 +136,21 @@ class MainActivity : ComponentActivity() {
                     return@HesimusicTheme
                 }
                 val navController = rememberNavController()
-                
+
+                // main 侧导航钩子:debug 协议 /navigate 经它真正打开路由(debug 源集只读)。
+                // 回调可能来自调试服务线程,统一切回主线程再调 NavController。
+                LaunchedEffect(navController) {
+                    UiNavigationHooks.navigate = { route ->
+                        this@MainActivity.runOnUiThread {
+                            runCatching { navController.navigate(route.trimStart('/')) }
+                                .onFailure { Log.w(TAG, "debug navigate failed: $route", it) }
+                        }
+                    }
+                }
+                DisposableEffect(navController) {
+                    onDispose { UiNavigationHooks.navigate = null }
+                }
+
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     // We ignore innerPadding here because each screen handles its own Scaffold/Padding
                     
@@ -139,7 +168,14 @@ class MainActivity : ComponentActivity() {
                         }
                         
                         composable("home") {
+                            val homeMusicViewModel: MusicViewModel = hiltViewModel()
+                            val loopActions = rememberLoopMenuActions(
+                                navController = navController,
+                                musicViewModel = homeMusicViewModel,
+                                loopAnalysisManager = loopAnalysisManager,
+                            )
                             MainScreen(
+                                musicViewModel = homeMusicViewModel,
                                 onArtistClick = { artist ->
                                     val encodedName = URLEncoder.encode(artist.name, StandardCharsets.UTF_8.toString()).replace("+", "%20")
                                     navController.navigate("details/artist/$encodedName")
@@ -157,7 +193,11 @@ class MainActivity : ComponentActivity() {
                                 onEqualizerClick = { navController.navigate("equalizer") },
                                 onAboutClick = { navController.navigate("about") },
                                 onSleepTimerClick = { navController.navigate("sleep_timer") },
-                                onLogsClick = { navController.navigate("logs") }
+                                onLogsClick = { navController.navigate("logs") },
+                                onSeamlessLoop = loopActions.onSeamlessLoop,
+                                onLoopReanalyze = loopActions.onReanalyze,
+                                onLoopDemote = loopActions.onDemote,
+                                onLoopDelete = loopActions.onDelete,
                             )
                         }
 
@@ -224,9 +264,16 @@ class MainActivity : ComponentActivity() {
                         ) { backStackEntry ->
                             val type = backStackEntry.arguments?.getString("type") ?: ""
                             val value = backStackEntry.arguments?.getString("value") ?: ""
+                            val detailMusicViewModel: MusicViewModel = hiltViewModel()
+                            val loopActions = rememberLoopMenuActions(
+                                navController = navController,
+                                musicViewModel = detailMusicViewModel,
+                                loopAnalysisManager = loopAnalysisManager,
+                            )
                             SongListScreen(
                                 type = type,
                                 value = value,
+                                musicViewModel = detailMusicViewModel,
                                 onBack = { navController.popBackStack() },
                                 onSongClick = { /* TODO: Play */ },
                                 onPlayerClick = { navController.navigate("player") },
@@ -236,7 +283,37 @@ class MainActivity : ComponentActivity() {
                                 onEqualizerClick = { navController.navigate("equalizer") },
                                 onAboutClick = { navController.navigate("about") },
                                 onSleepTimerClick = { navController.navigate("sleep_timer") },
-                                onLogsClick = { navController.navigate("logs") }
+                                onLogsClick = { navController.navigate("logs") },
+                                onSeamlessLoop = loopActions.onSeamlessLoop,
+                                onLoopReanalyze = loopActions.onReanalyze,
+                                onLoopDemote = loopActions.onDemote,
+                                onLoopDelete = loopActions.onDelete,
+                            )
+                        }
+
+                        // 无缝循环分析/预览页(契约 §1/§2)。CUE 守卫在 LoopViewModel 内
+                        // (song.isCue → Failed 文案),菜单侧同时置灰避免进入。
+                        composable(
+                            route = "loop/{songId}",
+                            arguments = listOf(
+                                navArgument("songId") { type = NavType.LongType }
+                            )
+                        ) {
+                            val homeEntry = runCatching { navController.getBackStackEntry("home") }.getOrNull()
+                            val sharedMusicViewModel: MusicViewModel = if (homeEntry != null) {
+                                hiltViewModel(homeEntry)
+                            } else {
+                                hiltViewModel()
+                            }
+                            LoopScreen(
+                                musicViewModel = sharedMusicViewModel,
+                                onBack = { navController.popBackStack() },
+                                onSavedAndPlay = { song ->
+                                    // 契约 §2.4:确认保存 → 播放该歌 + 单曲循环 → 返回
+                                    sharedMusicViewModel.play(song)
+                                    sharedMusicViewModel.setRepeatMode(Player.REPEAT_MODE_ONE)
+                                    navController.popBackStack()
+                                },
                             )
                         }
                     }
@@ -267,5 +344,57 @@ class MainActivity : ComponentActivity() {
         }
         Log.d(TAG, "Showing startup image")
         return true
+    }
+}
+
+/** 菜单「无缝循环」相关事件的处理集合(MainActivity 负责播放/导航/写库,菜单只发事件)。 */
+private data class LoopMenuActions(
+    val onSeamlessLoop: (Song, Boolean?) -> Unit,
+    val onReanalyze: (Song) -> Unit,
+    val onDemote: (Song) -> Unit,
+    val onDelete: (Song) -> Unit,
+)
+
+/**
+ * 按契约 §1 的入口分流构造回调:
+ * - 行 confirmed=1 → 播放该歌 + repeatMode=ONE(无缝由播放层窗口驱动);
+ * - 行 confirmed=0(临时)或无行 → 导航 loop/{songId}(进页加载已存结果 / 自动分析)。
+ *
+ * 「重新分析」导航到同一路由(页面加载已存结果,重分析走页内按钮);
+ * 「取消最终结果」「删除分析结果」直接调 Manager(菜单不写播放逻辑)。
+ */
+@Composable
+private fun rememberLoopMenuActions(
+    navController: NavHostController,
+    musicViewModel: MusicViewModel,
+    loopAnalysisManager: LoopAnalysisManager,
+): LoopMenuActions {
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    return remember(navController, musicViewModel, loopAnalysisManager) {
+        LoopMenuActions(
+            onSeamlessLoop = { song, confirmed ->
+                when (confirmed) {
+                    true -> {
+                        musicViewModel.play(song)
+                        musicViewModel.setRepeatMode(Player.REPEAT_MODE_ONE)
+                    }
+                    else -> navController.navigate("loop/${song.id}")
+                }
+            },
+            onReanalyze = { song -> navController.navigate("loop/${song.id}") },
+            onDemote = { song ->
+                scope.launch {
+                    runCatching { loopAnalysisManager.demoteFinal(song.id) }
+                    Toast.makeText(context, "已转为临时结果，不再无缝", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onDelete = { song ->
+                scope.launch {
+                    runCatching { loopAnalysisManager.deleteResult(song.id) }
+                    Toast.makeText(context, "已删除分析结果，下次进入将重新分析", Toast.LENGTH_SHORT).show()
+                }
+            },
+        )
     }
 }

@@ -83,7 +83,12 @@ fun MainScreen(
     onEqualizerClick: () -> Unit,
     onAboutClick: () -> Unit,
     onSleepTimerClick: () -> Unit,
-    onLogsClick: () -> Unit
+    onLogsClick: () -> Unit,
+    // 无缝循环菜单事件(仅透传给 SongActionHost;决策/播放/导航在 MainActivity)
+    onSeamlessLoop: ((Song, Boolean?) -> Unit)? = null,
+    onLoopReanalyze: ((Song) -> Unit)? = null,
+    onLoopDemote: ((Song) -> Unit)? = null,
+    onLoopDelete: ((Song) -> Unit)? = null
 ) {
     // Get AppLogger from Application context
     val context = LocalContext.current
@@ -539,7 +544,11 @@ fun MainScreen(
                 onLoadMetadata = { song, onLoaded -> viewModel.loadSongMetadata(song, onLoaded) },
                 onAddToQueue = if (selectedSongPlaylistContext == musicUiState.playlistContext) { song ->
                     musicViewModel.addSongsToPlayQueue(listOf(song))
-                } else null
+                } else null,
+                onSeamlessLoop = onSeamlessLoop,
+                onLoopReanalyze = onLoopReanalyze,
+                onLoopDemote = onLoopDemote,
+                onLoopDelete = onLoopDelete
             )
             if (showBatchAddDialog) {
                 AddToPlaylistDialog(

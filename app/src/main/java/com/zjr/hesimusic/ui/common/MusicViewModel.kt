@@ -21,6 +21,8 @@ import com.zjr.hesimusic.data.preferences.PlaylistContext
 import com.zjr.hesimusic.data.repository.FavoriteRepository
 import com.zjr.hesimusic.data.repository.SongRepository
 import com.zjr.hesimusic.data.scanner.TagLibHelper
+import com.zjr.hesimusic.loop.LoopRuntime
+import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.service.MusicService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -30,6 +32,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -44,7 +47,8 @@ class MusicViewModel @Inject constructor(
     private val playbackPreferences: PlaybackPreferences,
     private val songRepository: SongRepository,
     private val favoriteRepository: FavoriteRepository,
-    private val tagLibHelper: TagLibHelper
+    private val tagLibHelper: TagLibHelper,
+    private val loopRuntime: LoopRuntime
 ) : ViewModel() {
 
     companion object {
@@ -63,6 +67,25 @@ class MusicViewModel @Inject constructor(
     // Expose the saved playlist context for UI to use when restoring state
     private val _savedPlaylistContext = MutableStateFlow<PlaylistContext?>(null)
     val savedPlaylistContext: StateFlow<PlaylistContext?> = _savedPlaylistContext.asStateFlow()
+
+    /**
+     * 当前无缝循环窗口(全局唯一来源 [LoopRuntime] 的直接转发)。
+     *
+     * null = 普通播放。只读,不做 DB 查询、不做播放操作;切歌/降级/删除行后由服务层
+     * 重算 [LoopRuntime.refresh] → 这里自动变 null → UI 标记自动消失。
+     */
+    val loopWindow: StateFlow<LoopWindow?> = loopRuntime.window
+
+    /**
+     * **命中当前播放歌**的无缝窗口;未命中(无窗口 / 窗口属于别的歌 / 还没有当前歌)为 null。
+     *
+     * 这是播放界面 A/B 标记的唯一来源:命中才画标记,不命中时 UI 完全不绘制。
+     * 位置折返在 [updateState] 里用 [loopWindow] 直接算,不依赖这条流(避免多一跳延迟)。
+     */
+    val activeLoopWindow: StateFlow<LoopWindow?> = combine(loopRuntime.window, _uiState) { window, state ->
+        val currentSongId = state.currentPlayingSongId?.toLongOrNull()
+        if (window != null && window.songId == currentSongId) window else null
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     // Queue entries carry their own unique mediaId so they stay distinguishable from
     // base-playlist copies of the same song while they sit in the player timeline.
@@ -242,7 +265,15 @@ class MusicViewModel @Inject constructor(
             // This corresponds to Song.startPosition which is set in SongMapper.toMediaItem()
             // For non-CUE tracks, clippingConfiguration is not set so we default to 0L
             val currentStartPosition = controller.currentMediaItem?.clippingConfiguration?.startPositionMs ?: 0L
-            val safePosition = controller.currentPosition.coerceAtLeast(0L)
+            // 无缝循环期间把**展示位置**折返回 [A, B):
+            // MediaSession 的 PlaybackState 约 1s 才刷新一次,MediaController 在两次刷新之间按
+            // speed=1 本地外推,跨过 B 的瞬间会看到位置冲出区间(≤1s 后回落)。折返是幂等的:
+            // 服务层已折返过的位置再折一次不变;窗口不属于当前歌时原样透传。duration/seek 不变。
+            val safePosition = foldDisplayPositionMs(
+                rawPositionMs = controller.currentPosition.coerceAtLeast(0L),
+                window = loopRuntime.window.value,
+                currentSongId = currentPlayingSongId?.toLongOrNull(),
+            )
             
             // Capture all controller state before any async operation
             val isPlaying = controller.isPlaying

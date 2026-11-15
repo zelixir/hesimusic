@@ -1,0 +1,861 @@
+﻿[
+    {
+        "id":  "A1",
+        "status":  "PASS",
+        "metrics":  {
+                        "songId":  14934,
+                        "elapsedMs":  12721,
+                        "phaseSequence":  "decoding\u003eanalyzing\u003edone",
+                        "decodingSamples":  15,
+                        "analyzingSamples":  8,
+                        "progressMonotonicInPhase":  true,
+                        "done":  true,
+                        "failed":  false,
+                        "candidateCount":  1,
+                        "sampleRate":  48000
+                    },
+        "evidence":  [
+                         "A1/analysis-progress.json",
+                         "A1/state.json"
+                     ],
+        "startedAt":  "2026-11-15T19:45:02.2319169+08:00",
+        "durationMs":  12770,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "A2",
+        "status":  "PASS",
+        "metrics":  {
+                        "songId":  14934,
+                        "durationMs":  173496,
+                        "elapsedMs":  12721,
+                        "logcatDecodeLine":  "11-15 19:45:13.979  7168  7214 D LoopPerf: decode=8331ms analyze=3815ms dur=173.5s song=14934",
+                        "logcatAnalyzeLine":  "11-15 19:45:13.979  7168  7214 D LoopPerf: decode=8331ms analyze=3815ms dur=173.5s song=14934",
+                        "boundMs":  15000,
+                        "elapsedMsPerSongMinute":  4399
+                    },
+        "evidence":  [
+                         "A2/logcat-loopPerf.txt",
+                         "A2/state.json"
+                     ],
+        "startedAt":  "2026-11-15T19:45:15.0970533+08:00",
+        "durationMs":  127,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "A3",
+        "status":  "PASS",
+        "metrics":  {
+                        "songId":  14973,
+                        "pausedAfterMs":  83,
+                        "strictBoundMs":  100,
+                        "relaxedBoundMs":  800,
+                        "probeCount":  1
+                    },
+        "evidence":  [
+                         "A3/samples.json",
+                         "A3/state.json"
+                     ],
+        "startedAt":  "2026-11-15T20:20:18.5693565+08:00",
+        "durationMs":  1421,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "A4",
+        "status":  "PASS",
+        "metrics":  {
+                        "firstStatus":  200,
+                        "secondStatus":  409,
+                        "secondBody":  "{\"error\":\"已有分析进行中\"}",
+                        "analyzingAfter":  true,
+                        "phaseAfter":  "decoding",
+                        "finalPhase":  "done"
+                    },
+        "evidence":  [
+                         "A4/state.json"
+                     ],
+        "startedAt":  "2026-11-15T19:45:17.8017373+08:00",
+        "durationMs":  18671,
+        "detail":  "",
+        "repro":  [
+                      "curl.exe -s -X POST \"http://127.0.0.1:18765/analyze\" -H \"Content-Type: application/json\" -d \"{\\\"songId\\\":14934}\""
+                  ]
+    },
+    {
+        "id":  "A5",
+        "status":  "PASS",
+        "metrics":  {
+                        "songId":  14934,
+                        "phase":  "done",
+                        "candidateA_ms":  73813,
+                        "candidateB_ms":  139072,
+                        "storedA_ms":  73813,
+                        "storedB_ms":  139072,
+                        "storedConfirmed":  false,
+                        "storedSampleRate":  48000
+                    },
+        "evidence":  [
+                         "A5/state.json"
+                     ],
+        "startedAt":  "2026-11-15T19:45:36.4908987+08:00",
+        "durationMs":  189,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "A6",
+        "status":  "PASS",
+        "metrics":  {
+                        "songId":  15579,
+                        "beforeA_samples":  960000,
+                        "beforeB_samples":  2400000,
+                        "beforeConfirmed":  true,
+                        "beforeScore":  0.9502043100782934,
+                        "afterA_samples":  960000,
+                        "afterB_samples":  2400000,
+                        "afterConfirmed":  true,
+                        "afterScore":  0.9502043100782934
+                    },
+        "evidence":  [
+                         "A6/state.json"
+                     ],
+        "startedAt":  "2026-11-15T19:45:36.6978467+08:00",
+        "durationMs":  36999,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "C1",
+        "status":  "PASS",
+        "metrics":  {
+                        "seamWaitOk":  true,
+                        "seamWaitMs":  1439,
+                        "songId":  15579,
+                        "windowSongId":  15579,
+                        "aMs":  20000,
+                        "bMs":  50000,
+                        "engine":  "loop",
+                        "seamCountStart":  1,
+                        "seamCountEnd":  1,
+                        "isReplaying":  true,
+                        "degradeCount":  0
+                    },
+        "evidence":  [
+                         "C1/screen.png",
+                         "C1/samples.json",
+                         "C1/state.json"
+                     ],
+        "startedAt":  "2026-11-15T19:55:32.4205065+08:00",
+        "durationMs":  3664,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "C2",
+        "status":  "PASS",
+        "metrics":  {
+                        "ringWaitMs":  31029,
+                        "ringWaitOk":  true,
+                        "exitReplayOk":  true,
+                        "aMs":  20000,
+                        "bMs":  50000,
+                        "sampleCount":  60,
+                        "posMin":  20170,
+                        "posMax":  49938,
+                        "maxOvershootPastB_ms":  -62,
+                        "outOfBoundsSamples":  0,
+                        "dropIndex":  6,
+                        "posAfterDrop":  20170,
+                        "playingFalseSamples":  0,
+                        "bound":  "[A-1000, B+500]"
+                    },
+        "evidence":  [
+                         "C2/screen.png",
+                         "C2/samples.json",
+                         "C2/state.json"
+                     ],
+        "startedAt":  "2026-11-15T20:48:15.3930126+08:00",
+        "durationMs":  47654,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "C3",
+        "status":  "PASS",
+        "metrics":  {
+                        "songId":  14942,
+                        "loopConfirmedInDb":  false,
+                        "hasLoopRow":  true,
+                        "windowSongId":  null,
+                        "engine":  "exo",
+                        "playing":  true
+                    },
+        "evidence":  [
+                         "C3/samples.json",
+                         "C3/state.json"
+                     ],
+        "startedAt":  "2026-11-15T19:46:35.4745662+08:00",
+        "durationMs":  3534,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "C4",
+        "status":  "PASS",
+        "metrics":  {
+                        "repeatBefore":  "one",
+                        "repeatAfter":  "one",
+                        "windowSongId":  null,
+                        "engine":  "exo",
+                        "newSongId":  14942,
+                        "playing":  true,
+                        "posBefore":  181,
+                        "posAfter":  1709
+                    },
+        "evidence":  [
+                         "C4/samples.json",
+                         "C4/state.json"
+                     ],
+        "startedAt":  "2026-11-15T19:46:39.028329+08:00",
+        "durationMs":  3256,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "C5",
+        "status":  "PASS",
+        "metrics":  {
+                        "repeatAllWindowNull":  true,
+                        "repeatAllLatencyMs":  161,
+                        "repeatOffWindowNull":  true,
+                        "repeatOffLatencyMs":  144,
+                        "windowBackOnOne":  true,
+                        "engineAfterAll":  "exo",
+                        "playingAfterOff":  true,
+                        "posBefore":  19952,
+                        "posAfter":  21503,
+                        "boundMs":  1000
+                    },
+        "evidence":  [
+                         "C5/samples.json",
+                         "C5/state.json"
+                     ],
+        "startedAt":  "2026-11-15T19:46:42.3056186+08:00",
+        "durationMs":  3525,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "C6",
+        "status":  "PASS",
+        "metrics":  {
+                        "songId":  14942,
+                        "windowNull":  true,
+                        "latencyMs":  82,
+                        "playingAfterDemote":  true,
+                        "engineAfterDemote":  "exo",
+                        "posBefore":  805,
+                        "posAfter":  2326,
+                        "demoteBody":  "{\"demoted\":true,\"songId\":14942,\"alreadyTemporary\":false,\"loop\":{\"songId\":14942,\"loopStartSamples\":1683456,\"loopEndSamples\":8420352,\"sampleRate\":48000,\"loopStartMs\":35072,\"loopEndMs\":175424,\"score\":0.7866281745718977,\"noteDistance\":0.25740580240665817,\"loudnessDifference\":0.174856961658179,\"createdAt\":1794743205426,\"confirmed\":false}}"
+                    },
+        "evidence":  [
+                         "C6/samples.json",
+                         "C6/state.json"
+                     ],
+        "startedAt":  "2026-11-15T19:46:45.8505156+08:00",
+        "durationMs":  3140,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "C7",
+        "status":  "PASS",
+        "metrics":  {
+                        "coldStartRetries":  0,
+                        "posBeforeKill":  21952,
+                        "posAfterColdStart":  19750,
+                        "posDeltaMs":  -2202,
+                        "boundMs":  15000,
+                        "pidBefore":  "9964",
+                        "pidAfterForceStop":  "",
+                        "pidAfterRestart":  "10140",
+                        "playingAfterRestart":  false,
+                        "windowSongId":  15579,
+                        "engine":  "loop",
+                        "seamsAfterResume":  0,
+                        "posAfterResume":  19841,
+                        "posAfterResume2":  21371
+                    },
+        "evidence":  [
+                         "C7/logcat.txt",
+                         "C7/samples.json",
+                         "C7/state.json"
+                     ],
+        "startedAt":  "2026-11-15T19:53:40.9807873+08:00",
+        "durationMs":  20449,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "C8",
+        "status":  "PASS",
+        "metrics":  {
+                        "songId":  14942,
+                        "confirmed":  true,
+                        "windowSongId":  14942,
+                        "engine":  "loop",
+                        "aMs":  35072,
+                        "bMs":  175424,
+                        "isReplaying":  false
+                    },
+        "evidence":  [
+                         "C8/samples.json",
+                         "C8/state.json"
+                     ],
+        "startedAt":  "2026-11-15T19:54:01.4811595+08:00",
+        "durationMs":  1349,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "C9",
+        "status":  "PASS",
+        "metrics":  {
+                        "aMs":  20000,
+                        "bMs":  50000,
+                        "degradeBefore":  0,
+                        "degradeAfter":  0,
+                        "degradeDelta":  0,
+                        "windowBackLatencyMs":  170,
+                        "seamLatencyMs":  3082,
+                        "seamCountBefore":  3,
+                        "seamCountAfter":  3,
+                        "engineAfterSeek":  "loop",
+                        "ringCompleteAfterSeek":  true
+                    },
+        "evidence":  [
+                         "C9/samples.json",
+                         "C9/state.json"
+                     ],
+        "startedAt":  "2026-11-15T19:57:34.0885835+08:00",
+        "durationMs":  4781,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "C10",
+        "status":  "PASS",
+        "metrics":  {
+                        "pausedOk":  true,
+                        "resumedOk":  true,
+                        "posWhilePaused":  46294,
+                        "posAfterResume":  46350,
+                        "posDeltaMs":  56,
+                        "seamCountBefore":  1,
+                        "seamCountAfter":  2,
+                        "windowSongId":  15579
+                    },
+        "evidence":  [
+                         "C10/samples.json",
+                         "C10/state.json"
+                     ],
+        "startedAt":  "2026-11-15T19:56:00.3247398+08:00",
+        "durationMs":  36457,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "D1",
+        "status":  "PASS",
+        "metrics":  {
+                        "playlistCount":  1,
+                        "smartPlaylistFound":  true,
+                        "smartPlaylistSource":  "protocol",
+                        "playlistNames":  "无缝循环",
+                        "confirmedCount":  3,
+                        "protocolSmartFlag":  true,
+                        "protocolSongCount":  3,
+                        "smartPlaylistSql":  "SELECT * FROM songs WHERE id IN (SELECT songId FROM song_loop WHERE confirmed = 1)",
+                        "contentSource":  "adbdb-view",
+                        "smartPlaylistName":  "无缝循环",
+                        "smartPlaylistCount":  3,
+                        "protocolExposesSmart":  true,
+                        "missingFromSmart":  0,
+                        "extraInSmart":  0
+                    },
+        "evidence":  [
+                         "D1/playlists.json",
+                         "D1/smart-playlist.json",
+                         "D1/state.json"
+                     ],
+        "startedAt":  "2026-11-15T20:50:50.4624127+08:00",
+        "durationMs":  3013,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "D3",
+        "status":  "PASS",
+        "metrics":  {
+                        "apkPath":  "D:\\Code\\hesimusic\\app\\build\\outputs\\apk\\debug\\app-debug.apk",
+                        "aapt2":  "C:\\Users\\zengjirui\\AppData\\Local\\Android\\Sdk\\build-tools\\36.0.0\\aapt2.exe",
+                        "packageName":  "com.zjr.hesimusic",
+                        "applicationLabel":  "海瑟音乐",
+                        "installedPackage":  "package:/data/app/~~VHW046VkQDax-JWhoBn-6Q==/com.zjr.hesimusic-iK8bZEnK8bmG2ADgSjqlkQ==/base.apk",
+                        "expected":  "海瑟音乐 Dev(debug)",
+                        "variant":  "default",
+                        "devVariantHint":  "dev 变体需 -PdevPackage=.dev 构建(applicationIdSuffix + appLabel)"
+                    },
+        "evidence":  [
+                         "D3/badging.txt",
+                         "D3/state.json"
+                     ],
+        "startedAt":  "2026-11-15T20:25:53.7104174+08:00",
+        "durationMs":  142,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "L3-1",
+        "status":  "PASS",
+        "metrics":  {
+                        "songId":  15579,
+                        "aMs":  20000,
+                        "bMs":  50000,
+                        "secondsRequested":  125,
+                        "secondsSampled":  125,
+                        "seamCountStart":  3,
+                        "seamCountEnd":  5,
+                        "seamDelta":  2,
+                        "degradeCount":  0,
+                        "degradeDelta":  0,
+                        "engine":  "loop",
+                        "windowSongId":  15579,
+                        "wavPath":  "D:\\Code\\hesimusic\\e2e-artifacts\\l3-1\\tap.wav",
+                        "wavBytes":  23999088,
+                        "wavIsRiff":  true,
+                        "jsonlLines":  6,
+                        "analyzerExitCode":  0,
+                        "failedMust":  "",
+                        "criteria":  {
+                                         "A1":  "pass",
+                                         "A2":  "pass",
+                                         "A3":  "warn",
+                                         "A4":  "pass",
+                                         "B":  "pass"
+                                     },
+                        "verdictExitCode":  0,
+                        "wavCheckExitCode":  0,
+                        "wavCheckVerdict":  "PASS"
+                    },
+        "evidence":  [
+                         "l3-1/tap.wav",
+                         "l3-1/tap.jsonl",
+                         "l3-1/analyzer-report.json",
+                         "l3-1/analyzer-stdout.txt",
+                         "l3-1/wav-check.txt",
+                         "L3-1/samples.json",
+                         "L3-1/state.json"
+                     ],
+        "startedAt":  "2026-11-15T19:57:46.4257093+08:00",
+        "durationMs":  128951,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "L3-2",
+        "status":  "PASS",
+        "metrics":  {
+                        "flacSongId":  15472,
+                        "flacTitle":  "Etoile",
+                        "flacPath":  "/storage/emulated/0/Music/TVアニメ『ワールドダイスター』 劇中歌アルバム/01_07_Etoile.flac",
+                        "flacDurationMs":  247011,
+                        "flacSampleRate":  44100,
+                        "flacConfirmA_ms":  20000,
+                        "flacConfirmB_ms":  50000,
+                        "ringWaitMs":  31078,
+                        "ringWaitOk":  true,
+                        "songId":  15472,
+                        "aMs":  20000,
+                        "bMs":  50000,
+                        "secondsRequested":  125,
+                        "secondsSampled":  125.18,
+                        "seamCountStart":  0,
+                        "seamCountEnd":  2,
+                        "seamDelta":  2,
+                        "degradeCount":  0,
+                        "degradeDelta":  0,
+                        "engine":  "loop",
+                        "windowSongId":  15472,
+                        "wavPath":  "D:\\Code\\hesimusic\\e2e-artifacts\\l3-2\\tap.wav",
+                        "wavBytes":  22085324,
+                        "wavIsRiff":  true,
+                        "jsonlLines":  6,
+                        "analyzerExitCode":  0,
+                        "failedMust":  "",
+                        "criteria":  {
+                                         "A1":  "pass",
+                                         "A2":  "pass",
+                                         "A3":  "warn",
+                                         "A4":  "pass",
+                                         "B":  "pass"
+                                     },
+                        "verdictExitCode":  0,
+                        "wavCheckExitCode":  0,
+                        "wavCheckVerdict":  "PASS"
+                    },
+        "evidence":  [
+                         "l3-2/tap.wav",
+                         "l3-2/tap.jsonl",
+                         "l3-2/analyzer-report.json",
+                         "l3-2/analyzer-stdout.txt",
+                         "l3-2/wav-check.txt",
+                         "L3-2/samples.json",
+                         "L3-2/state.json"
+                     ],
+        "startedAt":  "2026-11-15T20:05:46.2187508+08:00",
+        "durationMs":  168651,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "L3-4",
+        "status":  "PASS",
+        "metrics":  {
+                        "songId":  15579,
+                        "aMs":  20000,
+                        "bMs":  50000,
+                        "secondsRequested":  300,
+                        "secondsSampled":  300.26,
+                        "seamCountStart":  5,
+                        "seamCountEnd":  13,
+                        "seamDelta":  8,
+                        "degradeCount":  0,
+                        "degradeDelta":  0,
+                        "engine":  "loop",
+                        "windowSongId":  15579,
+                        "wavPath":  "D:\\Code\\hesimusic\\e2e-artifacts\\l3-4\\tap.wav",
+                        "wavBytes":  57651312,
+                        "wavIsRiff":  true,
+                        "jsonlLines":  12,
+                        "analyzerExitCode":  0,
+                        "failedMust":  "",
+                        "criteria":  {
+                                         "A1":  "pass",
+                                         "A2":  "pass",
+                                         "A3":  "warn",
+                                         "A4":  "pass",
+                                         "B":  "pass"
+                                     },
+                        "verdictExitCode":  0,
+                        "wavCheckExitCode":  0,
+                        "wavCheckVerdict":  "PASS"
+                    },
+        "evidence":  [
+                         "l3-4/tap.wav",
+                         "l3-4/tap.jsonl",
+                         "l3-4/analyzer-report.json",
+                         "l3-4/analyzer-stdout.txt",
+                         "l3-4/wav-check.txt",
+                         "L3-4/samples.json",
+                         "L3-4/state.json"
+                     ],
+        "startedAt":  "2026-11-15T19:59:56.3912561+08:00",
+        "durationMs":  305807,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "C11",
+        "status":  "PASS",
+        "metrics":  {
+                        "replayWaitMs":  26408,
+                        "posBeforeSeek":  49693,
+                        "seek30000_pos":  30031,
+                        "seek30000_expected":  30156,
+                        "seek30000_probeAtMs":  156,
+                        "seek30000_deltaMs":  -125,
+                        "seek30000_replay":  false,
+                        "seek48500_pos":  48568,
+                        "seek48500_expected":  48649,
+                        "seek48500_probeAtMs":  149,
+                        "seek48500_deltaMs":  -81,
+                        "seek48500_replay":  false,
+                        "windowSongId":  15579,
+                        "engine":  "loop",
+                        "playing":  true
+                    },
+        "evidence":  [
+                         "C11/samples.json",
+                         "C11/state.json"
+                     ],
+        "startedAt":  "2026-11-15T20:51:14.0537617+08:00",
+        "durationMs":  28250,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "L4-queue",
+        "status":  "PASS",
+        "metrics":  {
+                        "queueSize":  1327,
+                        "currentIndexBefore":  2,
+                        "songIdBefore":  14568,
+                        "posBefore":  31002,
+                        "repeatBefore":  "all",
+                        "shuffleBefore":  false,
+                        "restoreReady":  true,
+                        "queueSizeAfter":  1327,
+                        "currentIndexAfter":  2,
+                        "songIdAfter":  14568,
+                        "posAfter":  30000,
+                        "posDeltaMs":  -1002,
+                        "repeatAfter":  "all",
+                        "shuffleAfter":  false,
+                        "boundMs":  15000,
+                        "shuffleToggleOn":  true
+                    },
+        "evidence":  [
+                         "L4-queue/logcat.txt",
+                         "L4-queue/state.json"
+                     ],
+        "startedAt":  "2026-11-15T20:51:42.3711958+08:00",
+        "durationMs":  18885,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "L4-wrap",
+        "status":  "PASS",
+        "metrics":  {
+                        "queueSize":  1327,
+                        "startIndex":  0,
+                        "indexAfterPrevWrap":  1326,
+                        "songIdAtLast":  15561,
+                        "indexAfterNextWrap":  0,
+                        "songIdAtFirst":  15579,
+                        "expectedFirstSongId":  15579,
+                        "playingAfterWrap":  true
+                    },
+        "evidence":  [
+                         "L4-wrap/state.json"
+                     ],
+        "startedAt":  "2026-11-15T20:52:01.2989303+08:00",
+        "durationMs":  4750,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "L4-repeat",
+        "status":  "PASS",
+        "metrics":  {
+                        "ringWaitMs":  30853,
+                        "ringWaitOk":  true,
+                        "state_one":  "one",
+                        "prefs_one":  "1",
+                        "state_all":  "all",
+                        "prefs_all":  "2",
+                        "state_off":  "off",
+                        "prefs_off":  "0",
+                        "restoreReady":  true,
+                        "restoredRepeat":  "all",
+                        "restoredPrefsRepeat":  "2"
+                    },
+        "evidence":  [
+                         "L4-repeat/logcat.txt",
+                         "L4-repeat/state.json"
+                     ],
+        "startedAt":  "2026-11-15T20:52:06.0882898+08:00",
+        "durationMs":  48948,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "L4-backup",
+        "status":  "PASS",
+        "metrics":  {
+                        "exportOk":  true,
+                        "exportRaw":  "Result: Bundle[{result={\"path\":\"\\/data\\/user\\/0\\/com.zjr.hesimusic\\/files\\/adb_export.json\",\"bytes\":620850,\"version\":4}, ok=true}]",
+                        "backupBytes":  620850,
+                        "backupVersion":  4,
+                        "backupSongs":  1327,
+                        "backupSongLoops":  5,
+                        "backupSmartPlaylists":  1,
+                        "backupHasSeamlessSmart":  true,
+                        "targetSongId":  14942,
+                        "backupA_ms":  35072,
+                        "backupB_ms":  175424,
+                        "modifiedA_ms":  40000,
+                        "modifiedB_ms":  80000,
+                        "importOk":  true,
+                        "importRaw":  "Result: Bundle[{result={\"songs\":1327,\"playlists\":0,\"playlistEntries\":0,\"favorites\":0,\"hiddenSongs\":0,\"smartPlaylists\":1,\"logs\":580}, ok=true}]",
+                        "restoredA_ms":  35072,
+                        "restoredB_ms":  175424,
+                        "restoredConfirmed":  true,
+                        "smartAfterImport":  true,
+                        "smartInProtocol":  true
+                    },
+        "evidence":  [
+                         "L4-backup/state.json"
+                     ],
+        "startedAt":  "2026-11-15T20:52:55.0683132+08:00",
+        "durationMs":  8407,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "L4-notify",
+        "status":  "PASS",
+        "metrics":  {
+                        "aMs":  20000,
+                        "bMs":  50000,
+                        "sessionRawVsStateMaxDeltaMs":  5545,
+                        "sessionExtrapolatedVsStateMaxDeltaMs":  176,
+                        "sessionDeltaOutOfRange":  0,
+                        "sessionUpdateResets":  2,
+                        "sessionSamples":  20,
+                        "deltaSamples":  "-442,-1108,-1670,-2232,-2793,-378,-934,-1497,-2047,-2679,-3236,-3795,-4355,-4984,-5545,-401,-950,-1589,-2153,-2712",
+                        "extrapolatedDeltaSamples":  "176,140,138,136,135,120,134,121,131,129,132,133,133,134,123,118,129,130,126,127",
+                        "statePosOutOfWindow":  0,
+                        "playingAfterScreenCycle":  true,
+                        "posAfterScreenCycle":  41374,
+                        "processAlive":  true,
+                        "fatalLines":  0
+                    },
+        "evidence":  [
+                         "L4-notify/logcat.txt",
+                         "L4-notify/samples.json",
+                         "L4-notify/state.json"
+                     ],
+        "startedAt":  "2026-11-15T21:03:57.5554704+08:00",
+        "durationMs":  19888,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "L4-smoke",
+        "status":  "PASS",
+        "metrics":  {
+                        "listOk":  true,
+                        "listCount":  20,
+                        "libraryTotal":  1327,
+                        "songDetailOk":  true,
+                        "sortSwitch":  "SKIP: 协议无排序入口(UI-only)",
+                        "createPlaylistOk":  true,
+                        "createPlaylistRaw":  "Result: Bundle[{result={\"lastInsertRowId\":1}, ok=true}] || Result: Bundle[{result={\"lastInsertRowId\":1}, ok=true}]",
+                        "playlistEntryCountInDb":  1,
+                        "playlistItemCount":  1,
+                        "playlistHasSong":  true,
+                        "favoriteAfterAdd":  1,
+                        "favoriteAfterRemove":  0,
+                        "favoriteAddRaw":  "Result: Bundle[{result={\"lastInsertRowId\":1}, ok=true}]",
+                        "scanTrigger":  "SKIP: 协议无扫描入口(启动扫描由 UI/启动流程触发)"
+                    },
+        "evidence":  [
+                         "L4-smoke/logcat.txt",
+                         "L4-smoke/state.json"
+                     ],
+        "startedAt":  "2026-11-15T20:56:50.7644262+08:00",
+        "durationMs":  11498,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    },
+    {
+        "id":  "L5",
+        "status":  "PASS",
+        "metrics":  {
+                        "opsRequested":  200,
+                        "opsExecuted":  200,
+                        "elapsedMs":  113540,
+                        "consistencyViolations":  0,
+                        "stalls":  0,
+                        "crashAtOp":  -1,
+                        "fatalLines":  0,
+                        "ringWaitMs":  30749,
+                        "ringWaitOk":  true,
+                        "recoveredSeamless":  true,
+                        "wavBytes":  8700472,
+                        "wavIsRiff":  true,
+                        "jsonlLines":  28,
+                        "analyzerExitCode":  1,
+                        "criteria":  {
+                                         "A1":  "pass",
+                                         "A2":  "pass",
+                                         "A3":  "warn",
+                                         "A4":  "fail",
+                                         "B":  "skipped"
+                                     },
+                        "failedMust":  "A4"
+                    },
+        "evidence":  [
+                         "l5/tap.wav",
+                         "l5/analyzer-report.json",
+                         "L5/logcat.txt",
+                         "L5/samples.json",
+                         "L5/state.json"
+                     ],
+        "startedAt":  "2026-11-15T21:00:54.8488602+08:00",
+        "durationMs":  149298,
+        "detail":  "",
+        "repro":  [
+
+                  ]
+    }
+]

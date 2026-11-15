@@ -12,6 +12,7 @@ import com.zjr.hesimusic.data.dao.HiddenSongDao
 import com.zjr.hesimusic.data.dao.LogDao
 import com.zjr.hesimusic.data.dao.PlaylistDao
 import com.zjr.hesimusic.data.dao.SongDao
+import com.zjr.hesimusic.data.dao.SongLoopDao
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -59,7 +60,9 @@ object DatabaseModule {
                 AppDatabase.MIGRATION_3_4,
                 AppDatabase.MIGRATION_4_5,
                 AppDatabase.MIGRATION_5_6,
-                AppDatabase.MIGRATION_6_7
+                AppDatabase.MIGRATION_6_7,
+                AppDatabase.MIGRATION_7_8,
+                AppDatabase.MIGRATION_8_9
             )
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onCreate(db: SupportSQLiteDatabase) {
@@ -71,6 +74,7 @@ object DatabaseModule {
                     super.onOpen(db)
                     val openDuration = System.currentTimeMillis() - startTime
                     Log.i(TAG, "Database opened in ${openDuration}ms")
+                    seedSeamlessSmartPlaylist(db)
                 }
             })
             .build()
@@ -79,6 +83,32 @@ object DatabaseModule {
         Log.i(TAG, "AppDatabase build completed in ${buildDuration}ms")
         
         return database
+    }
+
+    /**
+     * 内置智能歌单「无缝循环」= 已确认循环点(confirmed=1)的歌曲集合。
+     *
+     * 幂等:不存在才插入,存在则仅在 SQL 文本变化时更新;任何异常只记日志,绝不让 DB 打开失败。
+     * 注意:智能歌单的 @RawQuery 未观察 SongLoop 表,confirmed 变化不会即时刷新该视图
+     * (下一次 songs 侧变更或重启后刷新)。
+     */
+    private fun seedSeamlessSmartPlaylist(db: SupportSQLiteDatabase) {
+        val sql = "SELECT * FROM songs WHERE id IN (SELECT songId FROM song_loop WHERE confirmed = 1)"
+        try {
+            db.execSQL(
+                "INSERT INTO smart_playlists (name, createdAt, sqlText) " +
+                    "SELECT '无缝循环', strftime('%s','now') * 1000, ? " +
+                    "WHERE NOT EXISTS (SELECT 1 FROM smart_playlists WHERE name = '无缝循环')",
+                arrayOf<Any>(sql),
+            )
+            db.execSQL(
+                "UPDATE smart_playlists SET sqlText = ? " +
+                    "WHERE name = '无缝循环' AND sqlText <> ?",
+                arrayOf<Any>(sql, sql),
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "seedSeamlessSmartPlaylist failed", e)
+        }
     }
 
     @Provides
@@ -104,5 +134,10 @@ object DatabaseModule {
     @Provides
     fun provideHiddenSongDao(database: AppDatabase): HiddenSongDao {
         return database.hiddenSongDao()
+    }
+
+    @Provides
+    fun provideSongLoopDao(database: AppDatabase): SongLoopDao {
+        return database.songLoopDao()
     }
 }

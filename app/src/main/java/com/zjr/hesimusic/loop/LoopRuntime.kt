@@ -1,0 +1,38 @@
+package com.zjr.hesimusic.loop
+
+import com.zjr.hesimusic.data.model.SongLoop
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/**
+ * 当前无缝窗口的**唯一**来源:UI 的 A/B 标记、引擎的环回、位置映射都读这里。
+ *
+ * 它只是"当前无缝窗口"的持有者:
+ * - 不做任何 DB 查询([refresh] 的 row 由调用方查好传入);
+ * - 不做任何播放操作;
+ * - 不起协程、不做定时/轮询。
+ *
+ * 任何状态变更事件(切歌 / repeat 变化 / 行变更 / restore 完成)都只需重新调用一次
+ * [refresh] —— 重算幂等,相同窗口不会重复 emit。
+ */
+@Singleton
+class LoopRuntime @Inject constructor() {
+
+    private val _window = MutableStateFlow<LoopWindow?>(null)
+
+    /** 当前无缝窗口;null = 当前不无缝(走普通播放)。 */
+    val window: StateFlow<LoopWindow?> = _window.asStateFlow()
+
+    /** 重算一次资格判定并写入(幂等:窗口值相同的连续调用不会重复 emit)。 */
+    fun refresh(songId: Long?, repeatMode: Int, row: SongLoop?) {
+        _window.value = LoopEligibility.derive(songId, repeatMode, row)
+    }
+
+    /** 清空窗口(停止/退出无缝场景)。 */
+    fun clear() {
+        _window.value = null
+    }
+}

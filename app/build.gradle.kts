@@ -8,6 +8,10 @@ plugins {
 
 val releaseVersionCode = providers.gradleProperty("releaseVersionCode").orNull?.toIntOrNull() ?: 1
 val releaseVersionName = providers.gradleProperty("releaseVersionName").orNull ?: "0.1"
+// 开发/测试构建独立包名:-PdevPackage=.dev → applicationId 追加后缀、应用名加 Dev 后缀,
+// 与日常安装隔离(不影响 release 包名与名称)
+val devPackageSuffix = providers.gradleProperty("devPackage").orNull
+val devAppLabel = if (devPackageSuffix != null) "海瑟音乐 Dev" else null
 val releaseStoreFilePath = providers.environmentVariable("HESI_RELEASE_STORE_FILE").orNull
 val releaseStorePassword = providers.environmentVariable("HESI_RELEASE_STORE_PASSWORD").orNull
 val releaseKeyAlias = providers.environmentVariable("HESI_RELEASE_KEY_ALIAS").orNull
@@ -31,6 +35,10 @@ android {
 
     defaultConfig {
         applicationId = "com.zjr.hesimusic"
+        if (devPackageSuffix != null) {
+            applicationIdSuffix = devPackageSuffix
+        }
+        manifestPlaceholders["appLabel"] = devAppLabel ?: "@string/app_name"
         minSdk = 31
         targetSdk = 36
         versionCode = releaseVersionCode
