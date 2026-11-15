@@ -12,6 +12,7 @@ import com.zjr.hesimusic.data.dao.HiddenSongDao
 import com.zjr.hesimusic.data.dao.LogDao
 import com.zjr.hesimusic.data.dao.PlaylistDao
 import com.zjr.hesimusic.data.dao.SongDao
+import com.zjr.hesimusic.data.dao.SongLoopDao
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -59,7 +60,9 @@ object DatabaseModule {
                 AppDatabase.MIGRATION_3_4,
                 AppDatabase.MIGRATION_4_5,
                 AppDatabase.MIGRATION_5_6,
-                AppDatabase.MIGRATION_6_7
+                AppDatabase.MIGRATION_6_7,
+                AppDatabase.MIGRATION_7_8,
+                AppDatabase.MIGRATION_8_9
             )
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onCreate(db: SupportSQLiteDatabase) {
@@ -104,5 +107,10 @@ object DatabaseModule {
     @Provides
     fun provideHiddenSongDao(database: AppDatabase): HiddenSongDao {
         return database.hiddenSongDao()
+    }
+
+    @Provides
+    fun provideSongLoopDao(database: AppDatabase): SongLoopDao {
+        return database.songLoopDao()
     }
 }

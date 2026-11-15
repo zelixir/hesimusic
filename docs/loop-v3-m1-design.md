@@ -43,6 +43,24 @@ val child = ClippingMediaSource(
 - 裁剪的意义:子 period 从 A 起算(样本级对齐,不受 MP3 帧级 seek 精度影响),到 B 结束。
 - 每个子源自己带 extractor/Loader/SampleQueue(Media3 原生机制),互不干扰。
 
+### 2.1.1 坐标与"前奏 = 第 0 轮"(必须严格遵守,否则位置映射整体偏一个前奏)
+
+引擎原始时间轴 = **整曲坐标**,且与 `LoopPosition` 严格自洽:
+
+| 轮次 | 内容 | 子源裁剪 | 该轮样本的 base 时间戳 |
+|---|---|---|---|
+| 0(前奏轮) | 歌曲开头到 B,**只播一次** | `[0, B)` | `0` |
+| 1 | 第一次重复 | `[A, B)` | `B` |
+| j (≥1) | 第 j 次重复 | `[A, B)` | `B + (j-1)×L` |
+
+即:第 j 轮(j≥1)的起点 = `A + j×L`(= `B + (j-1)×L`),与 `LoopPosition.iterationStartUs(j)` 一致;
+因此 `displayUs(raw)` 对 `raw∈[0,A)` 原样、`raw∈[A,B)` 原样、`raw≥B` 折返到 `A + ((raw-A) mod L)` —— 三种情况都正确。
+
+**A == 0 时**:前奏轮与循环轮内容相同(都是 `[0,B)`),实现上可直接把第 0 轮也当循环轮,base 公式不变。
+
+**禁止**让子源交付"文件坐标"的时间戳(裁剪子源的样本时间戳是相对该切口 0 起的),必须用上表的 base 重新基准化;
+否则 `displayUs`/seek 全部错位,且表现为"每轮多出/少掉一个前奏"。
+
 ### 2.2 轮次切换(核心)
 
 `LoopingWindowPeriod` 内部维护:
@@ -75,11 +93,13 @@ private var offsetUs: Long = 0     // 当前轮的累计时间偏移 = iteration
 
 ### 2.4 seek
 
-`seekToUs(positionUs)`:
-- `k = positionUs / L`,`off = positionUs % L`;目标 = `底层 A + off`;
-- 若 `k == 当前轮次`:转发给当前子 period 的 `seekToUs`(子 period 内部 seek);
-- 否则:丢弃当前轮,创建子源并 seek 到 `off`(A+off),重置 `offsetUs = k*L`;
-- 返回 `k*L + off`(= positionUs);
+`seekToUs(positionUs)`(**positionUs 是整曲坐标**):
+- `positionUs ∈ [0, A)` → 第 0 轮(前奏),子源 `[0,B)` 内 seek 到 positionUs,base=0;
+- `positionUs ∈ [A, B)` → 第 0 轮内 seek 到 positionUs(base=0);
+- `positionUs ≥ B` → `j = 1 + (positionUs - B) / L`,`off = (positionUs - A) mod L`,即第 j 轮内 seek 到 A+off,base=`B+(j-1)L`;
+- 若目标轮次 == 当前轮次:转发当前子 period 的 `seekToUs`(只 seek 不重建);
+- 否则:丢弃当前轮(含预取),新建子源 → seek 到切口内偏移 → 重置 base;
+- 返回 positionUs;
 - `readDiscontinuity()` **恒返回 C.TIME_UNSET**(我们对外表现为连续时间轴,不触发 renderer 的流切换/flush);
 - `getAdjustedSeekPositionUs` 直接返回入参(不做帧对齐)。
 
