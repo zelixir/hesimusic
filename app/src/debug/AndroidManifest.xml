@@ -2,11 +2,21 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- debug HTTP 调试服务绑定 127.0.0.1 需要 INTERNET;仅 debug 变体合并,release 不受影响 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application>
         <!-- Debug 专属 ADB 接口，仅合入 debug 构建 -->
         <receiver
             android:name="com.zjr.hesimusic.adb.AdbDatabaseReceiver"
             android:exported="true"
             tools:ignore="ExportedReceiver" />
+
+        <!-- Debug 专属 HTTP 调试服务启动器（provider.onCreate 起 daemon 线程） -->
+        <provider
+            android:name="com.zjr.hesimusic.debug.DebugInitProvider"
+            android:authorities="${applicationId}.debug-init"
+            android:enabled="true"
+            android:exported="false" />
     </application>
 </manifest>
