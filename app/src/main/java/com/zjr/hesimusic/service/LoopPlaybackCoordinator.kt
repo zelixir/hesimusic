@@ -11,6 +11,7 @@ import com.zjr.hesimusic.loop.LoopIntent
 import com.zjr.hesimusic.loop.LoopIntentDecision
 import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.LoopWindow
+import com.zjr.hesimusic.loop.analysis.PcmDecoder
 import com.zjr.hesimusic.loop.audio.LoopAudioController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -37,6 +38,8 @@ import javax.inject.Singleton
  * 5. 形态对账：[LoopShapePlan] 决定「写什么窗口 + 是否 seek」——生产路径**不裁剪**，
  *    所以进入/退出无缝只写 [LoopAudioController.window]，没有任何 replaceMediaItem /
  *    时间线重建；只有「进入时 ring 未覆盖 [A,B)」与「退出时处于重放态」两种例外各 seek 一次；
+ *    窗口写入后还会触发一次后台环缓冲预填（[LoopRingPrefiller]，非阻塞、不 seek），
+ *    预填完成前仍走上面的预卷兜底，完成后到 B/从区间内起播都无需再预卷；
  * 6. 当前歌变化时重启 song_loop 行订阅（analyze/confirm/demote/delete 落库自动传导）。
  *
  * 不变量：
@@ -53,6 +56,7 @@ class LoopPlaybackCoordinator @Inject constructor(
     private val songRepository: SongRepository,
     private val loopIntent: LoopIntent,
     private val playbackPreferences: PlaybackPreferences,
+    private val pcmDecoder: PcmDecoder,
 ) {
 
     private val mainDispatcher = Dispatchers.Main.immediate
@@ -67,6 +71,19 @@ class LoopPlaybackCoordinator @Inject constructor(
 
     @Volatile
     private var playerRef: Player? = null
+
+    /**
+     * 服务层环缓冲预填：窗口应用后在后台解码 [A,B) 灌 ring（不阻塞、不 seek、窗口变化即取消）。
+     *
+     * 与试听页同一套音频层 API（[LoopAudioController.seedRing]），解码复用分析侧
+     * [PcmDecoder.decodePcm16]（精确对齐 + BACKGROUND 优先级）。
+     */
+    private val ringPrefiller = LoopRingPrefiller(
+        audio = audio,
+        scope = scope,
+        decode = { path, startUs, endUs -> pcmDecoder.decodePcm16(path, startUs, endUs) },
+        resolvePath = { songId -> songRepository.getSongsByIds(listOf(songId)).firstOrNull()?.filePath },
+    )
 
     init {
         installDegradeHandler()
@@ -181,6 +198,7 @@ class LoopPlaybackCoordinator @Inject constructor(
         observedSongId = null
         playerRef = null
         appliedWindow = null
+        ringPrefiller.cancel()
         if (audio.window != null) {
             audio.window = null
         }
@@ -229,6 +247,10 @@ class LoopPlaybackCoordinator @Inject constructor(
         if (audio.window != targetWindow) {
             audio.window = targetWindow
         }
+
+        // 1b) 窗口写入后触发后台预填（透明、非阻塞）：完成后下一次经过 B 即可无缝，
+        //     拖到区间内部也不会再被预卷逻辑拽回 A；失败/格式不符仍走原有预卷兜底。
+        ringPrefiller.onWindowApplied(targetWindow)
 
         // 2) 纯函数决定本次是否需要 seek（预卷 / 退出重放态）
         val plan = LoopShapePlan.plan(
