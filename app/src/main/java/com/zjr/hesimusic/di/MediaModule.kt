@@ -7,6 +7,8 @@ import androidx.media3.common.C
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.extractor.DefaultExtractorsFactory
+import com.zjr.hesimusic.loop.audio.LoopAudioController
+import com.zjr.hesimusic.loop.audio.LoopRenderersFactory
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -43,22 +45,24 @@ object MediaModule {
     fun provideExoPlayer(
         @ApplicationContext context: Context,
         audioAttributes: AudioAttributes,
-        extractorsFactory: DefaultExtractorsFactory
+        extractorsFactory: DefaultExtractorsFactory,
+        loopAudioController: LoopAudioController
     ): ExoPlayer {
         Log.i(TAG, "Building ExoPlayer")
         val startTime = System.currentTimeMillis()
-        
+
         val player = ExoPlayer.Builder(context)
             .setMediaSourceFactory(
                 DefaultMediaSourceFactory(context, extractorsFactory)
             )
+            .setRenderersFactory(LoopRenderersFactory(context, loopAudioController))
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .build()
-        
+
         val duration = System.currentTimeMillis() - startTime
         Log.i(TAG, "ExoPlayer created in ${duration}ms")
-        
+
         return player
     }
 }
