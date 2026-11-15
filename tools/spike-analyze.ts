@@ -10,9 +10,12 @@
  *   A1 零间隙        —— 接缝 ±window 内不存在 >=zeroMinRun 帧的全零段(所有声道为 0)
  *   A2 零漂移        —— 相邻接缝的输出帧距 == 理论 L 帧(0 误差)
  *   A3 零重放/丢帧   —— 总帧数 == 前奏 + N×L(+ 收尾部分轮);有前奏时只报偏差不硬判
- *   A4 零 flush/underrun —— 稳态期 flush/discontinuity 计数 0、underrun 增量 0、喂数间隔 <= 30ms
+ *   A4 零 flush/underrun —— 硬判据:稳态期 flush/discontinuity 计数 0、underrun 增量 0;
+ *                        喂数间隔默认仅作参考警告(> 30ms 标 WARN,不 FAIL),显式 --feed-gap-ms 才硬判
  *   B  逐位相同      —— 有 seam 事件时每轮 PCM 与首轮逐字节相同
- *   附加:PTS 连续性 —— 由 feed 事件重建,pts 增量与 frames/sr 偏差 > 1ms 记为 discontinuity
+ *   附加:PTS 连续性 —— 由 feed 事件重建,pts 增量与 frames/sr 偏差 > 1ms 记为 discontinuity;
+ *                        ret=false / 同 pts 的"部分消费续写"合并,不计 discontinuity
+ *   附加:机制结论    —— 按 mode(可用 --mode 覆盖)在摘要里给出一行机制判断,只影响文案
  *
  * 退出码:0 = 全部"必须判据"通过;1 = 有必须判据失败;2 = 参数/文件/格式错误。
  */
@@ -20,7 +23,7 @@
 import { open, readFile, writeFile, mkdir } from "node:fs/promises";
 import * as path from "node:path";
 
-const VERSION = "spike-analyze/1";
+const VERSION = "spike-analyze/2";
 
 const SCRIPT_DIR: string = (() => {
   const anyImport: any = import.meta as any;
@@ -324,9 +327,15 @@ function frameIsZero(buf: Buffer, off: number, bpf: number, codec: Codec): boole
 // ============================================================================
 
 const KNOWN_EVENTS = new Set([
-  "run", "configure", "feed", "flush", "discontinuity", "eos_out", "play_to_eos",
-  "looping", "seam", "track", "end", "error", "seek", "state", "pause", "resume",
-  "delegate", "log", "warning",
+  "run", "configure", "feed", "feed_wait", "flush", "discontinuity", "eos_out", "eos_clear",
+  "play_to_eos", "play_to_eos_done", "looping", "seam", "track", "track_new", "end", "error",
+  "seek", "state", "pause", "resume", "delegate", "log", "warning",
+  // 探针实测会额外落盘的事件(不属于契约最小集,但已知,避免计入 unknown)
+  "timeline", "media_item_transition", "repeat_mode", "mode_setup", "playback_state",
+  "prepared", "play", "output_stream_offset", "pending_changed", "is_playing",
+  "capture_begin", "capture_end", "replay_start", "replay_track_play", "replay_end",
+  "replay_flush", "replay_error", "replay_track_error", "position_reset",
+  "position_discontinuity", "stop", "reset", "sink_release",
 ]);
 
 interface LogData {
@@ -787,11 +796,17 @@ function analyzePts(log: LogData, sr: number, thresholdUs: number): any {
   const discontinuities: any[] = [];
   let cumBefore = 0;
   let first: { ptsUs: number; cumBefore: number } | null = null;
-  let prev: { ptsUs: number; cumBefore: number } | null = null;
+  // anchor = 当前 buffer 的起点(ptsUs + 它开始时的累计帧)。部分消费续写不移动 anchor。
+  let anchor: { ptsUs: number; cumBefore: number } | null = null;
+  let prevFeed: any = null;
   let count = 0;
   let resets = 0;
   let maxAbsDeviationUs = 0;
   let ptsFeedCount = 0;
+  let continuationCount = 0;
+  let continuationRetFalse = 0;
+  let continuationSamePtsNoRet = 0;
+  let continuationSamePtsOther = 0;
 
   for (let i = 0; i < feeds.length; i++) {
     const f = feeds[i];
@@ -800,10 +815,24 @@ function analyzePts(log: LogData, sr: number, thresholdUs: number): any {
     if (pts != null) {
       ptsFeedCount++;
       if (first == null) first = { ptsUs: pts, cumBefore };
-      if (prev != null) {
-        const span = cumBefore - prev.cumBefore;
+      const prevHadRet = prevFeed != null && Object.prototype.hasOwnProperty.call(prevFeed, "ret");
+      // ret=false 表示上一个 buffer 没吃完;紧随其后同 pts 的 feed 是同一 buffer 续写。
+      // 日志无 ret 字段时,相邻 feed 的 pts 完全相同同样视为续写。
+      // 两条规则都归结为:pts 与当前 buffer 起点相同 => 续写,不是新的 buffer,不参与跳变判定。
+      const samePts = anchor != null && pts === anchor.ptsUs;
+      const isContinuation = samePts && prevFeed != null;
+      if (anchor == null) {
+        anchor = { ptsUs: pts, cumBefore };
+      } else if (isContinuation) {
+        continuationCount++;
+        if (prevHadRet && prevFeed.ret === false) continuationRetFalse++;
+        else if (!prevHadRet) continuationSamePtsNoRet++;
+        else continuationSamePtsOther++;
+        // 不移动 anchor:pts 仍是 buffer 起点,cumBefore 继续累加续写帧
+      } else {
+        const span = cumBefore - anchor.cumBefore;
         const expectedUs = sr > 0 ? (span / sr) * 1e6 : 0;
-        const deltaUs = pts - prev.ptsUs;
+        const deltaUs = pts - anchor.ptsUs;
         const deviationUs = deltaUs - expectedUs;
         if (Math.abs(deviationUs) > thresholdUs) {
           count++;
@@ -813,7 +842,7 @@ function analyzePts(log: LogData, sr: number, thresholdUs: number): any {
               feedIndex: i,
               tMs: eventTime(f),
               framePos: cumBefore,
-              prevPtsUs: prev.ptsUs,
+              prevPtsUs: anchor.ptsUs,
               ptsUs: pts,
               deltaUs,
               expectedUs,
@@ -823,16 +852,17 @@ function analyzePts(log: LogData, sr: number, thresholdUs: number): any {
           }
         }
         if (deltaUs < 0) resets++;
+        anchor = { ptsUs: pts, cumBefore };
       }
-      prev = { ptsUs: pts, cumBefore };
     }
     cumBefore += frames ?? 0;
+    prevFeed = f;
   }
 
   let cumulativeDriftUs: number | null = null;
-  if (first != null && prev != null && prev.cumBefore > first.cumBefore) {
-    const expected = first.ptsUs + ((prev.cumBefore - first.cumBefore) / sr) * 1e6;
-    cumulativeDriftUs = prev.ptsUs - expected;
+  if (first != null && anchor != null && anchor.cumBefore > first.cumBefore) {
+    const expected = first.ptsUs + ((anchor.cumBefore - first.cumBefore) / sr) * 1e6;
+    cumulativeDriftUs = anchor.ptsUs - expected;
   }
 
   return {
@@ -845,7 +875,11 @@ function analyzePts(log: LogData, sr: number, thresholdUs: number): any {
     maxAbsDeviationUs,
     cumulativeDriftUs,
     firstPtsUs: first?.ptsUs ?? null,
-    lastPtsUs: prev?.ptsUs ?? null,
+    lastPtsUs: anchor?.ptsUs ?? null,
+    continuationCount,
+    continuationByRetFalse: continuationRetFalse,
+    continuationBySamePtsNoRet: continuationSamePtsNoRet,
+    continuationBySamePtsOther: continuationSamePtsOther,
   };
 }
 
@@ -859,8 +893,10 @@ interface AnalyzeOptions {
   steadyStartMs: number;
   steadyEndMs: number;
   feedGapThresholdMs: number;
+  feedGapHard: boolean;
   ptsThresholdUs: number;
   strict: boolean;
+  modeOverride: string | null;
   maxMismatches: number;
   maxZeroRuns: number;
 }
@@ -872,8 +908,10 @@ function defaultOptions(): AnalyzeOptions {
     steadyStartMs: 1000,
     steadyEndMs: 1000,
     feedGapThresholdMs: 30,
+    feedGapHard: false,
     ptsThresholdUs: 1000,
     strict: false,
+    modeOverride: null,
     maxMismatches: 10,
     maxZeroRuns: 2000,
   };
@@ -909,7 +947,9 @@ async function analyzeCore(
   if (srLog != null && srLog !== wi.sampleRate) {
     warnings.push("日志采样率 " + srLog + " 与 WAV " + wi.sampleRate + " 不一致,帧换算以日志采样率为准");
   }
-  const mode: string | null = typeof run.mode === "string" ? run.mode : null;
+  const runMode: string | null = typeof run.mode === "string" ? run.mode.trim().toLowerCase() : null;
+  const mode: string | null = opts.modeOverride != null ? opts.modeOverride : runMode;
+  const modeSource = opts.modeOverride != null ? "cli" : (runMode != null ? "run" : "none");
   const aMs = numOf(run.aMs) ?? numOf(looping?.aMs);
   const bMs = numOf(run.bMs) ?? numOf(looping?.bMs);
   const loopFrames = aMs != null && bMs != null && bMs > aMs ? msToFrames(bMs - aMs, sampleRate) : null;
@@ -925,6 +965,7 @@ async function analyzeCore(
   const params = {
     sampleRate,
     mode,
+    modeSource,
     tag: typeof run.tag === "string" ? run.tag : null,
     path: typeof run.path === "string" ? run.path : null,
     aMs,
@@ -1172,7 +1213,7 @@ async function analyzeCore(
       discEvents.push(entry);
     }
   }
-  if (!hasSteady) warnings.push("稳态窗口为空(duration=" + fmtNum(durationMs, 0) + "ms,排除启动 " + steadyStart + "ms/收尾 " + opts.steadyEndMs + "ms),A4 只做整段统计");
+  if (!hasSteady) warnings.push("稳态窗口为空(duration=" + fmtNum(durationMs, 0) + "ms,排除启动 " + steadyStart + "ms/收尾 " + opts.steadyEndMs + "ms),A4 无法判定稳态,仅报告整段计数");
 
   // underrun
   const trackEvents = log.events
@@ -1209,31 +1250,46 @@ async function analyzeCore(
   gaps.sort((x, y) => y.gapMs - x.gapMs);
   const maxGap = gaps.length > 0 ? gaps[0] : null;
 
-  const a4Problems: string[] = [];
-  if (flushSteady > 0) a4Problems.push("稳态 flush " + flushSteady + " 次");
-  if (discSteady > 0) a4Problems.push("稳态 discontinuity " + discSteady + " 次");
-  if (underrunSteadyDelta > 0) a4Problems.push("稳态 underrun 增量 " + underrunSteadyDelta);
-  if (maxGap != null && maxGap.gapMs > opts.feedGapThresholdMs) {
-    a4Problems.push("最大喂数间隔 " + fmtNum(maxGap.gapMs, 1) + "ms > " + opts.feedGapThresholdMs + "ms");
+  // 硬判据:稳态 flush / discontinuity / underrun 增量。喂数间隔默认只作参考警告:
+  // feed 是"写进 delegate"的时刻,不是 DMA 取数时刻;大 AudioTrack 缓冲下 40~50ms 节奏可正常。
+  // 显式传 --feed-gap-ms(或将 feedGapHard=true)才把它升级为硬判据。
+  const a4HardProblems: string[] = [];
+  const a4SoftWarnings: string[] = [];
+  if (flushSteady > 0) a4HardProblems.push("稳态 flush " + flushSteady + " 次");
+  if (discSteady > 0) a4HardProblems.push("稳态 discontinuity " + discSteady + " 次");
+  if (underrunSteadyDelta > 0) a4HardProblems.push("稳态 underrun 增量 " + underrunSteadyDelta);
+  const gapExceeds = maxGap != null && maxGap.gapMs > opts.feedGapThresholdMs;
+  if (gapExceeds) {
+    const gapMsg = "最大喂数间隔 " + fmtNum(maxGap!.gapMs, 1) + "ms > " + opts.feedGapThresholdMs + "ms";
+    if (opts.feedGapHard) a4HardProblems.push(gapMsg + "(--feed-gap-ms 显式硬判)");
+    else a4SoftWarnings.push(gapMsg + "(参考项:feed 是写入 delegate 的时刻而非 DMA 取数时刻,大缓冲下属正常节奏;需要硬门禁请显式传 --feed-gap-ms)");
   }
   if (flushUnplaced > 0 || discUnplaced > 0) {
     warnings.push((flushUnplaced + discUnplaced) + " 个 flush/discontinuity 事件缺少 t 字段,未计入稳态");
   }
   if (!hasSteady) {
-    if (flushTotal > 0 && flushSteady === 0) a4Problems.push("整段 flush " + flushTotal + " 次(稳态窗口为空,按整段计)");
-    if (discTotal > 0 && discSteady === 0) a4Problems.push("整段 discontinuity " + discTotal + " 次(稳态窗口为空,按整段计)");
-    if (underrunWholeDelta > 0 && underrunSteadyDelta === 0) a4Problems.push("整段 underrun 增量 " + underrunWholeDelta + "(稳态窗口为空,按整段计)");
+    // 没有稳态窗口(过短的采集)时不做硬判,避免把启动 configure/flush 误判成稳态问题。
+    a4SoftWarnings.push(
+      "稳态窗口为空,无法判定稳态 flush/underrun(整段:flush " + flushTotal + " 次 / discontinuity " + discTotal + " 次 / underrun 增量 " + underrunWholeDelta + ")",
+    );
   }
 
-  const a4Status: "pass" | "fail" | "warn" | "skipped" = a4Problems.length > 0 ? "fail" : "pass";
-  const a4Summary = a4Problems.length > 0
-    ? a4Problems.join(";")
-    : "稳态[" + fmtNum(steadyStart, 0) + "ms, " + fmtNum(Math.max(steadyStart, steadyEnd), 0) + "ms) 内 flush=0/discontinuity=0、underrun 增量 0、最大喂数间隔 " + (maxGap ? fmtNum(maxGap.gapMs, 1) + "ms" : "n/a");
+  const a4Status: "pass" | "fail" | "warn" | "skipped" =
+    a4HardProblems.length > 0 ? "fail" : (a4SoftWarnings.length > 0 ? "warn" : "pass");
+  const a4Summary = a4HardProblems.length > 0
+    ? a4HardProblems.concat(a4SoftWarnings).join(";")
+    : a4SoftWarnings.length > 0
+      ? "硬判据通过(flush/discontinuity/underrun 均正常);参考警告:" + a4SoftWarnings.join(";")
+      : "稳态[" + fmtNum(steadyStart, 0) + "ms, " + fmtNum(Math.max(steadyStart, steadyEnd), 0) + "ms) 内 flush=0/discontinuity=0、underrun 增量 0、最大喂数间隔 " + (maxGap ? fmtNum(maxGap.gapMs, 1) + "ms" : "n/a");
 
   const a4 = {
     durationMs,
     steady: { startMs: steadyStart, endMs: Math.max(steadyStart, steadyEnd), active: hasSteady },
     feedGapThresholdMs: opts.feedGapThresholdMs,
+    feedGapHard: opts.feedGapHard,
+    gapExceedsThreshold: gapExceeds,
+    hardProblems: a4HardProblems,
+    softWarnings: a4SoftWarnings,
     flush: { total: flushTotal, steady: flushSteady, startup: flushStartup, unplaced: flushUnplaced, events: flushEvents.slice(0, 100) },
     discontinuity: { total: discTotal, steady: discSteady, unplaced: discUnplaced, events: discEvents.slice(0, 100) },
     underrun: {
@@ -1253,11 +1309,50 @@ async function analyzeCore(
       maxGapMs: maxGap ? maxGap.gapMs : null,
       maxGap,
       topGaps: gaps.slice(0, 5),
+      gapExceedsThreshold: gapExceeds,
+      hard: opts.feedGapHard,
     },
   };
 
   // ---- PTS ----
   const pts = analyzePts(log, sampleRate, opts.ptsThresholdUs);
+
+  // ---- 机制结论(只影响摘要文案,不影响任何判据数值)----
+  const configureEvents = log.events.filter((e) => e.ev === "configure");
+  const reconfigureEvents = configureEvents.slice(1); // 第一次是初始 configure,属正常
+  const discontinuityEvents = log.events.filter((e) => e.ev === "discontinuity");
+  let mechanism: any;
+  {
+    const base = {
+      mode,
+      modeSource,
+      configureCount: configureEvents.length,
+      reconfigurationCount: reconfigureEvents.length,
+      reconfigurationTimesMs: reconfigureEvents.map((e) => eventTime(e)),
+      discontinuityEventCount: discontinuityEvents.length,
+      discontinuityEventTimesMs: discontinuityEvents.map((e) => eventTime(e)),
+      flushSteady,
+      discSteady,
+      underrunSteadyDelta,
+    };
+    if (mode == null) {
+      mechanism = { ...base, level: "unknown", conclusion: "mode 未知(日志无 run.mode 且未用 --mode 指定),不给出机制结论" };
+    } else if (mode === "plain") {
+      mechanism = { ...base, level: "info", conclusion: "plain 为整曲单段对照组,不涉及环回;本轮判据只用于验证取证管线" };
+    } else if (mode === "baseline" || mode === "window") {
+      const reconfig = reconfigureEvents.length + discontinuityEvents.length;
+      mechanism = reconfig > 0
+        ? { ...base, level: "bad", conclusion: "存在流重配置(接缝处 configure 重复 " + reconfigureEvents.length + " 次 / discontinuity 事件 " + discontinuityEvents.length + " 次),非真无缝" }
+        : { ...base, level: "ok", conclusion: "未观察到 configure 重复或 discontinuity 事件(是否真无缝仍以 A1/A2 数值为准)" };
+    } else if (mode === "sink" || mode === "media") {
+      const bad = flushSteady > 0 || discSteady > 0 || underrunSteadyDelta > 0;
+      mechanism = bad
+        ? { ...base, level: "bad", conclusion: "稳态出现 flush=" + flushSteady + " / discontinuity=" + discSteady + " / underrun 增量 " + underrunSteadyDelta + ",非真无缝" }
+        : { ...base, level: "ok", conclusion: "稳态未见 flush/discontinuity/underrun 增量(是否真无缝仍以 A1/A2 数值为准)" };
+    } else {
+      mechanism = { ...base, level: "unknown", conclusion: "mode=" + mode + " 不在已知机制列表,不给出机制结论" };
+    }
+  }
 
   // ---- 判据汇总 ----
   const criteria: any = {
@@ -1338,7 +1433,11 @@ async function analyzeCore(
     hints.push("A4:稳态 underrun 增加 " + underrunSteadyDelta + ",音频管线出现欠载(听感上就是断音)");
   }
   if (maxGap != null && maxGap.gapMs > opts.feedGapThresholdMs) {
-    hints.push("A4:最大喂数间隔 " + fmtNum(maxGap.gapMs, 1) + "ms(t=" + maxGap.fromTMs + "→" + maxGap.toTMs + "ms),超过 " + opts.feedGapThresholdMs + "ms 阈值,可能造成 underrun");
+    if (opts.feedGapHard) {
+      hints.push("A4:最大喂数间隔 " + fmtNum(maxGap.gapMs, 1) + "ms(t=" + maxGap.fromTMs + "→" + maxGap.toTMs + "ms),已按 --feed-gap-ms 显式开启硬判(>阈值即失败)");
+    } else {
+      hints.push("A4:最大喂数间隔 " + fmtNum(maxGap.gapMs, 1) + "ms(t=" + maxGap.fromTMs + "→" + maxGap.toTMs + "ms)超过 " + opts.feedGapThresholdMs + "ms,但 underrun 增量为 0:feed 是写入 delegate 的时刻而非 DMA 取数时刻,大缓冲下 40~50ms 节奏正常,仅作参考警告;需要硬门禁请显式传 --feed-gap-ms");
+    }
   }
   if (pts.discontinuityCount > 0) {
     const first = pts.discontinuities[0];
@@ -1349,6 +1448,9 @@ async function analyzeCore(
   }
   if (a3Status === "warn" || a3Status === "fail") {
     hints.push("A3:总帧数与 前奏+N×L 不符,结合 A2 可判断是多播还是丢帧");
+  }
+  if (mechanism.level === "bad") {
+    hints.push("机制(" + mode + "):" + mechanism.conclusion);
   }
 
   return {
@@ -1401,6 +1503,7 @@ async function analyzeCore(
     },
     criteria,
     pts,
+    mechanism,
     hints,
     warnings: [...wi.warnings, ...warnings],
     verdict: {
@@ -1458,6 +1561,9 @@ function renderHuman(report: any, opts: AnalyzeOptions): string {
   push("运行: mode=" + (r.mode ?? "?") + " aMs=" + (r.aMs ?? "—") + " bMs=" + (r.bMs ?? "—") + " seconds=" + (r.seconds ?? "—") + " tag=" + (r.tag ?? "—"));
   const cfg = lg.configure ?? {};
   push("配置: sampleRate=" + (cfg.sampleRate ?? "?") + " channels=" + (cfg.channels ?? "?") + " pcm=" + (cfg.pcm ?? "?") + " bytesPerFrame=" + (cfg.bytesPerFrame ?? "?"));
+  push("configure: " + report.mechanism.configureCount + " 次" + (report.mechanism.reconfigurationCount > 0
+    ? "(其中接缝重配置 " + report.mechanism.reconfigurationCount + " 次 @ " + report.mechanism.reconfigurationTimesMs.join(",") + "ms)"
+    : "(仅初始配置,无接缝重配置)"));
   if (lg.end) push("结束: totalFrames=" + (lg.end.totalFrames ?? "—") + " durationMs=" + (lg.end.durationMs ?? "—"));
   for (const err of lg.errorEvents.slice(0, 3)) push("  ! error: " + String(err.message ?? "").slice(0, 160));
   if (lg.parseErrorCount > 0) {
@@ -1469,6 +1575,8 @@ function renderHuman(report: any, opts: AnalyzeOptions): string {
   push("前奏: " + (p.preambleFrames ?? "—") + " 帧" + (p.preambleFrames != null ? " (" + fmtNum(framesToMs(p.preambleFrames, p.sampleRate), 3) + " ms)" : ""));
   push("L   : " + (p.loopFrames ?? "—") + " 帧" + (p.loopMs != null ? " (" + fmtNum(p.loopMs, 3) + " ms)" : ""));
   push("时长: " + fmtNum(p.durationMs, 1) + " ms(WAV " + fmtNum(p.wavDurationMs, 1) + " ms)");
+  push("模式: " + (p.mode ?? "?") + "(来源:" + (p.modeSource ?? "?") + ")");
+  push("机制: " + report.mechanism.conclusion);
 
   rule("接缝");
   const sm = report.seams;
@@ -1509,9 +1617,13 @@ function renderHuman(report: any, opts: AnalyzeOptions): string {
   }
   push("A3 期望: 前奏 " + (c.A3.preambleFrames ?? "—") + " + " + (c.A3.seamCount ?? 0) + "×" + (c.A3.loopFrames ?? "—") + " = " + (c.A3.expectedFrames ?? "—") + " 帧,实际 " + c.A3.totalFrames + " 帧,偏差 " + (c.A3.deviationFrames ?? "—") + " 帧");
   push("A4 稳态 [" + fmtNum(c.A4.steady.startMs, 0) + ", " + fmtNum(c.A4.steady.endMs, 0) + ") ms: flush " + c.A4.flush.steady + "/" + c.A4.flush.total + ", discontinuity " + c.A4.discontinuity.steady + "/" + c.A4.discontinuity.total + ", underrun 增量 " + c.A4.underrun.steadyDelta + "(全段 " + c.A4.underrun.wholeRunDelta + "), 最大喂数间隔 " + (c.A4.feed.maxGapMs != null ? fmtNum(c.A4.feed.maxGapMs, 2) + "ms" : "n/a"));
+  for (const hp of c.A4.hardProblems ?? []) push("   A4 硬判据失败: " + hp);
+  for (const sw of c.A4.softWarnings ?? []) push("   A4 参考警告: " + sw);
   for (const f of c.A4.flush.events) push("   flush @ t=" + f.t + "ms" + (f.steady ? " (稳态)" : ""));
   for (const g of c.A4.feed.topGaps) {
-    if (g.gapMs > c.A4.feedGapThresholdMs) push("   超阈值喂数间隔 " + fmtNum(g.gapMs, 2) + "ms @ " + g.fromTMs + "→" + g.toTMs + "ms");
+    if (g.gapMs > c.A4.feedGapThresholdMs) {
+      push("   " + (c.A4.feedGapHard ? "超阈值喂数间隔 " : "参考喂数间隔 ") + fmtNum(g.gapMs, 2) + "ms @ " + g.fromTMs + "→" + g.toTMs + "ms");
+    }
   }
   if (c.B.mismatches && c.B.mismatches.length > 0) {
     for (const mm of c.B.mismatches) {
@@ -1524,6 +1636,7 @@ function renderHuman(report: any, opts: AnalyzeOptions): string {
 
   rule("PTS 连续性");
   push("feed " + report.pts.feedCount + " 条(含 pts " + report.pts.ptsFeedCount + " 条),阈值 " + report.pts.thresholdUs + " µs,不连续 " + report.pts.discontinuityCount + " 处,累计漂移 " + (report.pts.cumulativeDriftUs != null ? fmtNum(report.pts.cumulativeDriftUs, 1) + " µs" : "n/a"));
+  push("部分消费续写合并: " + report.pts.continuationCount + " 条(ret=false " + report.pts.continuationByRetFalse + " / 同 pts 无 ret " + report.pts.continuationBySamePtsNoRet + " / 同 pts 其他 " + report.pts.continuationBySamePtsOther + "),不计 discontinuity");
   for (const d of report.pts.discontinuities.slice(0, 20)) {
     push("  t=" + (d.tMs ?? "—") + "ms 帧 " + d.framePos + ": " + d.prevPtsUs + " → " + d.ptsUs + " µs (Δ=" + fmtNum(d.deltaUs, 1) + ",期望 " + fmtNum(d.expectedUs, 1) + ",偏差 " + fmtNum(d.deviationUs, 1) + " µs," + d.kind + ")");
   }
@@ -1814,9 +1927,9 @@ async function selftest(): Promise<number> {
     expect("退出码 1", rep.verdict.exitCode === 1, String(rep.verdict.exitCode));
   }
 
-  // -------- 场景 5b:无 flush,仅 45ms 喂数间隔 -> A4 FAIL(间隔报警) --------
+  // -------- 场景 5b:无 flush,仅 45ms 喂数间隔 -> A4 WARN(参考项,默认不 FAIL) --------
   {
-    console.log("\n── 场景 5b:无 flush,稳态 45ms 喂数间隔 -> A4 应 FAIL(>30ms 报警) ──");
+    console.log("\n── 场景 5b:无 flush,稳态 45ms 喂数间隔 -> A4 应 WARN(参考项,默认不 FAIL) ──");
     const totalFrames = FIX_SR * 3;
     const pcm = makeTone(totalFrames);
     const events = baseLogEvents("baseline", 1000, 2000);
@@ -1829,11 +1942,57 @@ async function selftest(): Promise<number> {
     const f = await writeFixture("05b-feed-gap-45ms", pcm16WavBuffer(pcm), events);
     const rep = await runAnalyze(f);
     const a4 = rep.criteria.A4;
-    console.log("  结果: A4=" + a4.status + " flush.steady=" + a4.flush.steady + " maxGapMs=" + a4.feed.maxGapMs);
+    console.log("  结果: A4=" + a4.status + " flush.steady=" + a4.flush.steady + " maxGapMs=" + a4.feed.maxGapMs + " hard=" + a4.feedGapHard);
     console.log("  A4: " + a4.summary);
-    expect("A4 FAIL(喂数间隔报警)", a4.status === "fail", a4.status);
+    expect("A4 WARN(不硬判)", a4.status === "warn", a4.status);
+    expect("硬判据问题为 0", (a4.hardProblems ?? []).length === 0, JSON.stringify(a4.hardProblems));
+    expect("参考警告 1 条", (a4.softWarnings ?? []).length === 1, JSON.stringify(a4.softWarnings));
     expect("稳态 flush = 0", a4.flush.steady === 0, String(a4.flush.steady));
     expect("最大喂数间隔 = 45ms", a4.feed.maxGapMs === 45, String(a4.feed.maxGapMs));
+    expect("退出码 0(参考项不影响门禁)", rep.verdict.exitCode === 0, String(rep.verdict.exitCode));
+
+    console.log("\n── 场景 5c:同一产物显式 --feed-gap-ms 30(硬判)-> A4 应 FAIL ──");
+    const repHard = await runAnalyze(f, { feedGapHard: true });
+    const a4h = repHard.criteria.A4;
+    console.log("  结果: A4=" + a4h.status + " hard=" + a4h.feedGapHard + " summary=" + a4h.summary);
+    expect("A4 FAIL(显式硬判)", a4h.status === "fail", a4h.status);
+    expect("硬判据问题含喂数间隔", (a4h.hardProblems ?? []).some((s: string) => s.indexOf("喂数间隔") >= 0), JSON.stringify(a4h.hardProblems));
+    expect("退出码 1", repHard.verdict.exitCode === 1, String(repHard.verdict.exitCode));
+  }
+
+  // -------- 场景 6:PTS 部分消费续写(ret=false / 同 pts 无 ret)不误判 discontinuity --------
+  {
+    console.log("\n── 场景 6:PTS 部分消费续写(ret=false / 同 pts 无 ret)应合并,不误判 discontinuity ──");
+    const totalFrames = FIX_SR * 2;
+    const pcm = makeTone(totalFrames);
+    const events = baseLogEvents("plain", null, null);
+    const feedDefs: Array<{ t: number; frames: number; pts: number; ret?: boolean }> = [
+      { t: 0, frames: 441, pts: 0, ret: false },
+      { t: 10, frames: 441, pts: 0, ret: true },
+      { t: 20, frames: 441, pts: 20000, ret: false },
+      { t: 30, frames: 441, pts: 20000, ret: true },
+      { t: 40, frames: 441, pts: 40000, ret: true },
+      { t: 50, frames: 441, pts: 60000, ret: true }, // 真实跳变 +10000µs
+      { t: 60, frames: 441, pts: 70000 },
+      { t: 70, frames: 441, pts: 70000 }, // 无 ret 字段,同 pts => 续写
+      { t: 80, frames: 441, pts: 90000, ret: true },
+    ];
+    for (const fd of feedDefs) {
+      const e: any = { t: fd.t, ev: "feed", frames: fd.frames, ptsUs: fd.pts };
+      if (Object.prototype.hasOwnProperty.call(fd, "ret")) e.ret = fd.ret;
+      events.push(e);
+    }
+    events.push(ev("end", 1000, { totalFrames: 9 * 441, durationMs: 1000 }));
+    const f = await writeFixture("06-pts-continuation", pcm16WavBuffer(pcm), events);
+    const rep = await runAnalyze(f);
+    const pts = rep.pts;
+    console.log("  结果: discontinuity=" + pts.discontinuityCount + " continuations=" + pts.continuationCount + " first=" + JSON.stringify(pts.discontinuities[0] ?? null));
+    expect("仅 1 处真实 discontinuity", pts.discontinuityCount === 1, String(pts.discontinuityCount));
+    expect("真实跳变偏差 = +10000µs", pts.discontinuities[0]?.deviationUs === 10000, String(pts.discontinuities[0]?.deviationUs));
+    expect("跳变位置 = 帧 2205", pts.discontinuities[0]?.framePos === 2205, String(pts.discontinuities[0]?.framePos));
+    expect("续写计数 = 3", pts.continuationCount === 3, String(pts.continuationCount));
+    expect("ret=false 续写 = 2", pts.continuationByRetFalse === 2, String(pts.continuationByRetFalse));
+    expect("同 pts 无 ret 续写 = 1", pts.continuationBySamePtsNoRet === 1, String(pts.continuationBySamePtsNoRet));
   }
 
   console.log("\n自测结果: " + passed + " 通过," + failed + " 失败");
@@ -1860,7 +2019,8 @@ function printHelp(): void {
     "  --zero-min-run <n>        静音段最小连续帧数,默认 1",
     "  --steady-start-ms <n>     稳态起点,默认 1000",
     "  --steady-end-ms <n>       稳态终点(从时长里扣),默认 1000",
-    "  --feed-gap-ms <n>         喂数间隔阈值,默认 30",
+    "  --feed-gap-ms <n>         喂数间隔阈值,默认 30;显式传入=开启硬判(默认仅参考警告)",
+    "  --mode <m>                覆盖 run.mode(plain/baseline/window/sink/media),仅影响机制结论文案",
     "  --pts-threshold-us <n>    PTS 不连续阈值(µs),默认 1000",
     "  --max-mismatches <n>      B 每轮最多报告的不一致样本数,默认 10",
     "  --strict                  A3/B 也作为必须判据",
@@ -1904,7 +2064,14 @@ function parseArgs(argv: string[]): CliConfig {
     else if (a === "--zero-min-run") cfg.opts.zeroMinRun = needNum(a, argv[++i]);
     else if (a === "--steady-start-ms") cfg.opts.steadyStartMs = needNum(a, argv[++i]);
     else if (a === "--steady-end-ms") cfg.opts.steadyEndMs = needNum(a, argv[++i]);
-    else if (a === "--feed-gap-ms") cfg.opts.feedGapThresholdMs = needNum(a, argv[++i]);
+    else if (a === "--feed-gap-ms") {
+      cfg.opts.feedGapThresholdMs = needNum(a, argv[++i]);
+      cfg.opts.feedGapHard = true; // 显式传入阈值即开启硬判
+    } else if (a === "--mode") {
+      const m = (argv[++i] ?? "").trim().toLowerCase();
+      if (!m) throw new Error("--mode 需要一个模式名");
+      cfg.opts.modeOverride = m;
+    }
     else if (a === "--pts-threshold-us") cfg.opts.ptsThresholdUs = needNum(a, argv[++i]);
     else if (a === "--max-mismatches") cfg.opts.maxMismatches = needNum(a, argv[++i]);
     else if (a === "--strict") cfg.opts.strict = true;

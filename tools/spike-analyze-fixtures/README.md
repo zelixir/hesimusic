@@ -9,8 +9,10 @@
 | 03-seam-drift-100 | baseline,两处接缝帧距 L+100;并伪造一次 20ms PTS 前跳 | A2 FAIL(偏差 +100 帧);PTS 不连续 >=1 |
 | 04-identical-rounds | 前奏 + 3 轮逐位相同的 PCM | B PASS、A2 PASS |
 | 04b-identical-rounds-tampered | 同 04,第 3 轮帧 12345 改 1 个采样 | B FAIL,定位绝对帧 144645、轮内帧 12345 |
-| 05-flush-and-gap | 稳态 t=1200ms 伪造 1 次 flush,喂数间隔 20ms | A4 FAIL(flush>0) |
-| 05b-feed-gap-45ms | 稳态喂数间隔 45ms,无 flush | A4 FAIL(>30ms 报警) |
+| 05-flush-and-gap | 稳态 t=1200ms 伪造 1 次 flush,喂数间隔 20ms | A4 FAIL(flush>0 硬判) |
+| 05b-feed-gap-45ms | 稳态喂数间隔 45ms,无 flush | A4 WARN(参考项,不 FAIL;退出码 0) |
+| 05c(复用 05b 产物) | 同上 + 显式 --feed-gap-ms 30 | A4 FAIL(喂数间隔硬判,退出码 1) |
+| 06-pts-continuation | 部分消费续写(ret=false / 同 pts 无 ret)+ 1 次真实 PTS 跳变 | 仅 1 处 discontinuity,3 条续写被合并 |
 
 重新生成:
 
