@@ -24,7 +24,9 @@ data class BackupSummary(
     val favorites: Int,
     val hiddenSongs: Int,
     val smartPlaylists: Int,
-    val logs: Int
+    val logs: Int,
+    /** 无缝循环分析结果条数(v4 起) */
+    val songLoops: Int = 0
 )
 
 @Singleton
@@ -37,7 +39,7 @@ class BackupRestoreManager @Inject constructor(
 
     suspend fun exportJson(): JSONObject = withContext(Dispatchers.IO) {
         JSONObject().apply {
-            put("version", 3)
+            put("version", 4)
             put("songs", songsToJson(appDatabase.songDao().getAllSongsList()))
             put("favorites", favoritesToJson(appDatabase.favoriteDao().getAllFavoritesList()))
             put("logs", logsToJson(appDatabase.logDao().getAllLogsList()))
@@ -45,6 +47,7 @@ class BackupRestoreManager @Inject constructor(
             put("playlists", playlistsToJson(appDatabase.playlistDao().getAllPlaylistsList()))
             put("playlistEntries", playlistEntriesToJson(appDatabase.playlistEntryDao().getAllPlaylistEntriesList()))
             put("smartPlaylists", smartPlaylistsToJson(appDatabase.smartPlaylistDao().getAllList()))
+            put("songLoops", songLoopsToJson(appDatabase.songLoopDao().getAll()))
             put("preferences", preferencesToJson())
         }
     }
@@ -52,7 +55,7 @@ class BackupRestoreManager @Inject constructor(
     suspend fun importJson(backupJson: JSONObject): BackupSummary = withContext(Dispatchers.IO) {
         val backupVersion = backupJson.optInt("version", 1)
         if (backupVersion < 1) error("不支持的备份版本: $backupVersion")
-        if (backupVersion > 3) error("备份版本过新，当前版本暂不支持: $backupVersion")
+        if (backupVersion > 4) error("备份版本过新，当前版本暂不支持: $backupVersion")
         val songs = jsonToSongs(backupJson.optJSONArray("songs") ?: JSONArray())
         val favorites = jsonToFavorites(backupJson.optJSONArray("favorites") ?: JSONArray())
         val logs = jsonToLogs(backupJson.optJSONArray("logs") ?: JSONArray())
@@ -61,6 +64,8 @@ class BackupRestoreManager @Inject constructor(
         val playlistEntries = jsonToPlaylistEntries(backupJson.optJSONArray("playlistEntries") ?: JSONArray())
         // v3 起包含 SQL 歌单；旧版本备份没有该字段则跳过。逐条校验，坏 SQL 跳过不阻断整体导入。
         val smartPlaylists = jsonToSmartPlaylists(backupJson.optJSONArray("smartPlaylists") ?: JSONArray())
+        // v4 起包含无缝循环结果;旧备份没有该字段则跳过。
+        val songLoops = jsonToSongLoops(backupJson.optJSONArray("songLoops") ?: JSONArray())
         val smartPlaylistErrors = mutableListOf<String>()
         val validSmartPlaylists = smartPlaylists.filter { playlist ->
             val error = smartPlaylistRepository.validateAgainstDatabase(playlist.sqlText)
@@ -79,6 +84,7 @@ class BackupRestoreManager @Inject constructor(
             appDatabase.logDao().deleteAllLogs()
             appDatabase.hiddenSongDao().deleteAll()
             appDatabase.smartPlaylistDao().deleteAll()
+            appDatabase.songLoopDao().deleteAll()
             if (songs.isNotEmpty()) appDatabase.songDao().insertAll(songs)
             if (playlists.isNotEmpty()) appDatabase.playlistDao().insertAll(playlists)
             if (playlistEntries.isNotEmpty()) appDatabase.playlistEntryDao().insertAll(playlistEntries)
@@ -86,6 +92,7 @@ class BackupRestoreManager @Inject constructor(
             if (logs.isNotEmpty()) appDatabase.logDao().insertAll(logs)
             if (hiddenSongs.isNotEmpty()) appDatabase.hiddenSongDao().insertAll(hiddenSongs)
             if (validSmartPlaylists.isNotEmpty()) appDatabase.smartPlaylistDao().insertAll(validSmartPlaylists)
+            if (songLoops.isNotEmpty()) appDatabase.songLoopDao().upsertAll(songLoops)
         }
         restorePreferences(backupJson.optJSONObject("preferences"))
         if (smartPlaylistErrors.isNotEmpty()) {
@@ -98,7 +105,8 @@ class BackupRestoreManager @Inject constructor(
             favorites = favorites.size,
             hiddenSongs = hiddenSongs.size,
             smartPlaylists = validSmartPlaylists.size,
-            logs = logs.size
+            logs = logs.size,
+            songLoops = songLoops.size
         )
     }
 
@@ -215,6 +223,45 @@ class BackupRestoreManager @Inject constructor(
                 sqlText = item.getString("sql")
             )
         }
+
+    /** v4:无缝循环分析结果(按 songId 主键整体往返)。 */
+    private fun songLoopsToJson(items: List<com.zjr.hesimusic.data.model.SongLoop>) = JSONArray().apply {
+        items.forEach { loop ->
+            put(
+                JSONObject().apply {
+                    put("songId", loop.songId)
+                    put("loopStartSamples", loop.loopStartSamples)
+                    put("loopEndSamples", loop.loopEndSamples)
+                    put("sampleRate", loop.sampleRate)
+                    put("loopStartMs", loop.loopStartMs)
+                    put("loopEndMs", loop.loopEndMs)
+                    put("score", loop.score)
+                    put("noteDistance", loop.noteDistance)
+                    put("loudnessDifference", loop.loudnessDifference)
+                    put("createdAt", loop.createdAt)
+                    put("confirmed", loop.confirmed)
+                }
+            )
+        }
+    }
+
+    private fun jsonToSongLoops(jsonArray: JSONArray): List<com.zjr.hesimusic.data.model.SongLoop> =
+        List(jsonArray.length()) { index ->
+            val item = jsonArray.getJSONObject(index)
+            com.zjr.hesimusic.data.model.SongLoop(
+                songId = item.optLong("songId", 0L),
+                loopStartSamples = item.optLong("loopStartSamples", 0L),
+                loopEndSamples = item.optLong("loopEndSamples", 0L),
+                sampleRate = item.optInt("sampleRate", 0),
+                loopStartMs = item.optLong("loopStartMs", 0L),
+                loopEndMs = item.optLong("loopEndMs", 0L),
+                score = item.optDouble("score", 0.0),
+                noteDistance = item.optDouble("noteDistance", 0.0),
+                loudnessDifference = item.optDouble("loudnessDifference", 0.0),
+                createdAt = item.optLong("createdAt", System.currentTimeMillis()),
+                confirmed = item.optBoolean("confirmed", true),
+            )
+        }.filter { it.songId > 0L }
 
     private fun preferencesToJson(): JSONObject = JSONObject().apply {
         preferenceFileNames.forEach { name ->

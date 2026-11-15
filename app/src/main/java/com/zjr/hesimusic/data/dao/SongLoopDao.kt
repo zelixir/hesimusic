@@ -24,4 +24,14 @@ interface SongLoopDao {
     /** 删除分析结果(「删除分析结果」入口)。 */
     @Query("DELETE FROM song_loop WHERE songId = :songId")
     suspend fun deleteBySongId(songId: Long)
+
+    /** 备份/恢复:整表读取与写入(仅 BackupRestoreManager 使用)。 */
+    @Query("SELECT * FROM song_loop")
+    suspend fun getAll(): List<SongLoop>
+
+    @Upsert
+    suspend fun upsertAll(items: List<SongLoop>)
+
+    @Query("DELETE FROM song_loop")
+    suspend fun deleteAll()
 }
