@@ -7,8 +7,10 @@ import androidx.media3.common.C
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.extractor.DefaultExtractorsFactory
+import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.audio.LoopAudioController
 import com.zjr.hesimusic.loop.audio.LoopRenderersFactory
+import com.zjr.hesimusic.service.LoopMediaSourceFactory
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -46,14 +48,17 @@ object MediaModule {
         @ApplicationContext context: Context,
         audioAttributes: AudioAttributes,
         extractorsFactory: DefaultExtractorsFactory,
-        loopAudioController: LoopAudioController
+        loopAudioController: LoopAudioController,
+        loopRuntime: LoopRuntime
     ): ExoPlayer {
         Log.i(TAG, "Building ExoPlayer")
         val startTime = System.currentTimeMillis()
 
         val player = ExoPlayer.Builder(context)
+            // 队列里的 MediaItem 不带 clip;只有"当前播放项命中无缝窗口"时,
+            // 由 LoopMediaSourceFactory 额外套一层 ClippingMediaSource(0, B)(见 docs/loop-v3-service-design.md)
             .setMediaSourceFactory(
-                DefaultMediaSourceFactory(context, extractorsFactory)
+                LoopMediaSourceFactory(DefaultMediaSourceFactory(context, extractorsFactory), loopRuntime)
             )
             .setRenderersFactory(LoopRenderersFactory(context, loopAudioController))
             .setAudioAttributes(audioAttributes, true)
