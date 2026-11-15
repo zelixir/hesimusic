@@ -145,11 +145,25 @@ fun PlayerScreen(
                 val safeDuration = if (uiState.duration > 0) uiState.duration else 1L
                 // 位置已是展示口径(MusicViewModel 已做幂等折返,跨 B 的外推不会冲出区间)
                 val safePosition = uiState.currentPosition.coerceIn(0L, safeDuration)
+                // 拖动期间的**本地**位置(issue 00001)。
+                // 无缝态下 LoopSessionPlayer.seekTo 会把展示位置映射到引擎位置并触发真实 flush,
+                // 拖动中每帧都 seek 会不断打断环回、位置又被回写,滑块与播放位置互相打架(拖动没反应/被弹回)。
+                // 因此拖动中只更新这里、绝不 seek;松手(onValueChangeFinished)才下发一次 seek。
+                var draggingMs by remember { mutableStateOf<Long?>(null) }
+                // 拖动中本地值优先,播放位置回写不再能把滑块拽回去;松手后立即回归服务端位置口径
+                val sliderPositionMs = (draggingMs ?: safePosition).coerceIn(0L, safeDuration)
                 // 滑条 + 无缝循环 A/B 标记层(未命中当前歌时标记层不画任何像素)
                 Box(modifier = Modifier.fillMaxWidth()) {
                     Slider(
-                        value = safePosition.toFloat(),
-                        onValueChange = { viewModel.seekTo(it.toLong()) },
+                        value = sliderPositionMs.toFloat(),
+                        onValueChange = { draggingMs = it.toLong().coerceIn(0L, safeDuration) },
+                        onValueChangeFinished = {
+                            // 只在松手时发起一次 seek:无缝态下位置落在松手处(窗口内精确),
+                            // 而不是拖动过程中被反复打断
+                            val target = draggingMs
+                            draggingMs = null
+                            if (target != null) viewModel.seekTo(target)
+                        },
                         valueRange = 0f..safeDuration.toFloat()
                     )
                     LoopSliderMarkerOverlay(
@@ -162,8 +176,9 @@ fun PlayerScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
+                    // 左侧时间与滑块同口径:拖动中显示松手将落到的位置,松手后回到真实播放位置
                     Text(
-                        text = TimeFormatter.formatTime(uiState.currentPosition),
+                        text = TimeFormatter.formatTime(sliderPositionMs),
                         style = MaterialTheme.typography.bodySmall
                     )
                     Text(

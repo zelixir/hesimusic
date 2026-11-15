@@ -352,6 +352,7 @@ private fun ResultContent(
     val buffering by viewModel.buffering.collectAsState()
     val isReplaying by viewModel.isReplaying.collectAsState()
     val ringReady by viewModel.ringReady.collectAsState()
+    val ringPreparing by viewModel.ringPreparing.collectAsState()
     val durationMs by viewModel.durationMs.collectAsState()
 
     val durationSec = durationMs.coerceAtLeast(0L) / 1000.0
@@ -445,6 +446,11 @@ private fun ResultContent(
                 style = MaterialTheme.typography.bodySmall,
                 color = Color(0xFF3FB950),
             )
+            ringPreparing -> Text(
+                "正在准备环缓冲…",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
 
         // 四模式(契约 §2.3):点击即试听
@@ -465,7 +471,7 @@ private fun ResultContent(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (mode == PreviewMode.SEAM && !ringReady) {
+        if (mode == PreviewMode.SEAM && !ringReady && !ringPreparing) {
             Text(
                 "环缓冲区尚未就绪:请先完整试听一轮「完整循环」或「仅循环段」,接缝检查才能无缝环回",
                 style = MaterialTheme.typography.bodySmall,

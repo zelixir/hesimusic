@@ -62,6 +62,13 @@ fun FolderList(
         appLogger?.info(TAG, "FolderList rendering path: $currentPath with $folderCount folders and $fileCount files")
     }
 
+    // 「当前目录已自动定位过当前播放歌」的标志(issue 00002 同类;lead 授权一并修)。
+    // 必须可保存:从播放页 / 无缝循环分析页返回时本页会重新组合,普通 remember 会复位成 false →
+    // 又按当前播放歌 scrollToItem,把用户原本的滚动位置覆盖掉。
+    // key 用 currentPath:文件夹是「同一页换 path」而不是新路由,进入子目录 / 返回上一级属于换了一个列表,
+    // 应重新定位一次(路径变化时标志复位);同一目录内返回(重组)则不再重复定位。
+    var hasAutoScrolledToCurrentSong by rememberSaveable(currentPath) { mutableStateOf(false) }
+
     // Handle back press to go up directory
     // Only enable if we are not at the initial path
     BackHandler(enabled = currentPath != initialPath) {
@@ -72,6 +79,7 @@ fun FolderList(
     }
     
     LaunchedEffect(items, currentPlayingSongId, currentPath, initialPath) {
+        if (hasAutoScrolledToCurrentSong) return@LaunchedEffect
         if (currentPlayingSongId == null) return@LaunchedEffect
         val itemIndex = items.indexOfFirst { item ->
             item is FileSystemItem.MusicFile && item.song.id.toString() == currentPlayingSongId
@@ -79,6 +87,8 @@ fun FolderList(
         if (itemIndex >= 0) {
             val scrollIndex = if (currentPath != initialPath) itemIndex + 1 else itemIndex
             listState.scrollToItem(scrollIndex)
+            hasAutoScrolledToCurrentSong = true
+            Log.d(TAG, "Auto-scrolled to current song at index $scrollIndex (path=$currentPath)")
         }
     }
 

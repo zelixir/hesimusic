@@ -63,6 +63,235 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
         MonoPcm(mono, raw.sampleRate, raw.frames)
     }
 
+    /**
+     * 精确解码 [path] 的 [startUs, endUs) 区间为 PCM16（交错、小端、源声道/源采样率）。
+     *
+     * 环缓冲预填专用；线程优先级与 [decodeMono] 一致（BACKGROUND）。
+     *
+     * 对齐算法：
+     * 1. 先 seek 到 startUs − 1s（SEEK_TO_PREVIOUS_SYNC），让解码器先从区间之前产出，
+     *    避免 MP3/AAC 的 sync 帧/编码器延迟导致起点偏后；
+     * 2. 以**第一个解码输出帧的 PTS** 为锚点，按帧号推算每帧时间（anchorUs + f*1e6/sr）；
+     * 3. 丢弃所有 PTS < startUs 的帧（= 对齐到 ceil(startUs*sr/1e6) 帧）；
+     * 4. 取接下来的 ceil((endUs−startUs)*sr/1e6) 帧；不足说明解码结果短于区间 → 抛 [LoopException]
+     *    （不静默补零）。
+     *
+     * 说明：A/B 通常不落在帧边界，第 4 步的“严格帧数”可能比“PTS < endUs 的帧数”多 1 帧
+     * （末尾整帧）。装 ring 时由 LoopPcmEngine.seedRing 按 ring 长度裁掉多余帧。
+     */
+    suspend fun decodePcm16(path: String, startUs: Long, endUs: Long): Pcm16Segment =
+        withContext(Dispatchers.Default) {
+            if (startUs < 0L) throw LoopException("区间起点非法")
+            if (endUs <= startUs) throw LoopException("区间长度非法")
+            if (endUs - startUs > MAX_PCM16_RANGE_US) throw LoopException("区间过长")
+            val tid = Process.myTid()
+            val originalPriority = try {
+                Process.getThreadPriority(tid)
+            } catch (_: Exception) {
+                0
+            }
+            try {
+                Process.setThreadPriority(tid, Process.THREAD_PRIORITY_BACKGROUND)
+            } catch (_: Exception) {}
+            try {
+                decodePcm16Internal(path, startUs, endUs)
+            } finally {
+                try { Process.setThreadPriority(tid, originalPriority) } catch (_: Exception) {}
+            }
+        }
+
+    private suspend fun decodePcm16Internal(
+        path: String,
+        startUs: Long,
+        endUs: Long,
+    ): Pcm16Segment {
+        val decodeStartMs = System.currentTimeMillis()
+        val extractor = MediaExtractor()
+        var codec: MediaCodec? = null
+        try {
+            openExtractor(extractor, path)
+
+            var trackIndex = -1
+            var inputFormat: MediaFormat? = null
+            for (i in 0 until extractor.trackCount) {
+                val f = extractor.getTrackFormat(i)
+                val mime = f.getString(MediaFormat.KEY_MIME) ?: continue
+                if (mime.startsWith("audio/")) {
+                    trackIndex = i
+                    inputFormat = f
+                    break
+                }
+            }
+            val format = inputFormat ?: throw LoopException("文件中没有可解码的音频轨")
+            extractor.selectTrack(trackIndex)
+            val mime = format.getString(MediaFormat.KEY_MIME) ?: throw LoopException("未知的音频编码格式")
+
+            codec = try {
+                MediaCodec.createDecoderByType(mime)
+            } catch (e: Exception) {
+                throw LoopException("设备不支持解码该音频格式", e)
+            }
+
+            // 先 seek 再 start：解码器从 [startUs − 1s, ...) 开始产出，保证覆盖区间起点。
+            extractor.seekTo((startUs - SEEK_BACK_US).coerceAtLeast(0L), MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+            codec.configure(format, null, null, 0)
+            codec.start()
+
+            var channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+            var sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+            checkPcmFormat(format, channels, sampleRate)
+
+            var targetFrames = -1L
+            var bytesPerFrame = channels * 2
+            var out: ByteArray? = null
+            var outOffset = 0
+            var keptFrames = 0L
+            var anchorUs = Long.MIN_VALUE
+            var streamFrame = 0L
+            var keepStartFrame = 0L
+            var inputDone = false
+            var outputDone = false
+            val info = MediaCodec.BufferInfo()
+
+            while (!outputDone) {
+                coroutineContext.ensureActive()
+                if (targetFrames > 0L && keptFrames >= targetFrames) break
+
+                // 1) 喂入:extractor → codec
+                if (!inputDone) {
+                    val inIdx = codec.dequeueInputBuffer(TIMEOUT_US)
+                    if (inIdx >= 0) {
+                        val buf = codec.getInputBuffer(inIdx)
+                            ?: throw LoopException("MediaCodec 输入缓冲获取失败")
+                        val sampleSize = extractor.readSampleData(buf, 0)
+                        if (sampleSize < 0) {
+                            codec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            inputDone = true
+                        } else {
+                            codec.queueInputBuffer(inIdx, 0, sampleSize, extractor.sampleTime, 0)
+                            extractor.advance()
+                        }
+                    }
+                }
+
+                // 2) 取出:codec → 裁切后的 PCM16
+                val outIdx = codec.dequeueOutputBuffer(info, TIMEOUT_US)
+                when {
+                    outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                        val f = codec.outputFormat
+                        val newChannels = f.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                        val newSampleRate = f.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                        checkPcmFormat(f, newChannels, newSampleRate)
+                        if (newChannels != channels || newSampleRate != sampleRate) {
+                            if (anchorUs != Long.MIN_VALUE) {
+                                throw LoopException("解码输出格式中途变化")
+                            }
+                            channels = newChannels
+                            sampleRate = newSampleRate
+                            bytesPerFrame = channels * 2
+                        }
+                    }
+                    outIdx >= 0 -> {
+                        if (info.size > 0) {
+                            val buffer = codec.getOutputBuffer(outIdx)
+                            if (buffer != null) {
+                                val frames = info.size.toLong() / bytesPerFrame
+                                if (frames > 0L) {
+                                    if (anchorUs == Long.MIN_VALUE) {
+                                        anchorUs = info.presentationTimeUs
+                                        if (anchorUs > startUs) {
+                                            throw LoopException(
+                                                "解码起点晚于区间起点: anchorUs=" + anchorUs +
+                                                    " startUs=" + startUs,
+                                            )
+                                        }
+                                        targetFrames = Pcm16Frames.framesForUsCeil(
+                                            endUs - startUs,
+                                            sampleRate,
+                                        )
+                                        if (targetFrames <= 0L) throw LoopException("区间不足一帧")
+                                        val targetBytes = targetFrames * bytesPerFrame
+                                        if (targetBytes > MAX_PCM16_BYTES) {
+                                            throw LoopException("区间过长")
+                                        }
+                                        out = ByteArray(targetBytes.toInt())
+                                        keepStartFrame = Pcm16Frames.frameAtOrAfterUs(
+                                            startUs - anchorUs,
+                                            sampleRate,
+                                        )
+                                    }
+                                    val clip = Pcm16Frames.clipBuffer(
+                                        bufferStartFrame = streamFrame,
+                                        bufferFrames = frames,
+                                        keepStartFrame = keepStartFrame,
+                                        keepFrames = targetFrames,
+                                    )
+                                    val dst = out
+                                    if (clip != null && dst != null) {
+                                        val srcFrame = (clip.first - streamFrame).toInt()
+                                        val len = ((clip.last - clip.first + 1L) * bytesPerFrame).toInt()
+                                        val dup = buffer.duplicate()
+                                        // MediaCodec 返回的 buffer position/limit 已经对准本段数据，
+                                        // 以 position 为基准，兼容 offset=0 与 offset!=0 两种实现。
+                                        val srcStart = dup.position() + srcFrame * bytesPerFrame
+                                        val srcEnd = srcStart + len
+                                        if (srcStart < 0 || srcEnd > dup.limit()) {
+                                            throw LoopException("解码输出 buffer 越界")
+                                        }
+                                        dup.position(srcStart)
+                                        dup.limit(srcEnd)
+                                        dup.get(dst, outOffset, len)
+                                        outOffset += len
+                                        keptFrames += clip.last - clip.first + 1L
+                                    }
+                                    streamFrame += frames
+                                }
+                            }
+                        }
+                        codec.releaseOutputBuffer(outIdx, false)
+                        if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputDone = true
+                    }
+                }
+            }
+
+            if (targetFrames <= 0L) throw LoopException("解码结果为空")
+            if (keptFrames < targetFrames) {
+                throw LoopException(
+                    "环缓冲解码不足: 需要 " + targetFrames + " 帧,实际 " + keptFrames + " 帧",
+                )
+            }
+            Log.d(
+                "LoopPerf",
+                "pcm16 decode=" + (System.currentTimeMillis() - decodeStartMs) +
+                    "ms frames=" + keptFrames + " ch=" + channels + " sr=" + sampleRate +
+                    " startUs=" + startUs + " endUs=" + endUs,
+            )
+            return Pcm16Segment(out!!, sampleRate, channels, keptFrames)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: LoopException) {
+            throw e
+        } catch (e: Exception) {
+            throw LoopException(e.message ?: "音频解码失败", e)
+        } finally {
+            try { codec?.stop() } catch (_: Exception) {}
+            try { codec?.release() } catch (_: Exception) {}
+            try { extractor.release() } catch (_: Exception) {}
+        }
+    }
+
+    private fun openExtractor(extractor: MediaExtractor, path: String) {
+        try {
+            if (path.startsWith("content:")) {
+                extractor.setDataSource(context, Uri.parse(path), null)
+            } else {
+                extractor.setDataSource(path)
+            }
+        } catch (e: Exception) {
+            throw LoopException("无法读取音频文件", e)
+        }
+    }
+
     // ---------- 内部实现:MediaExtractor + MediaCodec 同步解码 ----------
 
     private suspend fun decodeInternal(
@@ -100,15 +329,7 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
         try {
-            try {
-                if (path.startsWith("content:")) {
-                    extractor.setDataSource(context, Uri.parse(path), null)
-                } else {
-                    extractor.setDataSource(path)
-                }
-            } catch (e: Exception) {
-                throw LoopException("无法读取音频文件", e)
-            }
+            openExtractor(extractor, path)
 
             var trackIndex = -1
             var inputFormat: MediaFormat? = null
@@ -252,5 +473,14 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
 
     private companion object {
         const val TIMEOUT_US = 10_000L
+
+        /** 预填解码提前量：从 startUs − 1s 开始 seek，给 MP3/AAC sync 帧留余量。 */
+        const val SEEK_BACK_US = 1_000_000L
+
+        /** 预填区间上限（µs）：与引擎单窗口 300s 上限一致。 */
+        const val MAX_PCM16_RANGE_US = 300_000_000L
+
+        /** 预填 PCM 上限：64MB（与引擎 ring 上限一致）。 */
+        const val MAX_PCM16_BYTES = 64L * 1024L * 1024L
     }
 }

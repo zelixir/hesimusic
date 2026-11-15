@@ -2,6 +2,7 @@ package com.zjr.hesimusic.loop.audio
 
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import com.zjr.hesimusic.loop.LoopWindow
 import java.io.BufferedWriter
 import java.io.File
@@ -26,6 +27,10 @@ import javax.inject.Singleton
 class LoopAudioController @Inject constructor() {
 
     internal val engine = LoopPcmEngine()
+
+    private companion object {
+        const val TAG = "LoopAudio"
+    }
 
     private val preallocGeneration = AtomicLong(0L)
 
@@ -55,6 +60,15 @@ class LoopAudioController @Inject constructor() {
                 // tap 运行时:窗口变化写入新的 run 快照(analyzer A2/A3 需要 aMs/bMs)。
                 writeTapRunLocked()
             }
+            // 窗口变更/清空 → 旧窗口的预填失效；同窗口的 pending 保留并尝试安装
+            // （典型顺序:预填解码先完成 → 之后 prepare 才把窗口写给 controller）。
+            synchronized(seedLock) {
+                val pending = pendingSeed
+                if (pending != null && pending.window != value) {
+                    pendingSeed = null
+                }
+            }
+            installPendingSeed()
         }
 
     /**
@@ -119,6 +133,126 @@ class LoopAudioController @Inject constructor() {
 
     val isRingComplete: Boolean
         get() = engine.isRingComplete
+
+    /** 当前 ring 是否由解码预填（[seedRing]）安装而非播放捕获。 */
+    val isRingPrefilled: Boolean
+        get() = engine.isRingPrefilled
+
+    // ------------------------------------------------------------ 预填 ring（seed）
+
+    /**
+     * 解码侧预填：把 [window] 的 PCM16（交错小端，[sampleRate]/[channels]）直接装进 ring。
+     *
+     * 可从任意线程调用。sink 尚未 configure（输出格式未知）或窗口尚未写入时先暂存，
+     * 在 [onFormatConfigured]/window 写入后校验 sampleRate/channels 与当前窗口再安装；
+     * 不一致则丢弃并打日志（走兜底捕获路径）。
+     */
+    fun seedRing(
+        window: LoopWindow,
+        pcm16: ByteArray,
+        sampleRate: Int,
+        channels: Int,
+    ): LoopPcmEngine.SeedResult {
+        val result = engine.seedRing(window, pcm16, sampleRate, channels)
+        when (result.status) {
+            LoopPcmEngine.SeedStatus.INSTALLED -> {
+                synchronized(seedLock) { pendingSeed = null }
+            }
+            LoopPcmEngine.SeedStatus.PENDING -> {
+                stagePendingSeed(window, pcm16, sampleRate, channels)
+            }
+            LoopPcmEngine.SeedStatus.REJECTED_WINDOW -> {
+                // 唯一可等待的 REJECTED_WINDOW：窗口还没写入（sink 先 configure、
+                // prepare 后写窗口）。窗口已存在但不是同一个 → 换歌/换窗口，直接丢弃。
+                if (this.window == null) {
+                    stagePendingSeed(window, pcm16, sampleRate, channels)
+                }
+            }
+            else -> Unit
+        }
+        logSeedResult("seedRing", window, result)
+        return result
+    }
+
+    /** 窗口写入/格式变化后重试安装暂存的预填（大块拷贝放到后台线程，避免主线程/音频线程卡顿）。 */
+    private fun installPendingSeed() {
+        if (synchronized(seedLock) { pendingSeed } == null) return
+        val task = Runnable { installPendingSeedNow() }
+        val dispatcher = preallocDispatcher
+        if (dispatcher != null) {
+            dispatcher(task)
+        } else {
+            try {
+                preallocExecutor.execute(task)
+            } catch (_: Throwable) {
+                // executor 已关闭（进程退出）：直接丢弃
+            }
+        }
+    }
+
+    private fun installPendingSeedNow() {
+        val pending = synchronized(seedLock) { pendingSeed } ?: return
+        val result = engine.seedRing(pending.window, pending.pcm16, pending.sampleRate, pending.channels)
+        when (result.status) {
+            LoopPcmEngine.SeedStatus.INSTALLED -> {
+                synchronized(seedLock) { if (pendingSeed === pending) pendingSeed = null }
+                logSeedResult("seedRing(install)", pending.window, result)
+            }
+            LoopPcmEngine.SeedStatus.PENDING -> Unit
+            LoopPcmEngine.SeedStatus.REJECTED_WINDOW -> {
+                if (window != null) {
+                    synchronized(seedLock) { if (pendingSeed === pending) pendingSeed = null }
+                    logSeedResult("seedRing(drop)", pending.window, result)
+                }
+            }
+            else -> {
+                synchronized(seedLock) { if (pendingSeed === pending) pendingSeed = null }
+                logSeedResult("seedRing(drop)", pending.window, result)
+            }
+        }
+    }
+
+    private fun stagePendingSeed(
+        window: LoopWindow,
+        pcm16: ByteArray,
+        sampleRate: Int,
+        channels: Int,
+    ) {
+        if (pcm16.size.toLong() > LoopPcmEngine.MAX_RING_BYTES) {
+            try { Log.w(TAG, "seedRing not staged: pcm bytes=" + pcm16.size) } catch (_: Throwable) {}
+            return
+        }
+        synchronized(seedLock) {
+            pendingSeed = PendingSeed(window, pcm16, sampleRate, channels)
+        }
+    }
+
+    private fun logSeedResult(
+        tag: String,
+        window: LoopWindow,
+        result: LoopPcmEngine.SeedResult,
+    ) {
+        if (result.isInstalled) return
+        val message = tag + " " + result.status + " window=" + window +
+            " frames=" + result.frames + " detail=" + result.detail
+        try { Log.w(TAG, message) } catch (_: Throwable) {}
+    }
+
+    private val seedLock = Any()
+
+    @Volatile
+    private var pendingSeed: PendingSeed? = null
+
+    private class PendingSeed(
+        val window: LoopWindow,
+        val pcm16: ByteArray,
+        val sampleRate: Int,
+        val channels: Int,
+    )
+
+    /** 单测用：是否还有等 sink configure 的预填。 */
+    internal val hasPendingSeed: Boolean
+        get() = synchronized(seedLock) { pendingSeed != null }
 
     // ------------------------------------------------------------------ PCM tap
 
@@ -192,6 +326,8 @@ class LoopAudioController @Inject constructor() {
         engine.setWindow(window)
         currentFormat = fmt
         schedulePreallocation()
+        // 预填解码可能先于 sink configure 完成：格式就绪后校验并安装。
+        installPendingSeed()
         synchronized(tapLock) {
             val newFormat = TapFormat(
                 sampleRate = sampleRate,
@@ -237,6 +373,8 @@ class LoopAudioController @Inject constructor() {
     internal fun onSinkRelease() {
         preallocGeneration.incrementAndGet()
         currentFormat = null
+        // sink 释放后不再有搭载点，丢弃等待中的预填。
+        synchronized(seedLock) { pendingSeed = null }
         engine.onRelease()
         synchronized(tapLock) {
             closeTapLocked()

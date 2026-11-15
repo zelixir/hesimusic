@@ -16,6 +16,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -29,6 +30,7 @@ import com.zjr.hesimusic.utils.AppLogger
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import kotlinx.coroutines.launch
 
 /**
@@ -55,6 +57,8 @@ fun SongList(
     modifier: Modifier = Modifier,
     appLogger: AppLogger? = null
 ) {
+    // 滚动位置必须跨「进入详情/无缝循环分析页再返回」保住:rememberLazyListState 内部是
+    // rememberSaveable + LazyListState.Saver,导航栈条目会保存/恢复它(返回后不再从顶部开始)。
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val useTrackNumberOrdering = sortMode == SongSortMode.TRACK_NUMBER
@@ -100,7 +104,11 @@ fun SongList(
         appLogger?.timing(TAG, "Song flattening", flattenDuration)
         result
     }
-    var hasAutoScrolledToCurrentSong = remember { mutableStateOf(false) }
+    // 「本次进入列表后已自动定位过当前播放歌」的标志(issue 00002)。
+    // 必须是 rememberSaveable:从详情页 / 无缝循环分析页返回时列表会重新组合,普通 remember 会复位成
+    // false → 再按"当前播放歌"滚动一次,把用户原本的滚动位置覆盖掉(表现为"列表跳回正在播放的那首")。
+    // 首次进入列表时它仍是 false,原有"首次定位当前播放歌"的行为不变。
+    var hasAutoScrolledToCurrentSong by rememberSaveable { mutableStateOf(false) }
 
     // Calculate the starting index for each group for display
     val groupStartingIndices = remember(grouped) {
@@ -129,7 +137,7 @@ fun SongList(
     // Auto-scroll to currently playing song once when list is ready.
     // Also listens to currentPlayingSongId so late restore after startup can still scroll.
     LaunchedEffect(grouped, flattenedSongs, currentPlayingSongId, useTrackNumberOrdering) {
-        if (!hasAutoScrolledToCurrentSong.value && currentPlayingSongId != null && flattenedSongs.isNotEmpty()) {
+        if (!hasAutoScrolledToCurrentSong && currentPlayingSongId != null && flattenedSongs.isNotEmpty()) {
             // Find the song in the flattened list
             // Note: MediaItem.mediaId is set as song.id.toString() in SongMapper.toMediaItem()
             val currentSong = flattenedSongs.find { it.id.toString() == currentPlayingSongId }
@@ -144,7 +152,7 @@ fun SongList(
                 if (scrollIndex != null) {
                     // Scroll to the item instantly (no animation), centered if possible
                     listState.scrollToItem(scrollIndex, scrollOffset = SCROLL_OFFSET_TO_CENTER_ITEM)
-                    hasAutoScrolledToCurrentSong.value = true
+                    hasAutoScrolledToCurrentSong = true
                     Log.d(TAG, "Auto-scrolled to current song at index $scrollIndex")
                 }
             }

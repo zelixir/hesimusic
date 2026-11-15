@@ -90,6 +90,7 @@ class PreviewPlayer @Inject constructor(
     private var song: Song? = null
 
     /** 当前应用给 sink 的窗口;null = 直通(FREE 或非法窗口)。 */
+    @Volatile
     private var window: LoopWindow? = null
 
     private var prepared: Boolean = false
@@ -193,6 +194,38 @@ class PreviewPlayer @Inject constructor(
                 " durationMs=" + duration,
         )
     }
+
+    /**
+     * 预填目标窗口（与 [prepare] 使用同一套 sanitize/buildWindow 规则）。
+     *
+     * 纯函数、任意线程可调用；后台预填解码按它取 [LoopWindow] 的时间边界，
+     * 保证解码区间与最终 sink 窗口严格一致。
+     */
+    fun loopWindowFor(song: Song, aMs: Long, bMs: Long): LoopWindow? {
+        val duration = maxOf(song.duration, bMs, 0L)
+        val (aa, bb) = sanitize(aMs, bMs, duration)
+        return buildWindow(song.id, aa, bb)
+    }
+
+    /**
+     * 后台预填环缓冲：把 [window] 的 PCM16（交错小端）交给控制器安装。
+     *
+     * 任意线程可调用；sink 尚未 configure / 窗口尚未写入时由控制器暂存，稍后安装。
+     * 安装成功后该窗口内不再用播放捕获覆盖 ring（保证逐轮逐位相同）。
+     */
+    fun seedRing(
+        window: LoopWindow,
+        pcm16: ByteArray,
+        sampleRate: Int,
+        channels: Int,
+    ): LoopPcmEngine.SeedResult = controller.seedRing(window, pcm16, sampleRate, channels)
+
+    /**
+     * 当前窗口的 ring 是否已经完整（预填或捕获）。为 true 时后台预填解码可以跳过，
+     * 避免同一窗口反复解码大区间。
+     */
+    fun isRingReadyFor(window: LoopWindow): Boolean =
+        controller.window == window && controller.isRingComplete
 
     /** 暂停(保留位置与已捕获的 ring;resume 走 [play] 从展示位置起播)。 */
     fun pause() {

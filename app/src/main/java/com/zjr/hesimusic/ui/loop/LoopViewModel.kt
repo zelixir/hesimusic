@@ -15,6 +15,7 @@ import com.zjr.hesimusic.loop.analysis.PcmDecoder
 import com.zjr.hesimusic.loop.analysis.WaveformPeaks
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -114,6 +115,74 @@ class LoopViewModel @Inject constructor(
     private val _durationMs = MutableStateFlow(0L)
     val durationMs: StateFlow<Long> = _durationMs.asStateFlow()
 
+    // ---- 后台预填环缓冲（进页即解码 [A,B) 灌 ring） ----
+    private val _ringPreparing = MutableStateFlow(false)
+
+    /** 后台正在解码并预填环缓冲区（UI 显示「正在准备环缓冲…」）。 */
+    val ringPreparing: StateFlow<Boolean> = _ringPreparing.asStateFlow()
+
+    private var prefillJob: Job? = null
+    private var prefillToken: Any? = null
+
+    /**
+     * 后台解码 [A,B) 并预填环缓冲（进 Done 页 / 窗口变化后调用，可取消）。
+     *
+     * 成功后「接缝检查」、恢复播放等从区间内起播的场景立即可无缝，不必先完整试听一轮；
+     * 失败（解码不足/输出格式与 sink 不一致/区间超限）只打日志，原有降级/预卷兜底保留。
+     */
+    private fun scheduleRingPrefill() {
+        val song = _song.value ?: return
+        if (song.isCue) return
+        val window = previewPlayer.loopWindowFor(song, _aMs.value, _bMs.value) ?: run {
+            _ringPreparing.value = false
+            return
+        }
+        if (previewPlayer.isRingReadyFor(window)) {
+            // 该窗口的 ring 已完整（预填或捕获）：不重复解码。
+            prefillJob?.cancel()
+            _ringPreparing.value = false
+            return
+        }
+        prefillJob?.cancel()
+        val token = Any()
+        prefillToken = token
+        _ringPreparing.value = true
+        prefillJob = viewModelScope.launch {
+            try {
+                val segment = pcmDecoder.decodePcm16(
+                    song.filePath,
+                    window.loopStartUs,
+                    window.loopEndUs,
+                )
+                // 解码期间可能已换窗口（拖动/换候选）：以最新 A/B 重新取窗口，不一致就丢弃。
+                val latest = previewPlayer.loopWindowFor(song, _aMs.value, _bMs.value)
+                if (latest != window) {
+                    Log.d(TAG, "ring prefill dropped: window changed " + window + " -> " + latest)
+                    return@launch
+                }
+                val result = previewPlayer.seedRing(
+                    window,
+                    segment.data,
+                    segment.sampleRate,
+                    segment.channels,
+                )
+                Log.d(
+                    TAG,
+                    "ring prefill " + result.status + " frames=" + result.frames +
+                        " window=" + window + " detail=" + result.detail,
+                )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "ring prefill failed: " + e.message)
+            } finally {
+                if (prefillToken === token) {
+                    _ringPreparing.value = false
+                }
+            }
+        }
+    }
+
     /** 确认并保存已成功:退出时不再恢复原播放(由保存路径接管)。 */
     @Volatile
     var savedAndPlayed: Boolean = false
@@ -202,6 +271,7 @@ class LoopViewModel @Inject constructor(
             )
         )
         refillPeaks(song)
+        scheduleRingPrefill()
     }
 
     /**
@@ -298,6 +368,7 @@ class LoopViewModel @Inject constructor(
                 confirmed = false,
             )
         )
+        scheduleRingPrefill()
     }
 
     // ------------------------------------------------------------------ A/B
@@ -326,8 +397,13 @@ class LoopViewModel @Inject constructor(
 
     /** 松手才调:把当前 A/B 应用给预览播放器(新窗口会让 ring 失效并重新起播)。 */
     fun commitWindow() {
-        if (!previewPlayer.isPrepared) return
+        if (!previewPlayer.isPrepared) {
+            // 还没起播也要重新预填：新窗口的 ring 需要新的解码结果。
+            scheduleRingPrefill()
+            return
+        }
         previewPlayer.updateWindow(_aMs.value, _bMs.value)
+        scheduleRingPrefill()
     }
 
     private fun syncSamplesFromMs() {
@@ -426,6 +502,7 @@ class LoopViewModel @Inject constructor(
         if (!ensurePreview()) return
         previewPlayer.updateWindow(_aMs.value, _bMs.value)
         previewPlayer.play(_mode.value, startOfMode(_mode.value))
+        scheduleRingPrefill()
     }
 
     /** 60fps 播放头插值(契约 §2.2):锚点 + 时间外推,按当前窗口折返;positionMs 仅作校正。 */

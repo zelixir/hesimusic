@@ -1,0 +1,94 @@
+package com.zjr.hesimusic.loop
+
+import androidx.media3.common.Player
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Test
+
+/**
+ * 显式意图容器:只持有「武装的是哪首歌 + 进入前的 repeat」,无 DB / 无播放副作用。
+ */
+class LoopIntentTest {
+
+    private fun emissions(intent: LoopIntent, block: () -> Unit): List<LoopIntent.Armed?> = runBlocking {
+        val seen = mutableListOf<LoopIntent.Armed?>()
+        val job = launch(Dispatchers.Unconfined) {
+            intent.armed.collect { seen.add(it) }
+        }
+        block()
+        yield()
+        job.cancel()
+        seen.toList()
+    }
+
+    @Test
+    fun `初始未武装`() {
+        assertNull("新建 LoopIntent 不应有意图(会话级、不持久化)", LoopIntent().armed.value)
+    }
+
+    @Test
+    fun `arm 记录目标歌与进入前 repeat`() {
+        val intent = LoopIntent()
+        intent.arm(42L, Player.REPEAT_MODE_ALL)
+        assertEquals(
+            "arm 应记录 songId + previousRepeatMode",
+            LoopIntent.Armed(songId = 42L, previousRepeatMode = Player.REPEAT_MODE_ALL),
+            intent.armed.value
+        )
+    }
+
+    @Test
+    fun `重复 arm 以最后一次为准`() {
+        val intent = LoopIntent()
+        intent.arm(1L, Player.REPEAT_MODE_ALL)
+        intent.arm(2L, Player.REPEAT_MODE_OFF)
+        assertEquals(
+            "arm 别的歌应替换意图(不叠加)",
+            LoopIntent.Armed(songId = 2L, previousRepeatMode = Player.REPEAT_MODE_OFF),
+            intent.armed.value
+        )
+    }
+
+    @Test
+    fun `arm 非法 songId 被忽略`() {
+        val intent = LoopIntent()
+        intent.arm(0L, Player.REPEAT_MODE_ALL)
+        assertNull("songId=0 不可能成为无缝目标,不应留下意图", intent.armed.value)
+        intent.arm(-3L, Player.REPEAT_MODE_ALL)
+        assertNull("负 songId 同样忽略", intent.armed.value)
+    }
+
+    @Test
+    fun `clear 幂等且不重复 emit`() {
+        val intent = LoopIntent()
+        val seen = emissions(intent) {
+            intent.arm(1L, Player.REPEAT_MODE_ALL)
+            intent.clear()
+            intent.clear()
+        }
+        assertEquals(
+            "null -> 武装 -> null;重复 clear 不应重复 emit",
+            listOf(null, LoopIntent.Armed(1L, Player.REPEAT_MODE_ALL), null),
+            seen
+        )
+        assertNull("clear 后应无意图", intent.armed.value)
+    }
+
+    @Test
+    fun `相同意图重复 arm 不重复 emit`() {
+        val intent = LoopIntent()
+        val seen = emissions(intent) {
+            intent.arm(1L, Player.REPEAT_MODE_ALL)
+            intent.arm(1L, Player.REPEAT_MODE_ALL)
+        }
+        assertEquals(
+            "相同 Armed 值不应重复 emit",
+            listOf(null, LoopIntent.Armed(1L, Player.REPEAT_MODE_ALL)),
+            seen
+        )
+    }
+}

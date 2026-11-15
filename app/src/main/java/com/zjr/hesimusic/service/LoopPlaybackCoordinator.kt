@@ -4,8 +4,11 @@ import android.util.Log
 import androidx.media3.common.Player
 import com.zjr.hesimusic.data.dao.SongLoopDao
 import com.zjr.hesimusic.data.mapper.mediaIdToSongId
+import com.zjr.hesimusic.data.preferences.PlaybackPreferences
 import com.zjr.hesimusic.data.repository.SongRepository
 import com.zjr.hesimusic.loop.LoopEligibility
+import com.zjr.hesimusic.loop.LoopIntent
+import com.zjr.hesimusic.loop.LoopIntentDecision
 import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.LoopAudioController
@@ -23,19 +26,22 @@ import javax.inject.Singleton
 /**
  * 服务层收口：把「事件」翻译成「一次纯函数重算 + 至多一次状态写（+ 必要时一次 seek）」。
  *
- * 唯一事件入口是 [refresh]（切歌 / repeat 变化 / song_loop 行变更 / restore 完成），
+ * 唯一事件入口是 [refresh]（切歌 / repeat 变化 / song_loop 行变更 / 意图变化 / restore 完成），
  * 处理顺序：
  *
- * 1. 查行（[SongLoopDao.getBySongId]）；
- * 2. 预判资格只为先写整曲时长（[LoopAudioController.fullDurationUs]）；
- * 3. [LoopRuntime.refresh] 重算窗口（纯函数、幂等、唯一窗口来源）；
- * 4. 形态对账：[LoopShapePlan] 决定「写什么窗口 + 是否 seek」——生产路径**不裁剪**，
+ * 1. **意图退出决策**（[applyIntentExit]）：切到别的歌 → 清意图 + 恢复 prevRepeat；
+ *    repeat 被用户改成非 ONE → 清意图。这是引擎唯一会写 repeat 的地方；
+ * 2. 查行（[SongLoopDao.getBySongId]）；
+ * 3. 预判资格只为先写整曲时长（[LoopAudioController.fullDurationUs]）；
+ * 4. [LoopRuntime.refresh] 重算窗口（纯函数、幂等、唯一窗口来源；显式意图是输入之一）；
+ * 5. 形态对账：[LoopShapePlan] 决定「写什么窗口 + 是否 seek」——生产路径**不裁剪**，
  *    所以进入/退出无缝只写 [LoopAudioController.window]，没有任何 replaceMediaItem /
  *    时间线重建；只有「进入时 ring 未覆盖 [A,B)」与「退出时处于重放态」两种例外各 seek 一次；
- * 5. 当前歌变化时重启 song_loop 行订阅（analyze/confirm/demote/delete 落库自动传导）。
+ * 6. 当前歌变化时重启 song_loop 行订阅（analyze/confirm/demote/delete 落库自动传导）。
  *
  * 不变量：
- * - 引擎从不修改 repeatMode，repeat 只代表用户意图；
+ * - 无缝只由**显式意图**（[LoopIntent]）驱动：没有武装就没有窗口，哪怕 repeat==ONE；
+ * - repeat 只代表用户意图，引擎唯一的写回是「离开武装歌时恢复 prevRepeat」（见 [applyIntentExit]）；
  * - 窗口值没变时不做任何事（无缝播放期间零媒体操作、零 seek）；
  * - 所有 Player 操作都在主线程（[Dispatchers.Main.immediate]）。
  */
@@ -45,6 +51,8 @@ class LoopPlaybackCoordinator @Inject constructor(
     private val audio: LoopAudioController,
     private val songLoopDao: SongLoopDao,
     private val songRepository: SongRepository,
+    private val loopIntent: LoopIntent,
+    private val playbackPreferences: PlaybackPreferences,
 ) {
 
     private val mainDispatcher = Dispatchers.Main.immediate
@@ -62,6 +70,7 @@ class LoopPlaybackCoordinator @Inject constructor(
 
     init {
         installDegradeHandler()
+        observeLoopIntent()
     }
 
     // ------------------------------------------------------------------ 事件入口
@@ -70,24 +79,99 @@ class LoopPlaybackCoordinator @Inject constructor(
      * 唯一事件入口：重算窗口并（必要时）应用形态。
      *
      * @param songId 当前歌（[com.zjr.hesimusic.data.mapper.mediaIdToSongId] 口径，无效则 null）
-     * @param repeatMode 用户意图（[Player.getRepeatMode]），本层只读不写
-     * @param reason 仅用于日志：transition / repeat / row / restore
+     * @param repeatMode 用户意图（[Player.getRepeatMode]），本层只读（唯一例外见 [applyIntentExit]）
+     * @param reason 仅用于日志 + 区分事件类型：transition / repeat / row / intent / restore
      */
     suspend fun refresh(songId: Long?, repeatMode: Int, player: Player, reason: String) {
         refreshMutex.withLock {
             playerRef = player
+            // 0) 显式意图的退出决策（唯一会写 repeat 的地方，集中在 applyIntentExit）
+            val effectiveRepeatMode = applyIntentExit(songId, repeatMode, player, reason)
+            val armedSongId = loopIntent.armed.value?.songId
             val row = songId?.takeIf { it > 0L }?.let { songLoopDao.getBySongId(it) }
             // 先用同一个纯函数预判一次资格，只为在窗口对外可见**之前**把整曲时长写进音频层：
             // 否则 runtime.refresh 之后还要等一次 DB 查询，UI 可能在这段间隙读到上一首歌的时长。
-            val willBeEligible = LoopEligibility.derive(songId, repeatMode, row) != null
+            val willBeEligible =
+                LoopEligibility.derive(songId, effectiveRepeatMode, row, armedSongId) != null
             audio.fullDurationUs = if (willBeEligible) songDurationUs(songId) else 0L
-            runtime.refresh(songId, repeatMode, row)              // 1) 纯函数重算（唯一窗口来源）
+            runtime.refresh(songId, effectiveRepeatMode, row, armedSongId) // 1) 纯函数重算（唯一窗口来源）
             val window = runtime.window.value
             withContext(mainDispatcher) {                          // 2) 形态只在主线程动播放器
                 syncShape(window, player, reason)
             }
             ensureObservation(songId, player)                      // 3) 行变更订阅
         }
+    }
+
+    /**
+     * 显式意图的退出决策，返回本次重算应使用的 repeat 模式。
+     *
+     * 两条退出规则：
+     * - **切到别的歌**（reason=transition 且目标歌 != 武装歌，含当前歌为 null）：
+     *   立即退出无缝（窗口随后由纯函数置空），并把 repeat 恢复为进入前的 prevRepeat。
+     *   新歌 == 武装歌时**不退出**：显式入口是「先 arm 再 play」，进入武装歌那一次
+     *   transition 必须保留意图，否则无缝永远无法生效。
+     * - **用户把 repeat 改成非 ONE**（reason=repeat）：退出并清空意图，切回 ONE 也不会自动恢复。
+     *   这里用「持久化偏好 == 新 repeat」区分「用户手动改」与「内部临时改写」：
+     *   队列播放（MusicViewModel）会在 REPEAT_ONE 下临时改成 ALL 且**不写偏好**，
+     *   那种临时态不能清掉意图（否则往队列加歌会把正在播放的无缝打断）。
+     *
+     * 顺序与幂等（恢复 repeat 的唯一落点）：
+     * 1. 先 [LoopIntent.clear]，再写 repeat —— 写 repeat 会同步回调 onRepeatModeChanged，
+     *    那次 refresh 读到 armed=null，不会二次恢复；
+     * 2. 恢复写回同时持久化，避免进程重启后 repeat 又回到 ONE；
+     * 3. 无论恢复是否发生（prevRepeat 可能等于当前值），意图都只清一次；后续事件重算幂等。
+     */
+    private suspend fun applyIntentExit(
+        songId: Long?,
+        repeatMode: Int,
+        player: Player,
+        reason: String,
+    ): Int {
+        val armed = loopIntent.armed.value ?: return repeatMode
+
+        if (reason == REASON_REPEAT && repeatMode != Player.REPEAT_MODE_ONE) {
+            val persisted = playbackPreferences.getRepeatMode()
+            if (LoopIntentDecision.shouldClearOnRepeatChange(armed, repeatMode, persisted)) {
+                loopIntent.clear()
+                Log.i(
+                    TAG,
+                    "loop intent cleared: user repeat=$repeatMode songId=$songId armed=" + armed.songId,
+                )
+            } else {
+                // 内部临时改写（队列播放把 ONE 临时改成 ALL，不落偏好）：保留意图。
+                // 窗口此刻自然为 null（repeat != ONE），repeat 恢复成 ONE 后无缝会自动回来。
+                Log.d(
+                    TAG,
+                    "loop intent kept: internal repeat override=$repeatMode persisted=$persisted " +
+                        "songId=$songId armed=" + armed.songId,
+                )
+            }
+            return repeatMode
+        }
+
+        // 只认 onMediaItemTransition 事件：restore / row / intent 不代表用户切歌。
+        if (reason != REASON_TRANSITION) return repeatMode
+        if (!LoopIntentDecision.shouldExitOnSongChange(armed, songId)) return repeatMode
+
+        val restore = LoopIntentDecision.repeatToRestore(armed, songId, repeatMode)
+        loopIntent.clear()
+        if (restore != null) {
+            withContext(mainDispatcher) { player.setRepeatMode(restore) }
+            playbackPreferences.saveRepeatMode(restore)
+            Log.i(
+                TAG,
+                "loop intent exit: songId=$songId armedSongId=" + armed.songId +
+                    " restoreRepeat=$restore currentRepeat=$repeatMode reason=$reason",
+            )
+            return restore
+        }
+        Log.i(
+            TAG,
+            "loop intent exit: songId=$songId armedSongId=" + armed.songId +
+                " restoreRepeat=none(already $repeatMode) reason=$reason",
+        )
+        return repeatMode
     }
 
     /** service 销毁时停止行订阅并清空窗口（不取消 [scope]，服务可能被重建）。 */
@@ -101,6 +185,24 @@ class LoopPlaybackCoordinator @Inject constructor(
             audio.window = null
         }
         runtime.clear()
+    }
+
+    // ------------------------------------------------------------------ 意图订阅
+
+    /**
+     * 监听显式意图变化：arm / clear 本身不碰播放器，但会改变资格（例如在**正在播放**的歌上
+     * 点「无缝循环」时 repeat 已经是 ONE，不会再有 transition/repeat 事件），所以这里补一次
+     * 重算。collect 与 refresh 在同一 scope：refresh 内部 clear 只会在本次 collect 返回后
+     * 再触发一轮（StateFlow 语义），那一轮 armed 已为 null，重算幂等。
+     */
+    private fun observeLoopIntent() {
+        scope.launch {
+            loopIntent.armed.collect { armed ->
+                val player = playerRef ?: return@collect
+                Log.d(TAG, "refresh reason=intent armed=" + armed?.songId)
+                refresh(currentSongId(player), player.repeatMode, player, REASON_INTENT)
+            }
+        }
     }
 
     // ------------------------------------------------------------------ 形态应用
@@ -210,13 +312,16 @@ class LoopPlaybackCoordinator @Inject constructor(
             scope.launch {
                 songLoopDao.getBySongIdFlow(id).collect { _ ->
                     // 行内容变化（含删除后的 null）→ 完整重算一次
-                    refresh(id, player.repeatMode, player, "row")
+                    refresh(id, player.repeatMode, player, REASON_ROW)
                 }
             }
         }
     }
 
     // ------------------------------------------------------------------ 工具
+
+    private fun currentSongId(player: Player): Long? =
+        player.currentMediaItem?.mediaId?.let { mediaIdToSongId(it) }
 
     private suspend fun songDurationUs(songId: Long?): Long {
         if (songId == null || songId <= 0L) return 0L
@@ -227,5 +332,17 @@ class LoopPlaybackCoordinator @Inject constructor(
     private companion object {
         private const val TAG = "LoopPlaybackCoordinator"
         private const val TAG_PERF = "LoopPerf"
+
+        /** 切歌事件（MusicService.onMediaItemTransition）。 */
+        const val REASON_TRANSITION = "transition"
+
+        /** repeat 变化事件（MusicService.onRepeatModeChanged）。 */
+        const val REASON_REPEAT = "repeat"
+
+        /** song_loop 行变化（ensureObservation）。 */
+        const val REASON_ROW = "row"
+
+        /** 显式意图变化（observeLoopIntent）。 */
+        const val REASON_INTENT = "intent"
     }
 }

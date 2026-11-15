@@ -33,6 +33,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import androidx.compose.ui.platform.LocalContext
 import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.loop.LoopIntent
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
 import com.zjr.hesimusic.ui.about.AboutScreen
 import com.zjr.hesimusic.ui.common.UiNavigationHooks
@@ -84,6 +85,8 @@ class MainActivity : ComponentActivity() {
     lateinit var playbackPreferences: PlaybackPreferences
     @Inject
     lateinit var loopAnalysisManager: LoopAnalysisManager
+    @Inject
+    lateinit var loopIntent: LoopIntent
     
     private val TAG = "MainActivity"
     
@@ -173,6 +176,7 @@ class MainActivity : ComponentActivity() {
                                 navController = navController,
                                 musicViewModel = homeMusicViewModel,
                                 loopAnalysisManager = loopAnalysisManager,
+                                loopIntent = loopIntent,
                             )
                             MainScreen(
                                 musicViewModel = homeMusicViewModel,
@@ -269,6 +273,7 @@ class MainActivity : ComponentActivity() {
                                 navController = navController,
                                 musicViewModel = detailMusicViewModel,
                                 loopAnalysisManager = loopAnalysisManager,
+                                loopIntent = loopIntent,
                             )
                             SongListScreen(
                                 type = type,
@@ -309,7 +314,10 @@ class MainActivity : ComponentActivity() {
                                 musicViewModel = sharedMusicViewModel,
                                 onBack = { navController.popBackStack() },
                                 onSavedAndPlay = { song ->
-                                    // 契约 §2.4:确认保存 → 播放该歌 + 单曲循环 → 返回
+                                    // 契约 §2.4:确认保存 → **显式武装该歌的无缝意图** → 播放该歌 +
+                                    // 单曲循环 → 返回。arm 必须在 play/setRepeatMode(ONE) 之前:
+                                    // 先记下进入前的 repeat,退出无缝时才能恢复。
+                                    loopIntent.arm(song.id, sharedMusicViewModel.uiState.value.repeatMode)
                                     sharedMusicViewModel.play(song)
                                     sharedMusicViewModel.setRepeatMode(Player.REPEAT_MODE_ONE)
                                     navController.popBackStack()
@@ -357,7 +365,7 @@ private data class LoopMenuActions(
 
 /**
  * 按契约 §1 的入口分流构造回调:
- * - 行 confirmed=1 → 播放该歌 + repeatMode=ONE(无缝由播放层窗口驱动);
+ * - 行 confirmed=1 → **显式武装该歌的无缝意图** + 播放该歌 + repeatMode=ONE;
  * - 行 confirmed=0(临时)或无行 → 导航 loop/{songId}(进页加载已存结果 / 自动分析)。
  *
  * 「重新分析」导航到同一路由(页面加载已存结果,重分析走页内按钮);
@@ -368,14 +376,18 @@ private fun rememberLoopMenuActions(
     navController: NavHostController,
     musicViewModel: MusicViewModel,
     loopAnalysisManager: LoopAnalysisManager,
+    loopIntent: LoopIntent,
 ): LoopMenuActions {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    return remember(navController, musicViewModel, loopAnalysisManager) {
+    return remember(navController, musicViewModel, loopAnalysisManager, loopIntent) {
         LoopMenuActions(
             onSeamlessLoop = { song, confirmed ->
                 when (confirmed) {
                     true -> {
+                        // 显式进入:arm 必须在 play/setRepeatMode(ONE) 之前(记录进入前的 repeat,
+                        // 切歌退出时恢复)。切到别的歌不会自动武装,必须重新走这里。
+                        loopIntent.arm(song.id, musicViewModel.uiState.value.repeatMode)
                         musicViewModel.play(song)
                         musicViewModel.setRepeatMode(Player.REPEAT_MODE_ONE)
                     }

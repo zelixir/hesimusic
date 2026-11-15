@@ -39,6 +39,32 @@ class LoopPcmEngine {
         fun isValid(): Boolean = sampleRate > 0 && bytesPerFrame > 0 && channelCount > 0
     }
 
+    /**
+     * [seedRing] 的结果状态。
+     *
+     * - [PENDING]：引擎还没有输出格式（sink 未 configure），调用方（controller）应暂存，
+     *   待 onFormatConfigured 后重试；
+     * - [REJECTED_*]：调用方应丢弃这份预填 PCM（日志说明原因，不重试）。
+     */
+    enum class SeedStatus {
+        INSTALLED,
+        PENDING,
+        REJECTED_WINDOW,
+        REJECTED_FORMAT,
+        REJECTED_SIZE,
+        REJECTED_BUSY,
+        REJECTED_RELEASED,
+    }
+
+    /** [seedRing] 的返回值；[frames] = 实际装进 ring 的帧数，[detail] 供日志/单测断言。 */
+    data class SeedResult(
+        val status: SeedStatus,
+        val frames: Long = 0L,
+        val detail: String = "",
+    ) {
+        val isInstalled: Boolean get() = status == SeedStatus.INSTALLED
+    }
+
     /** 当前窗口对应的帧坐标（A/B 均已换算为绝对帧号）。 */
     data class Region(
         val window: LoopWindow,
@@ -121,6 +147,16 @@ class LoopPcmEngine {
     /** 已重放输出的累计帧数（debug/E2E 用）。 */
     @Volatile
     var totalReplayFrames: Long = 0L
+        private set
+
+    /**
+     * 当前 ring 是否由 seed（解码预填）安装，而不是由播放捕获填满。
+     *
+     * 预填窗口内不再用播放捕获覆盖 ring：预填 PCM 来自分析侧解码器，与播放链解码输出
+     * 可能有极微差异；若允许捕获覆盖，不同轮次（预填轮 vs 后续轮）的环内容就不再逐位相同。
+     */
+    @Volatile
+    var isRingPrefilled: Boolean = false
         private set
 
     private var format: Format? = null
@@ -234,6 +270,7 @@ class LoopPcmEngine {
         ringFrames = plan.loopFrames
         capturedFrames = 0L
         isRingComplete = false
+        isRingPrefilled = false
         incompleteDegraded = false
         cursorFrames = 0L
         round = 1L
@@ -243,6 +280,118 @@ class LoopPcmEngine {
         degradeCallbackArmed = true
         state = if (replayUnavailable) State.PASS_THROUGH else State.CAPTURING
         return true
+    }
+
+    /**
+     * 解码侧预填 ring（后台线程调用）：把 [window] 对应的 PCM16（交错、小端、[channels] 声道、
+     * [sampleRate] Hz）直接装进 ring，覆盖率立即 100%，并标记 prefilled。
+     *
+     * 帧数口径：
+     * - 要求至少覆盖 ceil((B−A)*sampleRate/1e6) 帧（与 [PcmDecoder] 的产出严格对应）；
+     * - ring 实际长度是 ceil(B*sr/1e6) − ceil(A*sr/1e6) 帧，可能比上一步少 1 帧
+     *   （A/B 都不落在帧边界时），多出来的尾帧丢弃；
+     * - 不足帧直接拒绝（不静默补零），由调用方走兜底捕获路径。
+     *
+     * 只有 window 与当前窗口完全一致、且 sampleRate/channels 与 sink 输出格式一致时才安装；
+     * 预填不会改 [degradeCount]。安装后该窗口内 [captureLocked] 不再覆盖 ring。
+     */
+    @Synchronized
+    fun seedRing(
+        window: LoopWindow,
+        pcm16: ByteArray,
+        sampleRate: Int,
+        channels: Int,
+    ): SeedResult {
+        if (!window.isValid()) {
+            return SeedResult(SeedStatus.REJECTED_WINDOW, detail = "invalid window=$window")
+        }
+        if (sampleRate <= 0 || channels <= 0) {
+            return SeedResult(
+                SeedStatus.REJECTED_FORMAT,
+                detail = "invalid sampleRate=$sampleRate channels=$channels",
+            )
+        }
+        if (pcm16.isEmpty()) {
+            return SeedResult(SeedStatus.REJECTED_SIZE, detail = "empty pcm16")
+        }
+        if (released) {
+            return SeedResult(SeedStatus.REJECTED_RELEASED, detail = "sink released")
+        }
+        val fmt = format ?: return SeedResult(SeedStatus.PENDING, detail = "format unknown")
+        if (this.window != window) {
+            return SeedResult(
+                SeedStatus.REJECTED_WINDOW,
+                detail = "window mismatch current=" + this.window,
+            )
+        }
+        if (fmt.sampleRate != sampleRate || fmt.channelCount != channels) {
+            return SeedResult(
+                SeedStatus.REJECTED_FORMAT,
+                detail = "format mismatch sr=$sampleRate ch=$channels engine=" +
+                    fmt.sampleRate + "/" + fmt.channelCount,
+            )
+        }
+        if (fmt.pcmIsFloat || fmt.bytesPerFrame != channels * 2) {
+            // 预填数据是 16bit 交错 PCM；float/24bit/32bit 输出无法直接装。
+            return SeedResult(
+                SeedStatus.REJECTED_FORMAT,
+                detail = "output not pcm16 bpf=" + fmt.bytesPerFrame +
+                    " float=" + fmt.pcmIsFloat,
+            )
+        }
+        if (state == State.REPLAYING) {
+            // 正在重放时替换 ring 内容会让本轮与下一轮听到不同样本，拒绝。
+            return SeedResult(SeedStatus.REJECTED_BUSY, detail = "replaying")
+        }
+        val plan = planRing(window, fmt) ?: return SeedResult(
+            SeedStatus.REJECTED_WINDOW,
+            detail = "planRing unavailable (too long/too large) window=$window",
+        )
+        val requiredFrames = usLengthToFrameCeil(window.lengthUs, sampleRate)
+        val srcBytesPerFrame = channels * 2
+        val pcmFrames = pcm16.size.toLong() / srcBytesPerFrame
+        if (pcmFrames < requiredFrames || pcmFrames < plan.loopFrames) {
+            return SeedResult(
+                SeedStatus.REJECTED_SIZE,
+                frames = pcmFrames,
+                detail = "insufficient pcm frames=$pcmFrames required=$requiredFrames " +
+                    "loop=" + plan.loopFrames,
+            )
+        }
+        val byteSize = (plan.loopFrames * fmt.bytesPerFrame).toInt()
+        if (byteSize <= 0) {
+            return SeedResult(SeedStatus.REJECTED_WINDOW, detail = "zero byteSize")
+        }
+        val copyBytes = (plan.loopFrames * srcBytesPerFrame).toInt()
+
+        // 同 window/format 已有 ring 时原地覆盖（分配发生在后台线程，音频线程不参与）。
+        var target = ring
+        if (target == null || target.size != byteSize ||
+            region?.window != window || region?.format != fmt
+        ) {
+            target = ByteArray(byteSize)
+            region = Region(window, fmt, plan.aFrame, plan.bFrame)
+            regionDirty = false
+            ring = target
+        }
+        System.arraycopy(pcm16, 0, target, 0, copyBytes)
+
+        coverage = Coverage().apply { add(0L, plan.loopFrames, plan.loopFrames) }
+        ringFrames = plan.loopFrames
+        capturedFrames = plan.loopFrames
+        isRingComplete = true
+        isRingPrefilled = true
+        incompleteDegraded = false
+        replayUnavailable = false
+        degradeCallbackArmed = true
+        unavailableWindow = null
+        cursorFrames = 0L
+        round = 1L
+        pendingChunk = null
+        pendingConsumedBytes = 0
+        pendingAdvancedFrames = 0L
+        state = State.CAPTURING
+        return SeedResult(SeedStatus.INSTALLED, frames = plan.loopFrames)
     }
 
     /**
@@ -703,6 +852,7 @@ class LoopPcmEngine {
         ringFrames = plan.loopFrames
         capturedFrames = 0L
         isRingComplete = false
+        isRingPrefilled = false
         incompleteDegraded = false
         replayUnavailable = false
         degradeCallbackArmed = true
@@ -728,6 +878,7 @@ class LoopPcmEngine {
         ringFrames = 0L
         capturedFrames = 0L
         isRingComplete = false
+        isRingPrefilled = false
         incompleteDegraded = false
         replayUnavailable = false
         preallocated = null
@@ -752,6 +903,9 @@ class LoopPcmEngine {
         r: Region,
         fmt: Format,
     ) {
+        // 解码预填的窗口不再用播放捕获覆盖 ring：保证每一轮的环内容逐位相同
+        // （预填 PCM 与播放链解码输出可能有极微差异）。
+        if (isRingPrefilled) return
         val bytes = ring ?: return
         val bpf = fmt.bytesPerFrame
         val srcByteStart = srcPos + ((capStart - startFrameAbs) * bpf).toInt()
@@ -917,6 +1071,12 @@ class LoopPcmEngine {
         }
 
         private const val US_PER_SECOND: Long = 1_000_000L
+
+        /** 区间长度(µs) -> 帧数 = ceil(durationUs * sr / 1e6)，用于预填长度校验。 */
+        internal fun usLengthToFrameCeil(durationUs: Long, sampleRate: Int): Long {
+            if (durationUs <= 0L || sampleRate <= 0) return 0L
+            return (durationUs * sampleRate + US_PER_SECOND - 1L) / US_PER_SECOND
+        }
 
         /** 绝对帧号 = ceil(us * sr / 1e6)，用于半开区间起点/终点。 */
         internal fun usToFrameCeil(us: Long, sampleRate: Int): Long {
