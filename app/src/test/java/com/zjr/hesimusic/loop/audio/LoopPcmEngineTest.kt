@@ -431,6 +431,37 @@ class LoopPcmEngineTest {
     }
 
     @Test
+    fun `重放开始与每次折返都触发 seam 回调`() {
+        val engine = newEngine()
+        engine.setWindow(window(100, 200))
+        val seams = mutableListOf<Triple<Long, Long, Long>>()
+        engine.onSeam = { iter, outFrames, ptsUs -> seams.add(Triple(iter, outFrames, ptsUs)) }
+
+        val plan = engine.onBuffer(0L, 250, PcmTestSupport.pcm16Buffer(0, 250))
+        engine.onInputDrained(plan)
+
+        assertEquals("重放开始应有一条 seam", 1, seams.size)
+        assertEquals("首条 iter=1", 1L, seams[0].first)
+        assertEquals("首条 outFrames=0", 0L, seams[0].second)
+        assertEquals("首条 ptsUs=B", 200_000L, seams[0].third)
+
+        var total = 0L
+        while (total < 200L) {
+            val chunk = engine.pumpChunk(40)!!
+            engine.onReplayChunkConsumed(chunk.byteLength)
+            total += chunk.frames.toLong()
+        }
+
+        assertEquals("两轮折返后共 3 条 seam（含首条）", 3, seams.size)
+        assertEquals("第二次 seam iter=2", 2L, seams[1].first)
+        assertEquals("第二次 outFrames=L", 100L, seams[1].second)
+        assertEquals("第二次 ptsUs=B+L", 300_000L, seams[1].third)
+        assertEquals("第三次 seam iter=3", 3L, seams[2].first)
+        assertEquals("第三次 outFrames=2L", 200L, seams[2].second)
+        assertEquals("第三次 ptsUs=B+2L", 400_000L, seams[2].third)
+    }
+
+    @Test
     fun `release 后同格式 configure 可恢复环回能力`() {
         val fmt = LoopPcmEngine.Format(
             sampleRate = 1000,

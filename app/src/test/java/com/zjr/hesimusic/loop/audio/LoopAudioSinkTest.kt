@@ -462,6 +462,296 @@ class LoopAudioSinkTest {
     }
 
     @Test
+    fun `offset 在 configure 之前写入时捕获仍按媒体时间命中 B 并重放`() {
+        val controller = LoopAudioController()
+        controller.preallocDispatcher = { it.run() }
+        controller.degradeDispatcher = { it.run() }
+        val fake = FakeAudioSink()
+        val sink = LoopAudioSink(controller, fake)
+
+        // 复现 ExoPlayer 的真实顺序：setOutputStreamOffsetUs 先于 configure。
+        val offset = 1_000_000_000_000L
+        sink.setOutputStreamOffsetUs(offset)
+        sink.configure(PcmTestSupport.format(), 4096, null)
+        controller.window = window(100, 200)
+
+        // 未裁剪输入：0..250 帧，PTS 带 1e12 偏移；引擎必须用媒体时间 0 起算。
+        assertTrue(
+            sink.handleBuffer(
+                PcmTestSupport.pcm16Buffer(0, 250),
+                offset,
+                1,
+            )
+        )
+
+        assertTrue("ring 应完整命中 [A,B)", controller.isRingComplete)
+        assertTrue("应进入重放", controller.isReplaying)
+
+        val pre = fake.feeds.first()
+        assertEquals("预录段应转发 [0,B)", 200, pre.frames)
+        assertEquals("delegate 仍应看到 offset+媒体时间", offset, pre.ptsUs)
+
+        val replay = fake.feeds.filter { it.ptsUs >= offset + bUs }
+        assertTrue("应产生重放输出", replay.isNotEmpty())
+        assertEquals(
+            "重放 PTS = offset + B + (k-1)L + 环内偏移",
+            offset + bUs,
+            replay.first().ptsUs,
+        )
+        assertArrayEquals(
+            "重放内容应从 A 开始",
+            PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(100, 10)),
+            replay.first().bytes,
+        )
+
+        fake.currentPositionUs = offset + 123_456L
+        sink.getCurrentPositionUs(false)
+        assertEquals("controller.positionUs 必须是媒体时间", 123_456L, controller.positionUs)
+    }
+
+    @Test
+    fun `offset 在流中途变化时不串味`() {
+        val controller = LoopAudioController()
+        controller.preallocDispatcher = { it.run() }
+        controller.degradeDispatcher = { it.run() }
+        val fake = FakeAudioSink()
+        val sink = LoopAudioSink(controller, fake)
+        val firstOffset = 1_000_000_000_000L
+        sink.setOutputStreamOffsetUs(firstOffset)
+        sink.configure(PcmTestSupport.format(), 4096, null)
+        controller.window = window(100, 200)
+
+        // 第一段只播前奏 [0,100)，不捕获
+        assertTrue(sink.handleBuffer(PcmTestSupport.pcm16Buffer(0, 100), firstOffset, 1))
+        assertEquals(0L, controller.engine.capturedFrames)
+
+        // seek/流重启后 offset 改变；输入 PTS 用新 offset + 媒体时间
+        val secondOffset = 2_000_000_000_000L
+        sink.setOutputStreamOffsetUs(secondOffset)
+        assertTrue(
+            sink.handleBuffer(
+                PcmTestSupport.pcm16Buffer(100, 150),
+                secondOffset + 100_000L,
+                1,
+            )
+        )
+
+        assertTrue("offset 变化后仍应精确捕获 [100,200)", controller.isRingComplete)
+        assertTrue(controller.isReplaying)
+        val replay = fake.feeds.filter { it.ptsUs >= secondOffset + bUs }
+        assertTrue("应产生重放输出", replay.isNotEmpty())
+        assertEquals(
+            "重放必须使用新的 offset 域",
+            secondOffset + bUs,
+            replay.first().ptsUs,
+        )
+        assertArrayEquals(
+            "捕获内容不能串入旧 offset 的帧",
+            PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(100, 10)),
+            replay.first().bytes,
+        )
+
+        fake.currentPositionUs = secondOffset + 150_000L
+        sink.getCurrentPositionUs(false)
+        assertEquals("位置也必须跟随新 offset 归一化", 150_000L, controller.positionUs)
+    }
+
+    @Test
+    fun `重放态 delegate 拒绝写入时不消费输入并返回 false`() {
+        val (controller, sink, fake) = rig()
+        assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(0, 250), 0L))
+        assertTrue(controller.isReplaying)
+
+        fake.maxFramesPerCall = 0
+        fake.feeds.clear()
+        val src = PcmTestSupport.pcm16Buffer(300, 50)
+        assertFalse("delegate 不可写时应背压", sink.handleBuffer(src, 300_000L, 1))
+        assertEquals("未写出重放时不得消费输入", 0, src.position())
+        assertTrue("delegate 不应收到任何帧", fake.feeds.isEmpty())
+
+        // 同一 buffer 在 delegate 可写后应可正常消费并产出重放
+        fake.maxFramesPerCall = 7
+        assertTrue("可写后应消费该 buffer", sink.handleBuffer(src, 300_000L, 1))
+        assertEquals("输入应被消费", src.limit(), src.position())
+        assertTrue("应产出重放", fake.feeds.isNotEmpty())
+    }
+
+    @Test
+    fun `连续喂 3L 帧输入时输出至少 3L 且输入消费不超前`() {
+        val (controller, sink, fake) = rig(maxFramesPerCall = 7)
+        assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(0, 250), 0L))
+        assertTrue(controller.isReplaying)
+        fake.feeds.clear()
+
+        var consumedInputFrames = 0
+        val fedInputFrames = 300
+        for (i in 0 until 30) {
+            val start = 1000 + i * 10
+            val src = PcmTestSupport.pcm16Buffer(start, 10)
+            val pts = start * 1000L
+            var retries = 0
+            while (!sink.handleBuffer(src, pts, 1)) {
+                if (++retries > 1000) fail("输入在 1000 次重试内仍未消费")
+            }
+            consumedInputFrames += 10
+        }
+
+        val outFrames = fake.feeds.sumOf { it.frames }
+        assertTrue("3L 输入应至少产出 3L 重放，实际 " + outFrames, outFrames >= fedInputFrames)
+        assertTrue("输入消费量不得超过输入量", consumedInputFrames <= fedInputFrames)
+        assertTrue("节流后不应无限超前产出，实际 " + outFrames, outFrames <= 400)
+        var lastPts = Long.MIN_VALUE
+        for (feed in fake.feeds) {
+            assertTrue("重放 PTS 应单调", feed.ptsUs >= lastPts)
+            lastPts = feed.ptsUs
+        }
+    }
+
+    @Test
+    fun `getCurrentPositionUs 在重放态也会驱动泵`() {
+        val (controller, sink, fake) = rig(maxFramesPerCall = 7)
+        assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(0, 250), 0L))
+        assertTrue(controller.isReplaying)
+        fake.feeds.clear()
+
+        repeat(3) { sink.getCurrentPositionUs(false) }
+
+        assertTrue("位置查询应作为 EOS 兜底驱动泵", fake.feeds.isNotEmpty())
+        assertTrue(fake.feeds.sumOf { it.frames } > 0)
+    }
+
+    @Test
+    fun `未裁剪输入越过 B 后由后续 buffer 驱动泵继续重放`() {
+        val controller = LoopAudioController()
+        controller.preallocDispatcher = { it.run() }
+        controller.degradeDispatcher = { it.run() }
+        val fake = FakeAudioSink()
+        val sink = LoopAudioSink(controller, fake)
+        val offset = 1_000_000_000_000L
+        sink.setOutputStreamOffsetUs(offset)
+        sink.configure(PcmTestSupport.format(), 4096, null)
+        controller.window = window(100, 200)
+
+        // 第一次越过 B（未裁剪，buffer 本身超过 B）
+        assertTrue(sink.handleBuffer(PcmTestSupport.pcm16Buffer(0, 250), offset, 1))
+        assertTrue(controller.isReplaying)
+        val before = fake.feeds.size
+
+        // 未裁剪输入继续喂 [250,1000) 帧；sink 应丢弃输入并继续泵 ring。
+        for (start in 250 until 1000 step 50) {
+            assertTrue(
+                sink.handleBuffer(
+                    PcmTestSupport.pcm16Buffer(start, 50),
+                    offset + start * 1000L,
+                    1,
+                )
+            )
+        }
+
+        val replay = fake.feeds.drop(before)
+        assertTrue("未裁剪输入期间也应持续泵出重放数据", replay.isNotEmpty())
+        var lastPts = Long.MIN_VALUE
+        for (feed in replay) {
+            assertTrue("重放 PTS 应带 offset 且单调", feed.ptsUs >= offset + bUs)
+            assertTrue("重放 PTS 应单调", feed.ptsUs >= lastPts)
+            assertEquals(ByteOrder.LITTLE_ENDIAN, feed.order)
+            lastPts = feed.ptsUs
+        }
+        assertEquals("未裁剪路径不依赖 delegate EOS", 0, fake.playToEndCalls)
+    }
+
+    @Test
+    fun `tap 侧车写出 configure seam flush end`() {
+        val file = File.createTempFile("loop-sidecar-", ".wav")
+        val sidecar = File(file.parentFile, file.name + ".jsonl")
+        try {
+            val controller = LoopAudioController()
+            controller.preallocDispatcher = { it.run() }
+            controller.degradeDispatcher = { it.run() }
+            controller.setPcmTap(file)
+            val fake = FakeAudioSink()
+            val sink = LoopAudioSink(controller, fake)
+            sink.configure(PcmTestSupport.format(), 4096, null)
+            controller.window = window(100, 200)
+
+            assertTrue(sink.handleBuffer(PcmTestSupport.pcm16Buffer(0, 250), 0L, 1))
+            sink.flush()
+            sink.release()
+
+            val lines = sidecar.readLines()
+            assertTrue(
+                "configure 事件应包含 sr/ch/bpf",
+                lines.any {
+                    it.contains("\"ev\":\"configure\"") &&
+                        it.contains("\"sr\":1000") &&
+                        it.contains("\"ch\":1") &&
+                        it.contains("\"bpf\":2")
+                },
+            )
+            assertTrue(
+                "seam 事件应包含 iter/outFrames/ptsUs",
+                lines.any {
+                    it.contains("\"ev\":\"seam\"") &&
+                        it.contains("\"iter\":1") &&
+                        it.contains("\"outFrames\":") &&
+                        it.contains("\"ptsUs\":200000")
+                },
+            )
+            assertTrue("flush 事件应存在", lines.any { it.contains("\"ev\":\"flush\"") })
+
+            val endLine = lines.last { it.contains("\"ev\":\"end\"") }
+            val totalFrames = Regex("\"totalFrames\":(\\d+)")
+                .find(endLine)!!.groupValues[1].toLong()
+            assertEquals(
+                "end.totalFrames 应等于 WAV 的 PCM 帧数",
+                (file.length() - 44L) / 2L,
+                totalFrames,
+            )
+        } finally {
+            file.delete()
+            sidecar.delete()
+        }
+    }
+
+    @Test
+    fun `tap 侧车写出 degrade 事件`() {
+        val file = File.createTempFile("loop-sidecar-degrade-", ".wav")
+        val sidecar = File(file.parentFile, file.name + ".jsonl")
+        try {
+            val controller = LoopAudioController()
+            controller.preallocDispatcher = { it.run() }
+            controller.degradeDispatcher = { it.run() }
+            controller.setPcmTap(file)
+            val fake = FakeAudioSink()
+            val sink = LoopAudioSink(controller, fake)
+            sink.configure(PcmTestSupport.format(), 4096, null)
+            controller.window = window(1000, 2000)
+
+            // 从 1.5s 进入，ring 只有后半段 -> 降级
+            assertTrue(
+                sink.handleBuffer(
+                    PcmTestSupport.pcm16Buffer(1500, 1000),
+                    1_500_000L,
+                    1,
+                )
+            )
+            sink.release()
+
+            val lines = sidecar.readLines()
+            assertTrue(
+                "degrade 事件应包含 targetRawUs",
+                lines.any {
+                    it.contains("\"ev\":\"degrade\"") &&
+                        it.contains("\"targetRawUs\":750000")
+                },
+            )
+        } finally {
+            file.delete()
+            sidecar.delete()
+        }
+    }
+
+    @Test
     fun `debug PCM tap 落 WAV 且数据长度正确`() {
         val file = File.createTempFile("loop-tap-", ".wav")
         try {

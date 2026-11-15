@@ -149,6 +149,9 @@ class LoopPcmEngine {
     internal var onDegrade: ((targetRawUs: Long) -> Unit)? = null
     private var degradeCallbackArmed = true
 
+    /** 接缝事件回调：iter=轮次，outReplayFrames=已完成重放帧，ptsUs=新媒体域轮起点。 */
+    internal var onSeam: ((iter: Long, outReplayFrames: Long, ptsUs: Long) -> Unit)? = null
+
     // ------------------------------------------------------------------ 配置
 
     /** 记录输出格式。格式变化时 ring 失效并等待下一次输入重建。 */
@@ -395,6 +398,7 @@ class LoopPcmEngine {
         pendingConsumedBytes = 0
         pendingAdvancedFrames = 0L
         if (r.loopFrames <= 0L) state = State.PASS_THROUGH
+        notifySeamLocked()
     }
 
     /**
@@ -425,6 +429,7 @@ class LoopPcmEngine {
         pendingChunk = null
         pendingConsumedBytes = 0
         pendingAdvancedFrames = 0L
+        notifySeamLocked()
         return true
     }
 
@@ -448,6 +453,7 @@ class LoopPcmEngine {
             cursorFrames = 0L
             round += 1L
             seamCount += 1L
+            notifySeamLocked()
         }
         val maxFrames = maxOf(1, maxBytes / bpf).toLong()
         val frames = minOf(maxFrames, r.loopFrames - cursorFrames).toInt()
@@ -765,6 +771,7 @@ class LoopPcmEngine {
                 cursorFrames = 0L
                 round += 1L
                 seamCount += 1L
+                notifySeamLocked()
                 continue
             }
             val step = minOf(left, room)
@@ -775,8 +782,15 @@ class LoopPcmEngine {
                 cursorFrames = 0L
                 round += 1L
                 seamCount += 1L
+                notifySeamLocked()
             }
         }
+    }
+
+    private fun notifySeamLocked() {
+        val r = region ?: return
+        val fmt = format ?: return
+        onSeam?.invoke(round, totalReplayFrames, replayPtsLocked(0L, round, r, fmt))
     }
 
     private fun replayPtsLocked(

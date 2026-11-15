@@ -3,8 +3,11 @@ package com.zjr.hesimusic.loop.audio
 import android.os.Handler
 import android.os.Looper
 import com.zjr.hesimusic.loop.LoopWindow
+import java.io.BufferedWriter
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
+import java.io.OutputStreamWriter
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -85,6 +88,9 @@ class LoopAudioController @Inject constructor() {
     init {
         engine.requirePreallocation()
         engine.onDegrade = { targetRawUs -> handleEngineDegrade(targetRawUs) }
+        engine.onSeam = { iter, outReplayFrames, ptsUs ->
+            onEngineSeam(iter, outReplayFrames, ptsUs)
+        }
     }
 
     /** 当前歌整曲时长（µs），会话层 getDuration 投影用。 */
@@ -119,6 +125,12 @@ class LoopAudioController @Inject constructor() {
     private var tapDataBytes: Long = 0L
     private var tapFailed = false
 
+    // tap 侧车事件: <file.name>.jsonl
+    private var tapEventFile: File? = null
+    private var tapEventOut: BufferedWriter? = null
+    private var tapEventSeq: Long = 0L
+    private var tapEventStartNanos: Long = 0L
+
     private data class TapFormat(
         val sampleRate: Int,
         val channels: Int,
@@ -135,9 +147,18 @@ class LoopAudioController @Inject constructor() {
             if (tapFile == file) return
             closeTapLocked()
             tapFile = file
+            tapEventFile = file?.let {
+                val name = it.name + ".jsonl"
+                it.parentFile?.let { parent -> File(parent, name) } ?: File(name)
+            }
+            tapEventOut = null
+            tapEventSeq = 0L
+            tapEventStartNanos = 0L
             tapFailed = false
             if (file != null && tapFormat != null) {
                 openTapLocked()
+                openTapEventsLocked()
+                writeTapConfigureLocked()
             }
         }
     }
@@ -173,6 +194,11 @@ class LoopAudioController @Inject constructor() {
                 closeTapLocked()
                 tapFailed = false
                 openTapLocked()
+                openTapEventsLocked()
+                writeTapConfigureLocked()
+            } else if (tapFile != null) {
+                // 同一 WAV 继续写；新 sink/流只追加一条 configure。
+                writeTapConfigureLocked()
             }
         }
     }
@@ -183,6 +209,9 @@ class LoopAudioController @Inject constructor() {
 
     internal fun onSinkFlush() {
         engine.onFlush()
+        synchronized(tapLock) {
+            writeTapEventLocked("flush")
+        }
     }
 
     internal fun onSinkReset() {
@@ -236,6 +265,9 @@ class LoopAudioController @Inject constructor() {
     // ------------------------------------------------------------ 降级回调
 
     private fun handleEngineDegrade(targetRawUs: Long) {
+        synchronized(tapLock) {
+            writeTapEventLocked("degrade", "targetRawUs" to targetRawUs)
+        }
         var callback: ((Long) -> Unit)? = null
         synchronized(degradeLock) {
             callback = onDegradeRequested
@@ -302,25 +334,121 @@ class LoopAudioController @Inject constructor() {
     }
 
     private fun closeTapLocked() {
-        val out = tapOut ?: return
-        tapOut = null
         val fmt = tapFormat
-        try {
-            if (fmt != null) {
-                out.seek(0L)
-                out.write(buildWavHeader(fmt, tapDataBytes))
+        val bpf = fmt?.bytesPerFrame ?: 0
+        val totalFrames = if (bpf > 0) tapDataBytes / bpf else 0L
+        writeTapEventLocked("end", "totalFrames" to totalFrames)
+        closeTapEventLocked()
+
+        val out = tapOut
+        tapOut = null
+        if (out != null) {
+            try {
+                if (fmt != null) {
+                    out.seek(0L)
+                    out.write(buildWavHeader(fmt, tapDataBytes))
+                }
+            } catch (e: IOException) {
+                tapFailed = true
+            } finally {
+                try {
+                    out.close()
+                } catch (e: IOException) {
+                    // ignore
+                }
+                tapDataBytes = 0L
             }
+        } else {
+            tapDataBytes = 0L
+        }
+    }
+
+    private fun onEngineSeam(iter: Long, engineOutFrames: Long, ptsUs: Long) {
+        synchronized(tapLock) {
+            val bpf = tapFormat?.bytesPerFrame ?: 0
+            val outFrames = if (bpf > 0 && tapDataBytes > 0L) {
+                tapDataBytes / bpf
+            } else {
+                engineOutFrames
+            }
+            writeTapEventLocked(
+                "seam",
+                "iter" to iter,
+                "outFrames" to outFrames,
+                "ptsUs" to ptsUs,
+            )
+        }
+    }
+
+    private fun openTapEventsLocked() {
+        val file = tapEventFile ?: return
+        try {
+            file.parentFile?.mkdirs()
+            val stream = FileOutputStream(file, false)
+            tapEventOut = BufferedWriter(OutputStreamWriter(stream, Charsets.UTF_8))
+            tapEventStartNanos = System.nanoTime()
+            tapEventSeq = 0L
         } catch (e: IOException) {
-            tapFailed = true
-        } finally {
+            tapEventOut = null
+        }
+    }
+
+    private fun closeTapEventLocked() {
+        val out = tapEventOut ?: return
+        tapEventOut = null
+        try {
+            out.flush()
+            out.close()
+        } catch (e: IOException) {
+            // ignore
+        }
+    }
+
+    private fun writeTapConfigureLocked() {
+        val fmt = tapFormat ?: return
+        writeTapEventLocked(
+            "configure",
+            "sr" to fmt.sampleRate,
+            "ch" to fmt.channels,
+            "bpf" to fmt.bytesPerFrame,
+        )
+    }
+
+    private fun writeTapEventLocked(event: String, vararg fields: Pair<String, Any?>) {
+        val out = tapEventOut ?: return
+        val now = System.nanoTime()
+        val tMs = if (tapEventStartNanos == 0L) 0L else (now - tapEventStartNanos) / 1_000_000L
+        tapEventSeq += 1L
+        val sb = StringBuilder(128)
+        sb.append("{\"t\":").append(tMs)
+        sb.append(",\"seq\":").append(tapEventSeq)
+        sb.append(",\"ev\":\"").append(escapeJson(event)).append('"')
+        for ((key, value) in fields) {
+            sb.append(",\"").append(escapeJson(key)).append("\":")
+            when (value) {
+                null -> sb.append("null")
+                is Number -> sb.append(value)
+                is Boolean -> sb.append(value)
+                else -> sb.append('"').append(escapeJson(value.toString())).append('"')
+            }
+        }
+        sb.append('}')
+        try {
+            out.write(sb.toString())
+            out.newLine()
+            out.flush()
+        } catch (e: IOException) {
+            tapEventOut = null
             try {
                 out.close()
             } catch (e: IOException) {
                 // ignore
             }
-            tapDataBytes = 0L
         }
     }
+
+    private fun escapeJson(value: String): String =
+        value.replace("\\", "\\\\").replace("\"", "\\\"")
 
     private fun buildWavHeader(fmt: TapFormat, dataBytes: Long): ByteArray {
         val header = ByteArray(44)

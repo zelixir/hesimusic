@@ -1,6 +1,7 @@
 package com.zjr.hesimusic.loop.audio
 
 import android.media.AudioFormat
+import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.util.UnstableApi
@@ -18,6 +19,13 @@ import java.nio.ByteOrder
  * - delegate 没吃完时必须复用**同一个** ByteBuffer 实例重试；
  * - release 后置 disabled，防止收尾期被再次泵入（探针曾在 stop 后多打一个 seam）；
  * - 重放期不调用 delegate.playToEndOfStream() / 不进入 ended 态（AudioTrack 不 stop）。
+ *
+ * 时间域约定（生产实现的核心不变量）：
+ * - engine 内部：capture/plan/currentPosition/replay chunk 全部是**媒体时间**（0 起）；
+ * - delegate：handleBuffer PTS = 引擎媒体时间 + 当前 outputStreamOffsetUs；
+ * - controller.positionUs：媒体时间（getCurrentPositionUs 已归一化）；
+ * - outputStreamOffsetUs 可能先于 configure 被 ExoPlayer 设置（探针实测 1e12），
+ *   所以 configure 绝不能重置它，只能在 setOutputStreamOffsetUs 回调里更新。
  *
  * 本类不 import 任何 android.* 运行时 API（只用 media3 的 Format/C），因此可以在
  * JVM 单测里配 FakeAudioSink 直接跑。
@@ -62,13 +70,23 @@ class LoopAudioSink(
     /** ring 预分配未完成时的背压重试计数。 */
     private var preallocRetries: Int = 0
 
+    // ---- LoopPerf 诊断计数（1Hz Log.d） ----
+    private var pumpCalls: Long = 0L
+    private var pumpWriteFrames: Long = 0L
+    private var lastPumpWrote: Long = 0L
+    private var playToEndCalls: Long = 0L
+    private var isEndedCalls: Long = 0L
+    private var lastDelegateEnded: Boolean = false
+    private var positionPumpCalls: Long = 0L
+    private var lastPerfLogNanos: Long = 0L
+
     /** 上一次同步给引擎的窗口；窗口变化时丢弃旧窗口的 pending 重放 chunk。 */
     private var observedWindow: LoopWindow? = null
 
     private class PendingInput(
         val buffer: ByteBuffer,
-        /** 这段输入第一个样本的 PTS（可能含 outputStreamOffsetUs）。 */
-        val basePtsUs: Long,
+        /** 这段输入第一个样本的媒体时间 PTS（已归一化，不含 output offset）。 */
+        val baseMediaPtsUs: Long,
         /** plan 的转发起点（绝对 buffer 偏移）。 */
         val forwardStartOffset: Int,
         /** plan 的转发终点（绝对 buffer 偏移，= B 截断点）。 */
@@ -79,7 +97,7 @@ class LoopAudioSink(
     private class PendingReplay(
         val chunk: LoopPcmEngine.ReplayChunk,
         val buffer: ByteBuffer,
-        /** 剩余数据第一个样本的 PTS（每次部分消费后按帧推进）。 */
+        /** 剩余数据第一个样本的**媒体时间** PTS；写 delegate 时再加当前 output offset。 */
         var ptsUs: Long,
     )
 
@@ -94,7 +112,9 @@ class LoopAudioSink(
         configured = sampleRate > 0 && channelCount > 0 && bpf > 0
         released = false
         disabled = false
-        outputStreamOffsetUs = 0L
+        // 注意：不要在这里重置 outputStreamOffsetUs。
+        // ExoPlayer 会在 configure 之前先调 setOutputStreamOffsetUs（探针实测 1e12），
+        // 重置会把 sink 时间轴打回媒体时间，导致 PTS 与 A/B 不同域、捕获永不命中。
         pendingInput = null
         pendingReplay = null
 
@@ -140,12 +160,30 @@ class LoopAudioSink(
             pendingInput = null
         }
 
-        val mediaPts = presentationTimeUs - outputStreamOffsetUs
         val frames = buffer.remaining() / bytesPerFrame
         if (frames <= 0) {
-            // 不足一帧：交给 delegate 自行处理（通常是空 buffer）。
+            // 空 buffer 在重放态也要消费掉，避免 renderer 因 false 反复重试空 buffer。
+            if (engine.state == LoopPcmEngine.State.REPLAYING) {
+                pump()
+                buffer.position(buffer.limit())
+                return true
+            }
             return super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
         }
+
+        // 引擎只看媒体时间（0 起）；delegate 仍看“媒体时间 + 当前 output offset”。
+        // 重放态节流：只有 pump() 真的写出 >0 帧，才消费/丢弃这个输入 buffer。
+        // 否则返回 false 让 renderer 重试（重试即再次泵），解码器不会被喂到 EOS。
+        if (engine.state == LoopPcmEngine.State.REPLAYING) {
+            val written = pump()
+            if (written > 0L) {
+                buffer.position(buffer.limit())
+                return true
+            }
+            return false
+        }
+
+        val mediaPts = presentationTimeUs - outputStreamOffsetUs
 
         val plan = engine.onBuffer(mediaPts, frames, buffer)
         if (plan.discard || plan.forwardLength <= 0) {
@@ -164,7 +202,11 @@ class LoopAudioSink(
         buffer.position(start)
         buffer.limit(end)
         val before = buffer.position()
-        val accepted = super.handleBuffer(buffer, presentationTimeUs, 1)
+        val accepted = super.handleBuffer(
+            buffer,
+            mediaPts + outputStreamOffsetUs,
+            1,
+        )
         val after = buffer.position()
         if (after > before) {
             controller.tapPcm(buffer, before, after - before)
@@ -181,7 +223,7 @@ class LoopAudioSink(
 
         pendingInput = PendingInput(
             buffer = buffer,
-            basePtsUs = presentationTimeUs,
+            baseMediaPtsUs = mediaPts,
             forwardStartOffset = start,
             forwardEndOffset = end,
             plan = plan,
@@ -190,6 +232,7 @@ class LoopAudioSink(
     }
 
     override fun playToEndOfStream() {
+        playToEndCalls += 1L
         if (loopEngaged()) {
             // 源端 EOS 兜底：最后一个 buffer 可能恰好停在 B 前一帧，没触发 crossedB。
             if (engine.state == LoopPcmEngine.State.CAPTURING && !engine.onInputEnded()) {
@@ -205,14 +248,22 @@ class LoopAudioSink(
     }
 
     override fun isEnded(): Boolean {
+        isEndedCalls += 1L
         if (loopEngaged()) {
             pump()
             return false
         }
-        return super.isEnded()
+        val ended = super.isEnded()
+        lastDelegateEnded = ended
+        return ended
     }
 
     override fun getCurrentPositionUs(forceDiscontinuityPosition: Boolean): Long {
+        // EOS 兜底：若 renderer 不再调 playToEndOfStream/isEnded，位置查询仍可驱动泵。
+        if (!released && !disabled && engine.state == LoopPcmEngine.State.REPLAYING) {
+            positionPumpCalls += 1L
+            pump()
+        }
         val raw = super.getCurrentPositionUs(forceDiscontinuityPosition)
         if (!released) {
             if (raw != AudioSink.CURRENT_POSITION_NOT_SET) {
@@ -228,8 +279,8 @@ class LoopAudioSink(
     }
 
     /**
-     * delegate 位置 -> 媒体位置。ExoPlayer 通常给 PTS 加一个较大的 outputStreamOffset
-     * （探针实测 1e12），但重放期我们喂的是媒体时间 PTS，delegate 位置可能已经是媒体时间。
+     * delegate 位置 -> 媒体位置。正常路径下 delegate 位置 = outputOffset + media；
+     * 少数内部 reset 情况下可能已经是 media，因此 raw < offset 时不再减。
      */
     private fun toMediaPositionUs(rawUs: Long): Long {
         val offset = outputStreamOffsetUs
@@ -296,11 +347,15 @@ class LoopAudioSink(
         val consumedFrames = (
             (buffer.position() - p.forwardStartOffset).coerceAtLeast(0) / bytesPerFrame
             ).toLong()
-        val ptsUs = p.basePtsUs + consumedFrames * 1_000_000L / sampleRate
+        val mediaPtsUs = p.baseMediaPtsUs + consumedFrames * 1_000_000L / sampleRate
         buffer.limit(p.forwardEndOffset)
 
         val before = buffer.position()
-        val accepted = super.handleBuffer(buffer, ptsUs, 1)
+        val accepted = super.handleBuffer(
+            buffer,
+            mediaPtsUs + outputStreamOffsetUs,
+            1,
+        )
         val after = buffer.position()
         if (after > before) {
             controller.tapPcm(buffer, before, after - before)
@@ -317,8 +372,23 @@ class LoopAudioSink(
         return false
     }
 
-    /** renderer 的 ~100Hz 轮询驱动的泵：把 ring 经 delegate 继续喂回去。 */
-    private fun pump() {
+    /**
+     * renderer 的 ~100Hz 轮询驱动的泵：把 ring 经 delegate 继续喂回去。
+     *
+     * @return 本次实际写进 delegate 的帧数。0 表示 delegate 满/不可写。
+     */
+    private fun pump(): Long {
+        val before = engine.totalReplayFrames
+        pumpCalls += 1L
+        pumpBody()
+        val written = engine.totalReplayFrames - before
+        lastPumpWrote = written
+        pumpWriteFrames += written
+        maybeLogPerf()
+        return written
+    }
+
+    private fun pumpBody() {
         if (released || disabled) return
         if (engine.state != LoopPcmEngine.State.REPLAYING) {
             pendingReplay = null
@@ -350,7 +420,8 @@ class LoopAudioSink(
         val bb = pending.buffer
         val before = bb.position()
         try {
-            super.handleBuffer(bb, pending.ptsUs, 1)
+            // pending.ptsUs 是引擎媒体时间；delegate 必须看到同一 offset 域。
+            super.handleBuffer(bb, pending.ptsUs + outputStreamOffsetUs, 1)
         } catch (t: Throwable) {
             engine.onReplayFailure()
             pendingReplay = null
@@ -370,6 +441,28 @@ class LoopAudioSink(
             return false
         }
         return true
+    }
+
+    /** 1Hz 低频诊断：确认 EOS 后 renderer 是否还在调 playToEndOfStream/isEnded。 */
+    private fun maybeLogPerf() {
+        val now = System.nanoTime()
+        if (now - lastPerfLogNanos < PERF_LOG_INTERVAL_NANOS) return
+        lastPerfLogNanos = now
+        val message = "state=" + engine.state +
+            " pumpWrites=" + pumpWriteFrames +
+            " pumpCalls=" + pumpCalls +
+            " lastPump=" + lastPumpWrote +
+            " pendingReplay=" + (pendingReplay != null) +
+            " pendingInput=" + (pendingInput != null) +
+            " playToEnd=" + playToEndCalls +
+            " isEndedCalls=" + isEndedCalls +
+            " lastDelegateEnded=" + lastDelegateEnded +
+            " posPumps=" + positionPumpCalls
+        try {
+            Log.d("LoopPerf", message)
+        } catch (t: Throwable) {
+            // JVM 单测的 android.jar 是 stub；生产环境不会走到这里。
+        }
     }
 
     private fun replayChunkBytes(): Int {
@@ -395,5 +488,8 @@ class LoopAudioSink(
 
         /** 预分配背压上限：约 2s（renderer ~100Hz 轮询）。 */
         const val MAX_PREALLOC_RETRIES = 200
+
+        /** LoopPerf 诊断日志间隔。 */
+        const val PERF_LOG_INTERVAL_NANOS = 1_000_000_000L
     }
 }
