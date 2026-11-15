@@ -25,6 +25,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -33,8 +34,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import com.zjr.hesimusic.ui.common.LoopBarMarkerOverlay
+import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.utils.TimeFormatter
 
 @Composable
@@ -58,9 +62,15 @@ fun BottomPlayerBar(
     onSleepTimerClick: () -> Unit,
     onLogsClick: () -> Unit,
     sleepTimerRemaining: Long?,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    // 与 MainScreen 同属一个导航条目,默认解析到同一个 MusicViewModel 实例
+    viewModel: MusicViewModel = hiltViewModel()
 ) {
     var showMenu by remember { mutableStateOf(false) }
+
+    // 只在绘制阶段读(见 LoopBarMarkerOverlay):窗口变化只重绘进度线标记层,不重组整条播放条。
+    // 未命中当前歌时该值为 null → 标记层一个像素都不画(普通播放零改动)。
+    val loopWindowState = viewModel.activeLoopWindow.collectAsState()
 
     Surface(
         modifier = modifier
@@ -72,14 +82,26 @@ fun BottomPlayerBar(
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             if (duration > 0) {
-                LinearProgressIndicator(
-                    progress = { (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f) },
+                // 细进度条 + 无缝循环 A/B 标记层(标记层与进度条同尺寸叠放)
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(2.dp),
-                    color = MaterialTheme.colorScheme.primary,
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
-                )
+                        .height(2.dp)
+                ) {
+                    LinearProgressIndicator(
+                        progress = { (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(2.dp),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                    )
+                    LoopBarMarkerOverlay(
+                        window = loopWindowState,
+                        durationMs = duration,
+                        modifier = Modifier.matchParentSize(),
+                    )
+                }
             } else {
                 Spacer(modifier = Modifier.fillMaxWidth().height(2.dp))
             }

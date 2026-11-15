@@ -28,6 +28,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.zjr.hesimusic.ui.common.LoopSliderMarkerOverlay
 import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.utils.TimeFormatter
 
@@ -39,6 +40,8 @@ fun PlayerScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val sleepTimerState by viewModel.sleepTimerState.collectAsState()
+    // 命中当前歌的无缝窗口;只在标记层的 DrawScope 里读值,窗口变化只重绘、不重组本页
+    val loopWindowState = viewModel.activeLoopWindow.collectAsState()
     
     var showQueue by remember { mutableStateOf(false) }
     var showSleepTimer by remember { mutableStateOf(false) }
@@ -140,12 +143,21 @@ fun PlayerScreen(
             Column {
                 // Ensure valid range for Slider: duration must be positive
                 val safeDuration = if (uiState.duration > 0) uiState.duration else 1L
+                // 位置已是展示口径(MusicViewModel 已做幂等折返,跨 B 的外推不会冲出区间)
                 val safePosition = uiState.currentPosition.coerceIn(0L, safeDuration)
-                Slider(
-                    value = safePosition.toFloat(),
-                    onValueChange = { viewModel.seekTo(it.toLong()) },
-                    valueRange = 0f..safeDuration.toFloat()
-                )
+                // 滑条 + 无缝循环 A/B 标记层(未命中当前歌时标记层不画任何像素)
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    Slider(
+                        value = safePosition.toFloat(),
+                        onValueChange = { viewModel.seekTo(it.toLong()) },
+                        valueRange = 0f..safeDuration.toFloat()
+                    )
+                    LoopSliderMarkerOverlay(
+                        window = loopWindowState,
+                        durationMs = uiState.duration,
+                        modifier = Modifier.matchParentSize(),
+                    )
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
