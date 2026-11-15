@@ -119,3 +119,28 @@ repeat one|all|off / 切歌(已确认·未确认) / confirm / demote / delete / 
 - e2e-results.json:{id, status, metrics, evidence[], startedAt, durationMs}
 - e2e-shots/<case>/":截图、JSONL 片段、logcat 摘录
 - e2e-artifacts/:L3 的 tap.wav/tap.jsonl 与 analyzer 报告(体积大,不入库)
+---
+
+## 7. 已获得的回归证据(滚动记录)
+
+### 7.1 DB 迁移(v7 → v9)与旧数据保留
+
+真机(OnePlus 8T)上从既有安装升级后,拉取 `databases/hesimusic_db` 用 bun:sqlite 检查:
+
+```
+user_version = 9
+tables = android_metadata,favorites,hidden_songs,logs,playlist_entries,playlists,
+         room_master_table,smart_playlists,song_loop,songs,sqlite_sequence
+songs = 1327    playlist_entries = 0    favorites = 0    hidden_songs = 0
+song_loop = 5   smart_playlists = 1(无缝循环)
+```
+
+- 1327 首歌的库在 v7→v8(建 song_loop)→v9(加 confirmed)迁移后完整保留;
+- 旧 GLM 版本留下的 `song_loop` 行被正确读出(存量行 confirmed 默认 1);
+- 内置智能歌单「无缝循环」种子 SQL 生效,sqlText = 
+  `SELECT * FROM songs WHERE id IN (SELECT songId FROM song_loop WHERE confirmed = 1)`。
+
+### 7.2 备份/恢复包含循环点(v4)
+
+备份 JSON 新增 `songLoops` 数组(11 个字段/song_loop 行),导入时整表替换;
+旧备份(v≤3)无该字段 → 跳过,不做破坏性清空以外的动作;导入后 `song_loop` 行数与备份一致。
