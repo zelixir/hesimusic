@@ -205,9 +205,9 @@ class LoopAudioSinkTest {
         sink.flush()
         assertTrue(controller.isRingComplete)
 
-        // 播放到 B 前一帧（199 帧）后源端结束，没有 crossedB。
+        // flush 后从前奏播到 B 前一帧（199 帧），源端结束，没有 crossedB。
         val afterFlush = fake.feeds.size
-        assertTrue(sink.handleBuffer(PcmTestSupport.pcm16Buffer(190, 9), 190_000L, 1))
+        assertTrue(sink.handleBuffer(PcmTestSupport.pcm16Buffer(0, 199), 0L, 1))
         assertFalse("尚未触发 crossedB", controller.isReplaying)
 
         val playToEndBefore = fake.playToEndCalls
@@ -618,6 +618,72 @@ class LoopAudioSinkTest {
 
         assertTrue("位置查询应作为 EOS 兜底驱动泵", fake.feeds.isNotEmpty())
         assertTrue(fake.feeds.sumOf { it.frames } > 0)
+    }
+
+    @Test
+    fun `flush 后输入 PTS 落在区间内部时从该相位继续`() {
+        val (controller, sink, fake) = rig()
+        assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(0, 250), 0L))
+        assertTrue(controller.isReplaying)
+
+        // seek 后的 flush：ring 保留且完整
+        sink.flush()
+        assertTrue(controller.isRingComplete)
+        val afterFlush = fake.feeds.size
+
+        // 新输入到来前 renderer 可能调 playToEndOfStream：不得先按 0 进重放
+        val playToEndBefore = fake.playToEndCalls
+        sink.playToEndOfStream()
+        assertFalse(controller.isReplaying)
+        assertEquals("等待相位输入时不得转发 delegate EOS", playToEndBefore, fake.playToEndCalls)
+
+        // 输入 PTS = A+20 帧（区间内部）
+        val ptsUs = 120_000L
+        assertTrue(
+            sink.handleBuffer(
+                PcmTestSupport.pcm16Buffer(120, 10),
+                ptsUs,
+                1,
+            )
+        )
+
+        assertTrue("应立刻重新进入重放", controller.isReplaying)
+        val replay = fake.feeds.drop(afterFlush).firstOrNull { it.ptsUs >= ptsUs }
+        assertTrue("应产生重放输出", replay != null)
+        assertEquals("首个重放 PTS 应等于输入 PTS", ptsUs, replay!!.ptsUs)
+        assertArrayEquals(
+            "输出前 10 帧应来自源 A+20 帧",
+            PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(120, 10)),
+            replay.bytes.copyOfRange(0, 20),
+        )
+    }
+
+    @Test
+    fun `discontinuity 未伴随 flush 时也按输入 PTS 重定位`() {
+        val (controller, sink, fake) = rig()
+        assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(0, 250), 0L))
+        assertTrue(controller.isReplaying)
+        val after = fake.feeds.size
+
+        sink.handleDiscontinuity()
+        val ptsUs = 120_000L
+        assertTrue(
+            sink.handleBuffer(
+                PcmTestSupport.pcm16Buffer(120, 10),
+                ptsUs,
+                1,
+            )
+        )
+
+        assertTrue(controller.isReplaying)
+        val replay = fake.feeds.drop(after).firstOrNull { it.ptsUs >= ptsUs }
+        assertTrue("应产生重放输出", replay != null)
+        assertEquals("首个重放 PTS 应等于输入 PTS", ptsUs, replay!!.ptsUs)
+        assertArrayEquals(
+            "输出前 10 帧应来自源 A+20 帧",
+            PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(120, 10)),
+            replay.bytes.copyOfRange(0, 20),
+        )
     }
 
     @Test

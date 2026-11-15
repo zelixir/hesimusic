@@ -254,8 +254,8 @@ class LoopPcmEngineTest {
         engine.onFlush()
         assertTrue(engine.isRingComplete)
 
-        // 从 190 帧播放到 199 帧（最后一帧停在 B 之前），没有触发 crossedB
-        val tail = engine.onBuffer(190_000L, 9, PcmTestSupport.pcm16Buffer(190, 9))
+        // flush 后从 0 播到 199 帧（前奏路径，最后一帧停在 B 之前），没有触发 crossedB
+        val tail = engine.onBuffer(0L, 199, PcmTestSupport.pcm16Buffer(0, 199))
         assertFalse("结束于 B 前一帧的 buffer 不触发 crossedB", tail.enterReplayWhenDrained)
         engine.onInputDrained(tail)
         assertEquals("仍应处于捕获态", LoopPcmEngine.State.CAPTURING, engine.state)
@@ -470,6 +470,92 @@ class LoopPcmEngineTest {
     }
 
     @Test
+    fun `ring 完整时输入 PTS 落在区间内部立即按相位进入重放`() {
+        val engine = newEngine()
+        engine.setWindow(window(100, 200))
+        // 先完整捕获并进入过重放，再 flush 模拟 seek
+        val setup = engine.onBuffer(0L, 250, PcmTestSupport.pcm16Buffer(0, 250))
+        engine.onInputDrained(setup)
+        engine.onFlush()
+        assertTrue(engine.isRingComplete)
+        // 等待新输入期间 EOS 兜底不得先按 0 进重放
+        assertFalse(engine.onInputEnded())
+        assertEquals("等待新输入时应保持捕获态", LoopPcmEngine.State.CAPTURING, engine.state)
+        val capturedBefore = engine.capturedFrames
+
+        // 输入 PTS = A+20 帧（区间内部）
+        val seekPlan = engine.onBuffer(120_000L, 10, PcmTestSupport.pcm16Buffer(120, 10))
+
+        assertTrue("区间内部输入应直接丢弃", seekPlan.discard)
+        assertFalse("已经直接进入重放，不再等待 drain", seekPlan.enterReplayWhenDrained)
+        assertEquals("应进入重放", LoopPcmEngine.State.REPLAYING, engine.state)
+        assertEquals("环内游标 = PTS-A", 20L, seekPlan.entryCursorFrames)
+        assertEquals("round=0 表示从 B 前的不完整轮次开始", 0L, seekPlan.entryRound)
+        assertEquals("seek 不得改变 ring 捕获进度", capturedBefore, engine.capturedFrames)
+
+        val chunk = engine.pumpChunk(1 shl 20)!!
+        assertEquals("首个 chunk 环内偏移", 20L, chunk.frameOffsetInRound)
+        assertEquals("首个 chunk 轮次 0", 0L, chunk.round)
+        assertEquals("首个 chunk PTS = 输入 PTS", 120_000L, chunk.ptsUs)
+        assertEquals("从环内 20 帧播到 B", 80, chunk.frames)
+        assertArrayEquals(
+            "输出内容应来自源 A+20 帧",
+            pcmBytes(120, 80),
+            chunkBytes(engine, chunk),
+        )
+    }
+
+    @Test
+    fun `ring 完整时输入 PTS 恰好为 A 游标为 0`() {
+        val engine = newEngine()
+        engine.setWindow(window(100, 200))
+        val setup = engine.onBuffer(0L, 250, PcmTestSupport.pcm16Buffer(0, 250))
+        engine.onInputDrained(setup)
+        engine.onFlush()
+
+        val plan = engine.onBuffer(100_000L, 10, PcmTestSupport.pcm16Buffer(100, 10))
+        assertEquals(0L, plan.entryCursorFrames)
+        assertEquals(0L, plan.entryRound)
+        val chunk = engine.pumpChunk(1 shl 20)!!
+        assertEquals(0L, chunk.frameOffsetInRound)
+        assertEquals(100_000L, chunk.ptsUs)
+        assertEquals("应播放完整一圈", 100, chunk.frames)
+    }
+
+    @Test
+    fun `ring 完整时输入 PTS 为 B 前一帧游标为 L-1`() {
+        val engine = newEngine()
+        engine.setWindow(window(100, 200))
+        val setup = engine.onBuffer(0L, 250, PcmTestSupport.pcm16Buffer(0, 250))
+        engine.onInputDrained(setup)
+        engine.onFlush()
+
+        val pts = 199_000L
+        val plan = engine.onBuffer(pts, 1, PcmTestSupport.pcm16Buffer(199, 1))
+        assertEquals(99L, plan.entryCursorFrames)
+        assertEquals(0L, plan.entryRound)
+        val chunk = engine.pumpChunk(1 shl 20)!!
+        assertEquals(99L, chunk.frameOffsetInRound)
+        assertEquals(pts, chunk.ptsUs)
+        assertEquals("只剩 B 前 1 帧", 1, chunk.frames)
+    }
+
+    @Test
+    fun `ring 不完整时区间内部输入仍走捕获`() {
+        val engine = newEngine()
+        engine.setWindow(window(100, 200))
+        engine.onFlush() // 设置 post-flush 相位入口标记
+        assertFalse(engine.isRingComplete)
+
+        val plan = engine.onBuffer(120_000L, 10, PcmTestSupport.pcm16Buffer(120, 10))
+
+        assertEquals("ring 不完整时不得直接进入重放", LoopPcmEngine.State.CAPTURING, engine.state)
+        assertFalse("应正常转发/捕获", plan.discard)
+        assertEquals("应捕获到环内", 10L, engine.capturedFrames)
+        assertFalse(engine.isRingComplete)
+    }
+
+    @Test
     fun `ring 不完整时相位保持 0 且仍然降级`() {
         val engine = newEngine()
         engine.setWindow(window(100, 200))
@@ -493,6 +579,25 @@ class LoopPcmEngineTest {
         engine.onInputDrained(seekPlan)
         assertEquals("ring 不完整应维持降级，不进入重放", LoopPcmEngine.State.PASS_THROUGH, engine.state)
         assertFalse(engine.state == LoopPcmEngine.State.REPLAYING)
+    }
+
+    @Test
+    fun `REPLAYING 中 discontinuity 后按输入 PTS 重定位`() {
+        val engine = newEngine()
+        engine.setWindow(window(100, 200))
+        val setup = engine.onBuffer(0L, 250, PcmTestSupport.pcm16Buffer(0, 250))
+        engine.onInputDrained(setup)
+        assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
+
+        engine.onInputDiscontinuity()
+        assertTrue(engine.isPostFlushPhasePending())
+        assertTrue("区间内部 PTS 应重定位成功", engine.tryRephaseFromInput(120_000L))
+        assertFalse(engine.isPostFlushPhasePending())
+
+        val chunk = engine.pumpChunk(1 shl 20)!!
+        assertEquals(20L, chunk.frameOffsetInRound)
+        assertEquals(0L, chunk.round)
+        assertEquals(120_000L, chunk.ptsUs)
     }
 
     @Test

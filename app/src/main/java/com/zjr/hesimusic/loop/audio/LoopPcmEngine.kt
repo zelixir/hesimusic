@@ -177,6 +177,12 @@ class LoopPcmEngine {
     private var incompleteDegraded = false
     private var replayUnavailable = false
 
+    /** flush/discontinuity 后的首个输入是否可用于“区间内部 seek”相位定位。 */
+    private var pendingPostFlushPhase = false
+
+    /** 侧车 seam.iter：每次进入重放从 1 开始，折返递增。 */
+    private var seamIteration = 0L
+
     /** 是否由 controller 要求“音频线程不做大分配”（生产路径）。 */
     private var preallocationRequired = false
     private var preallocated: Preallocated? = null
@@ -423,6 +429,67 @@ class LoopPcmEngine {
         state = State.PASS_THROUGH
     }
 
+    /** AudioSink.handleDiscontinuity 通知：下一次输入可按 PTS 重新定位重放相位。 */
+    @Synchronized
+    fun onInputDiscontinuity() {
+        if (!released) pendingPostFlushPhase = true
+    }
+
+    /** flush/discontinuity 后是否还在等待“下一段输入”来决定重放入口相位。 */
+    @Synchronized
+    fun isPostFlushPhasePending(): Boolean = pendingPostFlushPhase
+
+    /**
+     * REPLAYING 中收到 discontinuity 后的第一段输入：ring 完整时按 PTS 立即重定位，
+     * 不需要依赖 flush。返回 true 表示已重定位；false 时若 state 变为 CAPTURING，
+     * 调用方应把该输入按普通前奏路径处理。
+     */
+    @Synchronized
+    fun tryRephaseFromInput(frameTimeUs: Long): Boolean {
+        if (!pendingPostFlushPhase) return false
+        val r = ensureRegionLocked() ?: return false
+        val fmt = format ?: return false
+        val startFrameAbs = frameFromUsRounded(frameTimeUs, fmt.sampleRate)
+        if (!isRingComplete) {
+            pendingPostFlushPhase = false
+            return false
+        }
+        if (startFrameAbs >= r.aFrame && startFrameAbs < r.bFrame) {
+            pendingPostFlushPhase = false
+            state = State.REPLAYING
+            cursorFrames = startFrameAbs - r.aFrame
+            round = 0L
+            pendingChunk = null
+            pendingConsumedBytes = 0
+            pendingAdvancedFrames = 0L
+            seamIteration = 0L
+            if (cursorFrames == 0L) notifySeamLocked()
+            return true
+        }
+        if (startFrameAbs >= r.bFrame) {
+            pendingPostFlushPhase = false
+            state = State.REPLAYING
+            cursorFrames = entryCursorFramesLocked(startFrameAbs, r)
+            round = entryRoundLocked(startFrameAbs, r)
+            pendingChunk = null
+            pendingConsumedBytes = 0
+            pendingAdvancedFrames = 0L
+            seamIteration = 0L
+            if (cursorFrames == 0L) notifySeamLocked()
+            return true
+        }
+        // PTS < A：seek 到前奏，退出重放，让调用方按普通输入处理。
+        pendingPostFlushPhase = false
+        state = State.CAPTURING
+        cursorFrames = 0L
+        round = 1L
+        pendingChunk = null
+        pendingConsumedBytes = 0
+        pendingAdvancedFrames = 0L
+        seamIteration = 0L
+        return false
+    }
+
     /** 由服务层/调试显式废弃 ring（窗口变更等）。 */
     @Synchronized
     fun invalidateRing() {
@@ -489,6 +556,36 @@ class LoopPcmEngine {
 
         val startFrameAbs = frameFromUsRounded(frameTimeUs, fmt.sampleRate)
         val endFrameAbs = startFrameAbs + availableFrames
+
+        // flush/discontinuity 后：ring 完整且下一段输入直接落在 [A,B) 内部时，
+        // 立即按输入 PTS 的相位进入重放（不捕获、不改 ring）。典型场景:播放中 seek。
+        if (pendingPostFlushPhase) {
+            if (isRingComplete && startFrameAbs >= r.aFrame && startFrameAbs < r.bFrame) {
+                pendingPostFlushPhase = false
+                state = State.REPLAYING
+                cursorFrames = startFrameAbs - r.aFrame
+                // round=0 表示“从 B 前的一个不完整轮次开始”：
+                // PTS = B + (0-1)L + cursor = A + cursor = 输入 PTS，保证连续。
+                round = 0L
+                pendingChunk = null
+                pendingConsumedBytes = 0
+                pendingAdvancedFrames = 0L
+                // 只有从整轮起点(A)进入才记 seam；区间中部 seek 的首个部分是
+                // 不完整轮次，不该被 A2 当作正常接缝。
+                if (cursorFrames == 0L) notifySeamLocked()
+                return BufferPlan(
+                    forwardOffset = srcPos,
+                    forwardLength = 0,
+                    forwardFrames = 0,
+                    discard = true,
+                    enterReplayWhenDrained = false,
+                    entryCursorFrames = cursorFrames,
+                    entryRound = 0L,
+                )
+            }
+            // 前奏/≥B/ring 不完整等:本次不适用相位入口，正常走原有路径。
+            pendingPostFlushPhase = false
+        }
 
         // 先把 [A,B) 内的帧捕获到 ring（不改变 src 的 position）。
         val capStart = maxOf(startFrameAbs, r.aFrame)
@@ -561,7 +658,8 @@ class LoopPcmEngine {
         pendingConsumedBytes = 0
         pendingAdvancedFrames = 0L
         if (r.loopFrames <= 0L) state = State.PASS_THROUGH
-        notifySeamLocked()
+        // 从 B 之后 seek 进入时首轮可能是不完整的（cursor != 0），不记 seam。
+        if (cursorFrames == 0L) notifySeamLocked()
     }
 
     /**
@@ -574,6 +672,8 @@ class LoopPcmEngine {
     fun onInputEnded(): Boolean {
         if (released) return false
         if (state == State.REPLAYING) return true
+        // seek/flush 后还没看到新输入：不能先按 0 进入重放，否则会把 seek 落点吞成 A。
+        if (pendingPostFlushPhase) return false
         if (replayUnavailable) return false
         ensureRegionLocked() ?: return false
         if (!isRingComplete) {
@@ -683,6 +783,8 @@ class LoopPcmEngine {
         replayUnavailable = false
         incompleteDegraded = false
         degradeCallbackArmed = true
+        pendingPostFlushPhase = true
+        seamIteration = 0L
         pendingChunk = null
         pendingConsumedBytes = 0
         pendingAdvancedFrames = 0L
@@ -705,6 +807,8 @@ class LoopPcmEngine {
     @Synchronized
     fun onRelease() {
         released = true
+        pendingPostFlushPhase = false
+        seamIteration = 0L
         pendingChunk = null
         pendingConsumedBytes = 0
         pendingAdvancedFrames = 0L
@@ -883,6 +987,8 @@ class LoopPcmEngine {
         replayUnavailable = false
         preallocated = null
         degradeCallbackArmed = true
+        pendingPostFlushPhase = false
+        seamIteration = 0L
         cursorFrames = 0L
         round = 1L
         pendingChunk = null
@@ -973,8 +1079,9 @@ class LoopPcmEngine {
     private fun notifySeamLocked() {
         val r = region ?: return
         val fmt = format ?: return
+        seamIteration += 1L
         val cursor = if (state == State.REPLAYING) cursorFrames else 0L
-        onSeam?.invoke(round, totalReplayFrames, replayPtsLocked(cursor, round, r, fmt))
+        onSeam?.invoke(seamIteration, totalReplayFrames, replayPtsLocked(cursor, round, r, fmt))
     }
 
     private fun replayPtsLocked(

@@ -172,18 +172,27 @@ class LoopAudioSink(
         }
 
         // 引擎只看媒体时间（0 起）；delegate 仍看“媒体时间 + 当前 output offset”。
+        val mediaPts = presentationTimeUs - outputStreamOffsetUs
+
         // 重放态节流：只有 pump() 真的写出 >0 帧，才消费/丢弃这个输入 buffer。
         // 否则返回 false 让 renderer 重试（重试即再次泵），解码器不会被喂到 EOS。
         if (engine.state == LoopPcmEngine.State.REPLAYING) {
-            val written = pump()
-            if (written > 0L) {
+            // discontinuity 未伴随 flush 时，用第一段新输入 PTS 重新定位相位。
+            if (engine.isPostFlushPhasePending() && engine.tryRephaseFromInput(mediaPts)) {
                 buffer.position(buffer.limit())
+                pump()
                 return true
             }
-            return false
+            if (engine.state == LoopPcmEngine.State.REPLAYING) {
+                val written = pump()
+                if (written > 0L) {
+                    buffer.position(buffer.limit())
+                    return true
+                }
+                return false
+            }
+            // tryRephaseFromInput 把状态切回 CAPTURING（seek 到前奏）：落到下面正常处理。
         }
-
-        val mediaPts = presentationTimeUs - outputStreamOffsetUs
 
         val plan = engine.onBuffer(mediaPts, frames, buffer)
         if (plan.discard || plan.forwardLength <= 0) {
@@ -234,6 +243,10 @@ class LoopAudioSink(
     override fun playToEndOfStream() {
         playToEndCalls += 1L
         if (loopEngaged()) {
+            // seek/flush 后还没看到新输入：等待 handleBuffer 决定相位，不能先按 0 进重放。
+            if (engine.state == LoopPcmEngine.State.CAPTURING && engine.isPostFlushPhasePending()) {
+                return
+            }
             // 源端 EOS 兜底：最后一个 buffer 可能恰好停在 B 前一帧，没触发 crossedB。
             if (engine.state == LoopPcmEngine.State.CAPTURING && !engine.onInputEnded()) {
                 // ring 不完整 -> 已降级为直通，交还 delegate。
@@ -285,6 +298,11 @@ class LoopAudioSink(
     private fun toMediaPositionUs(rawUs: Long): Long {
         val offset = outputStreamOffsetUs
         return if (offset > 0L && rawUs >= offset) rawUs - offset else rawUs
+    }
+
+    override fun handleDiscontinuity() {
+        engine.onInputDiscontinuity()
+        super.handleDiscontinuity()
     }
 
     override fun setOutputStreamOffsetUs(offsetUs: Long) {
