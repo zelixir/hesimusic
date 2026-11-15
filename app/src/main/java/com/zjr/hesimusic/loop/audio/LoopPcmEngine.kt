@@ -66,6 +66,8 @@ class LoopPcmEngine {
      * [forwardOffset]/[forwardLength] 是**绝对** buffer 偏移（相对 ByteBuffer 0 位置），
      * 调用方只能把这段交给 delegate；[discard] 为 true 时整段输入应被消费但不转发。
      * [enterReplayWhenDrained] 表示这段输入全部被 delegate 吃掉后应尝试切到重放。
+     * [entryCursorFrames]/[entryRound] 是进入重放的初始环内游标/轮次：
+     * 仅当 ring 已完整且输入 PTS >= B 时按 PTS 折返相位计算，否则为 0/1。
      */
     data class BufferPlan(
         val forwardOffset: Int,
@@ -74,6 +76,8 @@ class LoopPcmEngine {
         val discard: Boolean,
         val enterReplayWhenDrained: Boolean,
         val degraded: Boolean = false,
+        val entryCursorFrames: Long = 0L,
+        val entryRound: Long = 1L,
     ) {
         val forwardEndOffset: Int get() = forwardOffset + forwardLength
     }
@@ -350,6 +354,8 @@ class LoopPcmEngine {
         // 注意用 >=：clip 源的最后一个 buffer 可能恰好结束在 B 上（此时没有尾部可裁），
         // 也必须在这一段消费完后立刻进入重放。
         val crossedB = endFrameAbs >= r.bFrame || startFrameAbs >= r.bFrame
+        val entryCursor = if (crossedB) entryCursorFramesLocked(startFrameAbs, r) else 0L
+        val entryRound = if (crossedB) entryRoundLocked(startFrameAbs, r) else 1L
 
         if (forwardFrames <= 0L) {
             return BufferPlan(
@@ -358,6 +364,8 @@ class LoopPcmEngine {
                 forwardFrames = 0,
                 discard = true,
                 enterReplayWhenDrained = crossedB,
+                entryCursorFrames = entryCursor,
+                entryRound = entryRound,
             )
         }
 
@@ -367,6 +375,8 @@ class LoopPcmEngine {
             forwardFrames = forwardFrames.toInt(),
             discard = false,
             enterReplayWhenDrained = crossedB,
+            entryCursorFrames = entryCursor,
+            entryRound = entryRound,
         )
     }
 
@@ -392,8 +402,12 @@ class LoopPcmEngine {
             return
         }
         state = State.REPLAYING
-        cursorFrames = 0L
-        round = 1L
+        cursorFrames = if (r.loopFrames > 0L) {
+            plan.entryCursorFrames.coerceIn(0L, r.loopFrames - 1L)
+        } else {
+            0L
+        }
+        round = plan.entryRound.coerceAtLeast(1L)
         pendingChunk = null
         pendingConsumedBytes = 0
         pendingAdvancedFrames = 0L
@@ -787,10 +801,26 @@ class LoopPcmEngine {
         }
     }
 
+    /**
+     * 进入重放时的初始游标：仅当 ring 完整且输入 PTS 已到/越过 B 时，按 PTS 在
+     * [A,B) 内的折返相位定位；常规跨越 B 的输入（PTS < B）维持 0。
+     */
+    private fun entryCursorFramesLocked(startFrameAbs: Long, r: Region): Long {
+        if (!isRingComplete || startFrameAbs < r.bFrame) return 0L
+        return Math.floorMod(startFrameAbs - r.aFrame, r.loopFrames)
+    }
+
+    /** 进入重放时的轮次：保证首个 chunk 的 PTS = 输入 PTS（媒体域连续）。 */
+    private fun entryRoundLocked(startFrameAbs: Long, r: Region): Long {
+        if (!isRingComplete || startFrameAbs < r.bFrame) return 1L
+        return (startFrameAbs - r.bFrame) / r.loopFrames + 1L
+    }
+
     private fun notifySeamLocked() {
         val r = region ?: return
         val fmt = format ?: return
-        onSeam?.invoke(round, totalReplayFrames, replayPtsLocked(0L, round, r, fmt))
+        val cursor = if (state == State.REPLAYING) cursorFrames else 0L
+        onSeam?.invoke(round, totalReplayFrames, replayPtsLocked(cursor, round, r, fmt))
     }
 
     private fun replayPtsLocked(

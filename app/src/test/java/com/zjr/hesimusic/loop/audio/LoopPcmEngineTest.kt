@@ -102,6 +102,11 @@ class LoopPcmEngineTest {
 
         engine.onInputDrained(plan)
         assertEquals("应进入重放", LoopPcmEngine.State.REPLAYING, engine.state)
+
+        val chunk = engine.pumpChunk(1 shl 20)!!
+        assertEquals("PTS < B 的常规进入应从环内 0 开始", 0L, chunk.frameOffsetInRound)
+        assertEquals("常规进入轮次为 1", 1L, chunk.round)
+        assertEquals("常规进入首 chunk PTS = B", 200_000L, chunk.ptsUs)
     }
 
     @Test
@@ -428,6 +433,66 @@ class LoopPcmEngineTest {
         assertFalse("pending 时不应进入环回捕获", plan.enterReplayWhenDrained)
         assertEquals("pending 时音频线程不得分配", 0L, engine.audioThreadAllocationCount)
         assertEquals("pending 时不应捕获", 0L, engine.capturedFrames)
+    }
+
+    @Test
+    fun `ring 完整时按输入 PTS 折返相位初始化重放游标`() {
+        val engine = newEngine()
+        engine.setWindow(window(100, 200))
+        val plan = engine.onBuffer(0L, 250, PcmTestSupport.pcm16Buffer(0, 250))
+        engine.onInputDrained(plan)
+        engine.onFlush()
+        assertTrue(engine.isRingComplete)
+
+        // 输入 PTS = B + 12345 帧；L=100 帧 -> 环内相位 45 帧，轮次 124
+        val startFrame = 200 + 12345
+        val ptsUs = startFrame * 1000L
+        val seekPlan = engine.onBuffer(ptsUs, 10, PcmTestSupport.pcm16Buffer(startFrame, 10))
+
+        assertEquals("应直接丢弃该输入并进入重放", 0, seekPlan.forwardFrames)
+        assertTrue(seekPlan.enterReplayWhenDrained)
+        assertEquals("环内游标 = (PTS-A) mod L", 45L, seekPlan.entryCursorFrames)
+        assertEquals("轮次应保证 PTS 连续", 124L, seekPlan.entryRound)
+
+        engine.onInputDrained(seekPlan)
+        assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
+        assertEquals(
+            "引擎位置应等于输入 PTS",
+            ptsUs,
+            engine.currentPositionUs(),
+        )
+
+        val chunk = engine.pumpChunk(1 shl 20)!!
+        assertEquals("首个 chunk 从环内 45 帧开始", 45L, chunk.frameOffsetInRound)
+        assertEquals("轮次 124", 124L, chunk.round)
+        assertEquals("首个 chunk PTS = 输入 PTS", ptsUs, chunk.ptsUs)
+        assertEquals("播放剩余 55 帧后折返", 55, chunk.frames)
+    }
+
+    @Test
+    fun `ring 不完整时相位保持 0 且仍然降级`() {
+        val engine = newEngine()
+        engine.setWindow(window(100, 200))
+
+        // 先只捕获 [150,200)，ring 不完整
+        val partial = engine.onBuffer(150_000L, 100, PcmTestSupport.pcm16Buffer(150, 100))
+        engine.onInputDrained(partial)
+        assertFalse(engine.isRingComplete)
+        engine.onFlush()
+        assertFalse(engine.isRingComplete)
+
+        val startFrame = 200 + 12345
+        val seekPlan = engine.onBuffer(
+            startFrame * 1000L,
+            10,
+            PcmTestSupport.pcm16Buffer(startFrame, 10),
+        )
+        assertEquals("ring 不完整时不得套用 PTS 相位", 0L, seekPlan.entryCursorFrames)
+        assertEquals("ring 不完整时轮次保持 1", 1L, seekPlan.entryRound)
+
+        engine.onInputDrained(seekPlan)
+        assertEquals("ring 不完整应维持降级，不进入重放", LoopPcmEngine.State.PASS_THROUGH, engine.state)
+        assertFalse(engine.state == LoopPcmEngine.State.REPLAYING)
     }
 
     @Test

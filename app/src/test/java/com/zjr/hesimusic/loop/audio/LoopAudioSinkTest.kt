@@ -621,6 +621,39 @@ class LoopAudioSinkTest {
     }
 
     @Test
+    fun `重放中 seek 到 B 之后按 PTS 相位从环内起点继续`() {
+        val (controller, sink, fake) = rig()
+        assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(0, 250), 0L))
+        assertTrue(controller.isReplaying)
+
+        // 模拟 seek 后的 flush：ring 保留且完整，输入从 raw 位置重新喂入
+        sink.flush()
+        assertTrue(controller.isRingComplete)
+        val afterFlush = fake.feeds.size
+
+        // A=100ms,B=200ms,L=100 帧；输入 PTS = B + 12345 帧 -> 相位 45 帧
+        val startFrame = 200 + 12345
+        val ptsUs = startFrame * 1000L
+        assertTrue(
+            sink.handleBuffer(
+                PcmTestSupport.pcm16Buffer(startFrame, 10),
+                ptsUs,
+                1,
+            )
+        )
+
+        assertTrue("应重新进入重放", controller.isReplaying)
+        val replay = fake.feeds.drop(afterFlush).firstOrNull { it.ptsUs >= ptsUs }
+        assertTrue("应产生重放输出", replay != null)
+        assertEquals("首个重放 PTS 应等于输入 PTS", ptsUs, replay!!.ptsUs)
+        assertArrayEquals(
+            "应从环内 45 帧(源 145 帧)开始",
+            PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(145, 10)),
+            replay.bytes.copyOfRange(0, 20),
+        )
+    }
+
+    @Test
     fun `未裁剪输入越过 B 后由后续 buffer 驱动泵继续重放`() {
         val controller = LoopAudioController()
         controller.preallocDispatcher = { it.run() }
