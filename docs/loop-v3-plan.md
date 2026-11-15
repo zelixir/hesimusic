@@ -186,9 +186,14 @@
 | **L0 纯逻辑单测**(JVM,无 Android) | JUnit,与现有 16 个测试文件同风格 | 折返算术/位置映射/seek 映射/资格判定/帧↔µs/环缓冲索引/行状态迁移/恢复位置钳制 | 每次提交;行覆盖率 ≥95% |
 | **L1 组件单测**(JVM + fake) | 环回引擎对 **fake AudioSink / fake SampleStream** 做字节级验证 | 喂 buffer→折返点拆分→EOS 吞/续→flush 清理→位置折返;确定性、可 CI | 每次提交 |
 | **L2 真机 E2E 协议**(保留/重写 LoopDebugServer) | `adb forward` + HTTP JSON(仅 debug 构建,且**迁到 src/debug**) | 分析/确认/降级/删除、播放、切歌、seek、恢复、通知状态、队列/随机/repeat 持久化 | 每次打包 |
-| **L3 PCM 取证**(核心新增) | 引擎内置 tap → WAV + 事件日志 → PC 侧离线判定 | §4.2 判据 A/B;格式矩阵(MP3/FLAC/AAC/WAV);A 在曲中/曲尾;L=20s/60s;连续 20 轮;seek 入区;切歌;锁屏 | **真无缝的唯一验收标准** |
+| **L3 PCM 取证**(核心新增) | 引擎内置 tap → WAV + 事件日志 → PC 侧离线判定(tools/spike-analyze.ts) | §4.2 判据 A/B;格式矩阵(MP3/FLAC/AAC/WAV);A 在曲中/曲尾;L=20s/60s;连续 20 轮;seek 入区;切歌;锁屏 | **真无缝的唯一验收标准** |
 | **L4 既有功能回归** | L0 补齐 + L2 协议覆盖 | 队列/歌单/收藏/随机/repeat 持久化、扫描与过滤、排序、备份恢复、CUE 守卫、睡眠定时、通知开关 | 每次打包 |
 | **L5 竞态风暴** | 脚本随机 200 次操作(play/pause/seek/切歌/改 repeat/确认/取消/前后台,100~800ms 间隔),全程 L3 tap 同时运行 | 旧版所有竞态场景的等价覆盖;断言:无 crash、无常量不一致(UI 标记 ⇔ 实际折返)、判据 A 不破 | 发布前必跑 |
+
+**L3 门禁口径(2026-11-15 裁定)**:门禁只看 **进程退出码 = 0 且 `failedMust` 为空**。
+A4 的"喂数间隔"只是参考警告(`status=warn`),不影响门禁(underrun/flush/discontinuity 仍是硬判据);
+B 只比较**完整轮**(收尾截断的最后一轮自动丢弃);A3 默认 `--prelude-mode auto`(M3′ 的前奏 = [0,B))。
+参考产物:`spike/out/sink2-mp3-a20b50`、`sink2-flac-a20b50` 在 `--strict` 下均 exit 0。
 
 ### 6.2 "真无缝"判据(可自动化、可复现)
 

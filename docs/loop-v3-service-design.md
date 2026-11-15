@@ -93,6 +93,23 @@ class LoopSessionPlayer(player: Player, private val runtime: LoopRuntime,
 }
 ```
 
+**行变更的触发方式(2026-11-15 裁定:用 Room Flow,不靠 UI 手工通知)**:
+
+`LoopPlaybackCoordinator` 在当前歌切换时重启一个订阅:
+
+```kotlin
+observeJob?.cancel()
+observeJob = serviceScope.launch {
+    dao.getBySongIdFlow(songId).collect { row ->
+        runtime.refresh(songId, player.repeatMode, row)
+        applyShapeIfChanged(runtime.window.value, player)
+    }
+}
+```
+
+这样 analyze 落库临时结果、confirm、demote、delete、外部改库 **全部自动传导**,UI 不需要认识播放层
+(这正对应旧版 §15 抱怨的"demote/delete 只改数据库,没有任何通路通知播放引擎")。
+
 **refresh 流程(严格按序)**:
 
 1. `row = songId?.let { dao.getBySongId(it) }`;
