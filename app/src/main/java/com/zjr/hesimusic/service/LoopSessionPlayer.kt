@@ -47,7 +47,8 @@ class LoopSessionPlayer(
     override fun getDuration(): Long {
         val window = activeWindow() ?: return super.getDuration()
         val projectedUs = projectedDurationUs(window)
-        // 0 = 不投影（整曲时长未知）→ 透传播放器原生时长（clip 后即 B）
+        // 防御性覆盖：不裁剪时播放器原生时长本来就等于整曲时长，这里只是保证「窗口生效期间
+        // 对外时长恒为整曲」（整曲时长未知时返回 0 → 透传原生值）
         return if (projectedUs > 0L) projectedUs / LoopSessionProjection.US_PER_MS else super.getDuration()
     }
 

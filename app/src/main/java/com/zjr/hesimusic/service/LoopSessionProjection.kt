@@ -10,7 +10,7 @@ import com.zjr.hesimusic.loop.LoopWindow
  * - **raw**：引擎（ExoPlayer + LoopAudioSink）自己的媒体位置（µs）。无缝重放期 =
  *   B + (k-1)L + 环内偏移，由 [com.zjr.hesimusic.loop.audio.LoopAudioController.positionUs] 给出。
  * - **display**：UI / 通知 / MediaSession 看到的进度（µs），永远折返进 [A, B)（前奏只播一次）。
- * - **时长**：无缝时对外必须是**整曲**时长（进度条语义不变），而不是 clip 后的 B。
+ * - **时长**：无缝时对外恒为**整曲**时长（不裁剪时与原生一致，覆盖只为防御）。
  *
  * [LoopSessionPlayer] 只做「取 raw → 调本对象 → 换算 ms」的薄转发，所有判断都集中在这里，
  * 因此位置投影可以脱离 Media3 Player 在纯 JVM 上验证（见 LoopSessionPlayerTest）。
@@ -40,7 +40,7 @@ object LoopSessionProjection {
         if (window == null) rawUs else LoopPosition.displayUs(rawUs, window)
 
     /**
-     * 对外时长（µs）。返回 0 表示「不投影」，调用方要透传播放器原生时长（clip 后 = B）。
+     * 对外时长（µs）。返回 0 表示「不投影」，调用方要透传播放器原生时长。
      *
      * 契约：window 非空且整曲时长已知 → 整曲时长；否则透传。
      */

@@ -1,13 +1,11 @@
 package com.zjr.hesimusic.service
 
 import android.util.Log
-import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import com.zjr.hesimusic.data.dao.SongLoopDao
 import com.zjr.hesimusic.data.mapper.mediaIdToSongId
 import com.zjr.hesimusic.data.repository.SongRepository
 import com.zjr.hesimusic.loop.LoopEligibility
-import com.zjr.hesimusic.loop.LoopPosition
 import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.LoopAudioController
@@ -23,20 +21,22 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * 服务层收口：把「事件」翻译成「一次纯函数重算 + 至多一次播放形态重建」。
+ * 服务层收口：把「事件」翻译成「一次纯函数重算 + 至多一次状态写（+ 必要时一次 seek）」。
  *
  * 唯一事件入口是 [refresh]（切歌 / repeat 变化 / song_loop 行变更 / restore 完成），
- * 处理顺序严格按契约 docs/loop-v3-service-design.md §2.3：
+ * 处理顺序：
  *
  * 1. 查行（[SongLoopDao.getBySongId]）；
- * 2. [LoopRuntime.refresh] 重算窗口（纯函数、幂等）；
- * 3. 写 [LoopAudioController.fullDurationUs]（整曲时长，供会话层 getDuration 投影）；
- * 4. 形态（songId + clipEnd + window）有变化才 [applyShape]；
+ * 2. 预判资格只为先写整曲时长（[LoopAudioController.fullDurationUs]）；
+ * 3. [LoopRuntime.refresh] 重算窗口（纯函数、幂等、唯一窗口来源）；
+ * 4. 形态对账：[LoopShapePlan] 决定「写什么窗口 + 是否 seek」——生产路径**不裁剪**，
+ *    所以进入/退出无缝只写 [LoopAudioController.window]，没有任何 replaceMediaItem /
+ *    时间线重建；只有「进入时 ring 未覆盖 [A,B)」与「退出时处于重放态」两种例外各 seek 一次；
  * 5. 当前歌变化时重启 song_loop 行订阅（analyze/confirm/demote/delete 落库自动传导）。
  *
  * 不变量：
  * - 引擎从不修改 repeatMode，repeat 只代表用户意图；
- * - 窗口未变且当前项形态一致时不做事（无缝播放期间零重建）；
+ * - 窗口值没变时不做任何事（无缝播放期间零媒体操作、零 seek）；
  * - 所有 Player 操作都在主线程（[Dispatchers.Main.immediate]）。
  */
 @Singleton
@@ -47,19 +47,12 @@ class LoopPlaybackCoordinator @Inject constructor(
     private val songRepository: SongRepository,
 ) {
 
-    /** 当前项在播放器里的实际形态：谁在无缝、clip 到哪、窗口是什么。 */
-    private data class Shape(
-        val songId: Long?,
-        val clipEndUs: Long?,
-        val window: LoopWindow?,
-    )
-
     private val mainDispatcher = Dispatchers.Main.immediate
     private val scope = CoroutineScope(SupervisorJob() + mainDispatcher)
     private val refreshMutex = Mutex()
 
-    /** 播放列表 index → 该项当前的 clip 形态（只有被我们改过形态的项才会入表）。 */
-    private val clipped = HashMap<Int, Shape>()
+    /** 当前已应用到播放器/音频层的窗口；值相等即视为形态未变。 */
+    private var appliedWindow: LoopWindow? = null
 
     private var observeJob: Job? = null
     private var observedSongId: Long? = null
@@ -74,7 +67,7 @@ class LoopPlaybackCoordinator @Inject constructor(
     // ------------------------------------------------------------------ 事件入口
 
     /**
-     * 唯一事件入口：重算窗口并（必要时）应用播放形态。
+     * 唯一事件入口：重算窗口并（必要时）应用形态。
      *
      * @param songId 当前歌（[com.zjr.hesimusic.data.mapper.mediaIdToSongId] 口径，无效则 null）
      * @param repeatMode 用户意图（[Player.getRepeatMode]），本层只读不写
@@ -103,7 +96,7 @@ class LoopPlaybackCoordinator @Inject constructor(
         observeJob = null
         observedSongId = null
         playerRef = null
-        clipped.clear()
+        appliedWindow = null
         if (audio.window != null) {
             audio.window = null
         }
@@ -113,88 +106,57 @@ class LoopPlaybackCoordinator @Inject constructor(
     // ------------------------------------------------------------------ 形态应用
 
     /**
-     * 形态对账：只有「当前项需要的 clip 形态」与「实际已应用的形态」不同时才动播放器。
+     * 形态对账：只有「目标窗口」与「已应用窗口」不同才动作，且动作 = 写一次窗口（+ 必要时一次 seek）。
      *
-     * 这里的依据是 [clipped]（按播放列表 index 记账），而不是「上一次 refresh 的窗口」：
-     * replaceMediaItem 替换的是播放列表里那一项的 MediaSource，被替换过的项即使切走再切回
-     * 也仍然是带 clip 的源码，必须按 index 记账才能正确去掉它。
+     * 顺序要点：
+     * - 重放态必须在写窗口**之前**读：写 null 会让音频层状态立刻复位成 PASS_THROUGH；
+     * - ring 覆盖度必须在写窗口**之后**读：setWindow 会让 ring 失效（可能由后台预分配重建）。
      */
     private fun syncShape(window: LoopWindow?, player: Player, reason: String) {
         val index = player.currentMediaItemIndex
-        val item = player.currentMediaItem
-        if (index < 0 || item == null) {
-            if (audio.window != null) {
-                audio.window = null
-            }
-            return
-        }
-        val itemSongId = mediaIdToSongId(item.mediaId)
-        // 窗口只对「当前正在播的那一项」生效：事件可能早于/晚于 transition，以当前 item 为准
-        val targetWindow = window?.takeIf { w -> itemSongId != null && w.songId == itemSongId }
+        val itemSongId = player.currentMediaItem?.mediaId?.let { mediaIdToSongId(it) }
+        val targetWindow = LoopShapePlan.targetWindow(itemSongId, window)
 
-        // 音频层永远先落（region 跟着真正在播的那一项走；引擎要求 window 变更伴随一次重建）。
-        // 值相同就不重复写：LoopAudioController.window 的 setter 会顺带触发后台 ring 预分配。
+        // 幂等：窗口没变且音频层已同步 → 零操作（无缝播放期间不会碰到播放器）
+        if (targetWindow == appliedWindow && audio.window == targetWindow) return
+
+        val wasReplaying = audio.isReplaying
+        val rawUs = currentRawUs(player, appliedWindow)
+
+        // 1) 音频层永远是第一落点：不裁剪 ⇒ 进入/退出无缝只有这一个状态写
         if (audio.window != targetWindow) {
             audio.window = targetWindow
         }
 
-        val targetShape = Shape(itemSongId, targetWindow?.loopEndUs, targetWindow)
-        val appliedShape = clipped[index]
-        if (appliedShape == targetShape) return              // 幂等：形态未变，零媒体操作
-        if (appliedShape == null && targetWindow == null) return  // 未 clip 过，且目标不 clip
+        // 2) 纯函数决定本次是否需要 seek（预卷 / 退出重放态）
+        val plan = LoopShapePlan.plan(
+            songId = itemSongId,
+            targetWindow = targetWindow,
+            appliedWindow = appliedWindow,
+            rawUs = rawUs,
+            isRingComplete = audio.isRingComplete,
+            wasReplaying = wasReplaying,
+        )
 
-        val previousWindow = appliedShape?.window
-        applyShape(player, index, item, targetWindow, previousWindow, reason)
-        if (targetWindow == null) clipped.remove(index) else clipped[index] = targetShape
-    }
+        appliedWindow = plan.window
+        if (plan.kind == LoopShapePlan.Kind.NOOP) return
 
-    /**
-     * 重建当前项的播放形态（窗口变化时唯一一次媒体操作）。
-     *
-     * 顺序：audio.window 已在 [syncShape] 写入 → replaceMediaItem 让 LoopMediaSourceFactory
-     * 重新决定 clip → 从展示位置映射回 raw 续播。
-     */
-    private fun applyShape(
-        player: Player,
-        index: Int,
-        item: MediaItem,
-        targetWindow: LoopWindow?,
-        previousWindow: LoopWindow?,
-        reason: String,
-    ) {
-        // 1) 先按旧口径把当前位置换算成展示位置（重放期取 sink 位置，否则取播放器位置）
-        val rawUs = currentRawUs(player, previousWindow)
-        val displayUs = LoopSessionProjection.displayUs(rawUs, previousWindow)
-
-        // 2) 触发 source 重建：clip 形态由 LoopMediaSourceFactory 依 runtime.window 决定
-        player.replaceMediaItem(index, item)
-
-        // 3) 展示位置 → 新形态的 raw 起点
-        val targetRawUs = if (targetWindow != null) {
-            LoopPosition.rawSeekUs(displayUs, targetWindow, displayUs)
-        } else {
-            displayUs
+        val seekRawUs = plan.seekRawUs
+        if (seekRawUs != null && index >= 0) {
+            player.seekTo(index, seekRawUs / LoopSessionProjection.US_PER_MS)
         }
-
-        // 4) 起播点自检：落在 [A,B) 内但 ring 还不完整（restore 恢复位置 / 确认保存时正在区内 /
-        //    通知栏 seek 都不经过 LoopSessionPlayer.seekTo）→ 预卷到本轮起点前 250ms，
-        //    让本轮完整流经 [A,B) 把 ring 填满，否则到 B 会降级。
-        val settledRawUs = if (targetWindow != null && !audio.isRingComplete && targetWindow.containsUs(targetRawUs)) {
-            val preRollUs = LoopSessionProjection.degradedSeekUs(targetWindow.loopStartUs)
-            Log.d(TAG_PERF, "pre-roll reason=" + reason + " window=" + targetWindow +
-                " from=" + targetRawUs + "us to=" + preRollUs + "us")
-            preRollUs
-        } else {
-            targetRawUs
-        }
-
-        player.seekTo(index, settledRawUs / LoopSessionProjection.US_PER_MS)
         Log.d(
             TAG,
-            "applyShape reason=" + reason + " index=" + index + " songId=" + mediaIdToSongId(item.mediaId) +
-                " window=" + targetWindow + " raw=" + rawUs + "us display=" + displayUs +
-                "us seek=" + settledRawUs + "us",
+            "applyShape reason=" + reason + " kind=" + plan.kind + " songId=" + itemSongId +
+                " window=" + plan.window + " raw=" + rawUs + "us seek=" + seekRawUs,
         )
+        if (seekRawUs != null) {
+            Log.d(
+                TAG_PERF,
+                "seek kind=" + plan.kind + " reason=" + reason +
+                    " raw=" + seekRawUs + "us window=" + plan.window,
+            )
+        }
     }
 
     /** 引擎原始位置（µs）：旧窗口属于当前项且处于重放期时用 sink 位置，否则用播放器位置。 */
