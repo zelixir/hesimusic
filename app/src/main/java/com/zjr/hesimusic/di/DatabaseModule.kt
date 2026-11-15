@@ -74,6 +74,7 @@ object DatabaseModule {
                     super.onOpen(db)
                     val openDuration = System.currentTimeMillis() - startTime
                     Log.i(TAG, "Database opened in ${openDuration}ms")
+                    seedSeamlessSmartPlaylist(db)
                 }
             })
             .build()
@@ -82,6 +83,32 @@ object DatabaseModule {
         Log.i(TAG, "AppDatabase build completed in ${buildDuration}ms")
         
         return database
+    }
+
+    /**
+     * 内置智能歌单「无缝循环」= 已确认循环点(confirmed=1)的歌曲集合。
+     *
+     * 幂等:不存在才插入,存在则仅在 SQL 文本变化时更新;任何异常只记日志,绝不让 DB 打开失败。
+     * 注意:智能歌单的 @RawQuery 未观察 SongLoop 表,confirmed 变化不会即时刷新该视图
+     * (下一次 songs 侧变更或重启后刷新)。
+     */
+    private fun seedSeamlessSmartPlaylist(db: SupportSQLiteDatabase) {
+        val sql = "SELECT * FROM songs WHERE id IN (SELECT songId FROM song_loop WHERE confirmed = 1)"
+        try {
+            db.execSQL(
+                "INSERT INTO smart_playlists (name, createdAt, sqlText) " +
+                    "SELECT '无缝循环', strftime('%s','now') * 1000, ? " +
+                    "WHERE NOT EXISTS (SELECT 1 FROM smart_playlists WHERE name = '无缝循环')",
+                arrayOf<Any>(sql),
+            )
+            db.execSQL(
+                "UPDATE smart_playlists SET sqlText = ? " +
+                    "WHERE name = '无缝循环' AND sqlText <> ?",
+                arrayOf<Any>(sql, sql),
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "seedSeamlessSmartPlaylist failed", e)
+        }
     }
 
     @Provides
