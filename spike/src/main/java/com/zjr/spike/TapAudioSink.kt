@@ -1,7 +1,6 @@
 package com.zjr.spike
 
-import android.os.Handler
-import android.os.Looper
+import android.os.SystemClock
 import androidx.media3.common.Format
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.audio.AudioSink
@@ -11,14 +10,15 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * 包住 DefaultAudioSink 的取证层（CONTRACT §4 M3 / §3）。
+ * 包住 DefaultAudioSink 的取证层（CONTRACT §4/§3）。
  *
- * 职责：
- *  1. 逐次记录 configure/feed/flush/handleDiscontinuity/playToEndOfStream/isEnded/hasPendingData/
- *     setOutputStreamOffsetUs/getCurrentPositionUs 等调用；
- *  2. 把每次 handleBuffer 中 delegate 真正消费掉的 PCM 按到达顺序写 WAV（feed.frames 是实际写入帧数）；
- *  3. mode=sink：捕获 [aMs,bMs) 的 PCM，EOS 后在独立线程原地重放，观察 EOS 之后 renderer 是否还喂
- *     buffer、delegate 在 playToEndOfStream 之后是否还接受写入（M3 生死判据）。
+ * 两种重放形态：
+ *  - mode=sink（M3'）：PCM 层环回，**始终通过 delegate(DefaultAudioSink) 喂数据**。
+ *    输入在 B 处截断（Clip 到 B），到达 B 后切换到 ring 重放；重放由 renderer 对
+ *    playToEndOfStream()/isEnded() 的 ~100Hz 轮询驱动（delegate 泵送），
+ *    不调用 delegate.playToEndOfStream()、不进入 ended 态 → AudioTrack 不 stop、
+ *    位置持续前进、无 configure/discontinuity/flush。
+ *  - 其余 mode：只做取证（PCM 落盘 + sink 调用序列 + baseline/window 的 seam 打点）。
  */
 @UnstableApi
 class TapAudioSink(
@@ -51,12 +51,18 @@ class TapAudioSink(
     @Volatile
     private var lastPtsUs: Long = 0L
 
-    // seam 打点（baseline / window）：模块层得知"新的一轮开始"时，在下一个被消费的
-    // handleBuffer 首样本上打点。字段语义按 CONTRACT §3.2 2026-11-15 裁定：
-    //   iter      = 完成这一轮后的轮次序号（从 1 开始）
-    //   outFrames = 自运行开始累计已写进 delegate 的帧数
-    //   ptsUs     = 新一轮第一个样本喂给 delegate 时使用的时间戳
+    // seam 打点（baseline / window）
     private val seamMode: Boolean = cfg.mode == "baseline" || cfg.mode == "window"
+    private val mediaMode: Boolean = cfg.mode == "media"
+
+    @Volatile
+    private var mediaSeamArmed: Boolean = false
+
+    @Volatile
+    private var mediaSeamIter: Int = 0
+
+    @Volatile
+    private var mediaSeamTargetRawUs: Long = 0L
     private var lastConsumedPtsUs: Long = -1L
     private var seamArmed: Boolean = false
     private var seamRound: Int = 0
@@ -68,29 +74,38 @@ class TapAudioSink(
     @Volatile
     private var outputStreamOffsetUs: Long = 0L
 
-    // DefaultAudioSink 的 flush() 会在内部 new Handler()，必须在有 Looper 的 playback 线程上调用。
-    @Volatile
-    private var playbackLooper: Looper? = null
-
     private val sinkMode: Boolean = cfg.mode == "sink"
 
-    // ---- sink 模式的重放状态 ----
+    // ---- 捕获 [A,B) ----
     private val captureLock = Any()
     private val captured = ByteArrayOutputStream()
     private var capturedFrames = 0L
-
-    @Volatile
-    private var replayActive = false
-
-    @Volatile
-    private var replayAttempted = false
-
-    @Volatile
-    private var replayThread: Thread? = null
-
-    private var replayIterations = 0
     private var captureLoggedBegin = false
     private var captureLoggedEnd = false
+
+    // ---- M3' 重放状态（全部在 playback 线程上；无独立线程） ----
+    @Volatile
+    private var replayActive: Boolean = false
+
+    @Volatile
+    private var replayDisabled: Boolean = false
+
+    @Volatile
+    private var degradeRequested: Boolean = false
+
+    /** ring 就绪后的完整 PCM 与帧数。 */
+    private var ring: ByteArray? = null
+    private var ringFrames: Long = 0L
+    private var replayRound: Int = 0
+    private var replayOffset: Int = 0
+    private var replayBuffer: ByteBuffer? = null
+    private var lastSeamRound: Int = 0
+    private var pumpCalls: Long = 0L
+    private var lastPosLogMs: Long = 0L
+    private var lastFeedEndUs: Long = 0L
+
+    @Volatile
+    var onNeedFullRing: (() -> Unit)? = null
 
     // ---------------------------------------------------------------- configure
 
@@ -100,7 +115,8 @@ class TapAudioSink(
         sampleRate = format.sampleRate
         channels = format.channelCount
         bytesPerFrame = if (bpf > 0) bpf else 4
-        playbackLooper = Looper.myLooper()
+        replayDisabled = false
+        resetReplayState()
         rec.event(
             "configure",
             linkedMapOf(
@@ -120,6 +136,12 @@ class TapAudioSink(
     // --------------------------------------------------------------- handleBuffer
 
     override fun handleBuffer(buffer: ByteBuffer, presentationTimeUs: Long, encodedAccessUnitCount: Int): Boolean {
+        if (sinkMode) return handleSinkBuffer(buffer, presentationTimeUs)
+        return handleTapBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
+    }
+
+    /** 非 sink 模式：照旧取证 + baseline/window/media 的 seam。 */
+    private fun handleTapBuffer(buffer: ByteBuffer, presentationTimeUs: Long, encodedAccessUnitCount: Int): Boolean {
         val startPos = buffer.position()
         val ret: Boolean
         synchronized(delegateLock) {
@@ -130,11 +152,7 @@ class TapAudioSink(
         lastPtsUs = presentationTimeUs
         val cumulativeBefore = rec.totalFrames
         if (consumed > 0) {
-            val dup = buffer.duplicate()
-            dup.position(startPos)
-            dup.limit(endPos)
-            val data = ByteArray(consumed)
-            dup.get(data)
+            val data = readBytes(buffer, startPos, endPos)
             rec.writePcm(data, bytesPerFrame)
             val frames = consumed / bytesPerFrame
             rec.event(
@@ -148,7 +166,23 @@ class TapAudioSink(
                 ),
             )
             if (seamMode) maybeEmitSeam(presentationTimeUs, cumulativeBefore)
-            if (sinkMode) captureRegion(data, startPos, presentationTimeUs)
+            if (mediaMode && mediaSeamArmed) {
+                val targetPtsUs = outputStreamOffsetUs + mediaSeamTargetRawUs
+                if (presentationTimeUs >= targetPtsUs - 200L) {
+                    mediaSeamArmed = false
+                    rec.event(
+                        "seam",
+                        linkedMapOf(
+                            "iter" to mediaSeamIter,
+                            "outFrames" to cumulativeBefore,
+                            "ptsUs" to presentationTimeUs,
+                            "src" to "media",
+                            "trigger" to "source",
+                            "targetPtsUs" to targetPtsUs,
+                        ),
+                    )
+                }
+            }
         } else {
             rec.event(
                 "feed_wait",
@@ -160,6 +194,118 @@ class TapAudioSink(
             )
         }
         return ret
+    }
+
+    /**
+     * M3'：输入在 B 处截断；到 B 后切换为 ring 重放，之后输入全部丢弃（返回 true 保持管线流动）。
+     */
+    private fun handleSinkBuffer(buffer: ByteBuffer, presentationTimeUs: Long): Boolean {
+        val startPos = buffer.position()
+        val mediaPts = presentationTimeUs - outputStreamOffsetUs
+        val bpf = bytesPerFrame
+        val sr = sampleRate
+
+        if (replayActive) {
+            val bytes = buffer.limit() - startPos
+            buffer.position(buffer.limit())
+            if (bytes > 0) {
+                rec.event(
+                    "feed_discard",
+                    linkedMapOf(
+                        "bytes" to bytes,
+                        "frames" to bytes / bpf,
+                        "ptsUs" to presentationTimeUs,
+                        "reason" to "replay",
+                    ),
+                )
+            }
+            pumpReplay()
+            return true
+        }
+
+        val bFrame = cfg.bMs.toLong() * sr / 1000L
+        val startFrame = mediaPts * sr / 1_000_000L
+        val boundary = ((bFrame - startFrame) * bpf).toInt()
+
+        if (boundary <= startPos) {
+            val bytes = buffer.limit() - startPos
+            buffer.position(buffer.limit())
+            if (bytes > 0) {
+                rec.event(
+                    "feed_discard",
+                    linkedMapOf(
+                        "bytes" to bytes,
+                        "frames" to bytes / bpf,
+                        "ptsUs" to presentationTimeUs,
+                        "reason" to "past-b",
+                    ),
+                )
+            }
+            lastFeedEndUs = presentationTimeUs + (bytes / bpf) * 1_000_000L / sr
+            startReplay()
+            pumpReplay()
+            return true
+        }
+
+        var hitEnd = false
+        if (boundary < buffer.limit()) {
+            val trimmed = buffer.limit() - boundary
+            buffer.limit(boundary)
+            hitEnd = true
+            rec.event(
+                "trim_at_b",
+                linkedMapOf(
+                    "ptsUs" to presentationTimeUs,
+                    "trimmedBytes" to trimmed,
+                    "trimmedFrames" to trimmed / bpf,
+                ),
+            )
+        }
+
+        val ret: Boolean
+        synchronized(delegateLock) {
+            ret = super.handleBuffer(buffer, presentationTimeUs, 1)
+        }
+        val consumed = buffer.position() - startPos
+        lastPtsUs = presentationTimeUs
+        if (consumed > 0) {
+            val data = readBytes(buffer, startPos, buffer.position())
+            rec.writePcm(data, bpf)
+            val frames = consumed / bpf
+            lastFeedEndUs = presentationTimeUs + frames * 1_000_000L / sr
+            rec.event(
+                "feed",
+                linkedMapOf(
+                    "frames" to frames,
+                    "ptsUs" to presentationTimeUs,
+                    "bytes" to consumed,
+                    "ret" to ret,
+                ),
+            )
+            captureRegion(data, startPos, presentationTimeUs)
+        } else {
+            rec.event(
+                "feed_wait",
+                linkedMapOf(
+                    "ptsUs" to presentationTimeUs,
+                    "ret" to ret,
+                ),
+            )
+        }
+        if (hitEnd && !buffer.hasRemaining()) {
+            startReplay()
+            pumpReplay()
+        }
+        return ret
+    }
+
+    private fun readBytes(buffer: ByteBuffer, from: Int, to: Int): ByteArray {
+        val dup = buffer.duplicate()
+        dup.position(from)
+        dup.limit(to)
+        val data = ByteArray(to - from)
+        dup.get(data)
+        return data
     }
 
     /**
@@ -188,7 +334,7 @@ class TapAudioSink(
         lastConsumedPtsUs = ptsUs
     }
 
-    /** 从 delegate 实际消费的这段 PCM 中，截取落在 [aMs,bMs) 的部分。 */
+    /** 从 delegate 实际消费的这段 PCM 中，精确截取落在 [aMs,bMs) 的部分（按帧）。 */
     private fun captureRegion(data: ByteArray, startPositionInBuffer: Int, ptsUs: Long) {
         val bpf = bytesPerFrame
         if (bpf <= 0) return
@@ -228,10 +374,29 @@ class TapAudioSink(
         }
     }
 
-    // ------------------------------------------------------------ EOS / 生命周期
+    // ------------------------------------------------------------ EOS / 泵送
 
     override fun playToEndOfStream() {
         eosSeen = true
+        if (sinkMode) {
+            pumpCalls += 1
+            if (pumpCalls <= 3 || pumpCalls % 500 == 0L) {
+                rec.event(
+                    "pump",
+                    linkedMapOf(
+                        "via" to "play_to_eos",
+                        "calls" to pumpCalls,
+                        "replayActive" to replayActive,
+                        "round" to replayRound,
+                        "offset" to replayOffset,
+                    ),
+                )
+            }
+            startReplay()
+            pumpReplay()
+            // 关键：不调用 delegate.playToEndOfStream()，AudioTrack 不会 stop。
+            return
+        }
         rec.event(
             "play_to_eos",
             linkedMapOf(
@@ -251,10 +416,19 @@ class TapAudioSink(
                 "posUs" to super.getCurrentPositionUs(true),
             ),
         )
-        if (sinkMode) startReplay()
     }
 
     override fun isEnded(): Boolean {
+        if (sinkMode) {
+            pumpReplay()
+            if (replayActive) {
+                if (lastEnded) {
+                    lastEnded = false
+                    rec.event("eos_swallow", linkedMapOf("round" to replayRound, "offset" to replayOffset))
+                }
+                return false
+            }
+        }
         val ended = super.isEnded()
         if (ended != lastEnded) {
             lastEnded = ended
@@ -267,7 +441,6 @@ class TapAudioSink(
                 ),
             )
         }
-        // M3：EOS 之后仍然返回 false（吞掉 EOS），让 renderer 留在播放态继续被我们喂数据。
         return if (sinkMode && replayActive) false else ended
     }
 
@@ -283,7 +456,21 @@ class TapAudioSink(
     override fun getCurrentPositionUs(forceDiscontinuityPosition: Boolean): Long {
         val pos = super.getCurrentPositionUs(forceDiscontinuityPosition)
         if (pos == AudioSink.CURRENT_POSITION_NOT_SET) return pos
-        // 位置回跳（PTS 复位）是接缝的重要证据，回跳 >50ms 时打点。
+        if (sinkMode && replayActive) {
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastPosLogMs >= 500L) {
+                lastPosLogMs = now
+                rec.event(
+                    "pos",
+                    linkedMapOf(
+                        "us" to pos,
+                        "mediaUs" to pos - outputStreamOffsetUs,
+                        "round" to replayRound,
+                        "ringOffset" to replayOffset,
+                    ),
+                )
+            }
+        }
         if (pos + 50_000L < lastPositionUs) {
             rec.event("position_reset", linkedMapOf("fromUs" to lastPositionUs, "toUs" to pos))
         }
@@ -294,7 +481,6 @@ class TapAudioSink(
     override fun setOutputStreamOffsetUs(offsetUs: Long) {
         outputStreamOffsetUs = offsetUs
         rec.event("output_stream_offset", linkedMapOf("offsetUs" to offsetUs))
-        // window(LoopingMediaSource) 的 gapless 推进：每进一个窗口 offset 增大，下一段 PCM 即新一轮。
         if (seamMode && lastConsumedPtsUs >= 0) {
             seamArmed = true
         }
@@ -311,6 +497,7 @@ class TapAudioSink(
                 "totalFrames" to rec.totalFrames,
             ),
         )
+        if (sinkMode) resetReplayState()
         super.flush()
     }
 
@@ -324,210 +511,187 @@ class TapAudioSink(
 
     override fun reset() {
         rec.event("reset", linkedMapOf("totalFrames" to rec.totalFrames))
+        if (sinkMode) resetReplayState()
         super.reset()
     }
 
     override fun release() {
         rec.event("sink_release", linkedMapOf("totalFrames" to rec.totalFrames))
         probe.stopSampling()
-        stopReplay()
+        replayDisabled = true
+        replayActive = false
         super.release()
     }
 
-    // -------------------------------------------------------------- M3 重放
+    // -------------------------------------------------------------- M3' 重放
 
+    private fun expectedRingFrames(): Long = (cfg.bMs - cfg.aMs).toLong() * sampleRate / 1000L
+
+    /** ring 就绪（[A,B) 捕获完整）后切换为 delegate 泵送重放。 */
     private fun startReplay() {
-        if (replayAttempted || replayActive || capturedFrames <= 0L) {
-            if (!replayAttempted && capturedFrames <= 0L) {
+        if (replayActive) return
+        val expected = expectedRingFrames()
+        val have = capturedFrames
+        if (have < expected - 2) {
+            if (!degradeRequested && onNeedFullRing != null) {
+                degradeRequested = true
                 rec.event(
-                    "looping",
+                    "replay_degraded",
                     linkedMapOf(
-                        "on" to false,
-                        "reason" to "no-captured-pcm",
-                        "capturedFrames" to capturedFrames,
+                        "capturedFrames" to have,
+                        "expectedFrames" to expected,
+                        "action" to "seek-to-A",
                     ),
                 )
+                onNeedFullRing?.invoke()
             }
             return
         }
-        replayAttempted = true
-        val ring: ByteArray
-        synchronized(captureLock) { ring = captured.toByteArray() }
-        val sr = sampleRate
-        val bpf = bytesPerFrame
-        val frames = ring.size / bpf
+        val bytes = synchronized(captureLock) { captured.toByteArray() }
+        ring = bytes
+        ringFrames = (bytes.size / bytesPerFrame).toLong()
+        if (replayDisabled) return
+        replayActive = true
+        replayRound = 1
+        replayOffset = 0
+        replayBuffer = null
+        lastSeamRound = 0
         rec.event(
             "looping",
             linkedMapOf(
                 "on" to true,
                 "aMs" to cfg.aMs,
                 "bMs" to cfg.bMs,
-                "ringFrames" to frames,
-                "ringBytes" to ring.size,
+                "ringFrames" to ringFrames,
+                "ringBytes" to bytes.size,
+                "mode" to "delegate-pump",
+                "startPtsUs" to cfg.bUs,
             ),
         )
-        replayActive = true
-        val looper = playbackLooper
-        if (looper == null) {
-            rec.event("replay_error", linkedMapOf("phase" to "post", "message" to "no playback looper captured"))
-            replayActive = false
-            return
-        }
-        // 变体实验：REPLAY_ON_PLAYBACK_THREAD=true 时在 playback 线程上喂（会冻结 player），
-        // 否则在独立线程上喂（player 保持运行，能观察 isEnded / playToEndOfStream 行为）。
-        if (REPLAY_ON_PLAYBACK_THREAD) {
-            Handler(looper).post {
-                replayLoop(ring, sr, bpf)
-            }
-        } else {
-            val t = Thread({ replayLoop(ring, sr, bpf) }, "spike-replay")
-            replayThread = t
-            t.start()
-        }
+        pumpReplay()
     }
 
     /**
-     * 在 EOS 之后把捕获的 [A,B) PCM 循环写入 delegate。
-     * 每一段都用单调递增的 PTS（从 bUs 起、每轮 + L），并打 seam 点。
-     * delegate 若拒绝（返回 false / 抛异常），如实记录 —— 这正是 M3 可行性判据。
+     * 把 ring 写进 delegate。每次调用尽量写满 delegate 的可用空间；renderer 对
+     * playToEndOfStream()/isEnded() 的 ~100Hz 轮询负责持续驱动（泵）。
      */
-    private fun replayLoop(ring: ByteArray, sr: Int, bpf: Int) {
-        val chunkBytes = maxOf(bpf * 1024, bpf * (sr / 100))
-        val frames = ring.size / bpf
-        val loopUs = frames * 1_000_000L / sr
-        var iter = 0
-        // 不 flush：EOS 后直接续喂是否能被 DefaultAudioSink 接受，是 M3 的关键判据。
-        // （flush 会重建 AudioTrack；若能不 flush 就续喂，接缝代价小得多。）
-        try {
-            super.play()
-        } catch (t: Throwable) {
-            rec.event("replay_error", linkedMapOf("phase" to "play", "error" to t.javaClass.name, "message" to (t.message ?: "")))
-        }
-        rec.event("replay_start", linkedMapOf("frames" to frames, "loopUs" to loopUs, "chunkBytes" to chunkBytes))
-        var ptsUs = maxOf(cfg.bUs, lastPtsUs + 10_000L)
-        while (!rec.stopped && replayActive && iter < cfg.loops) {
-            try {
-                probe.track?.let { track ->
-                    try {
-                        if (track.playState != android.media.AudioTrack.PLAYSTATE_PLAYING) {
-                            track.play()
-                            rec.event("replay_track_play", linkedMapOf("iter" to iter, "state" to track.playState))
-                        }
-                    } catch (e: Throwable) {
-                        rec.event("replay_track_error", linkedMapOf("message" to (e.message ?: e.javaClass.name)))
-                    }
-                }
+    private fun pumpReplay() {
+        if (!replayActive) return
+        val ring = ring ?: return
+        val bpf = bytesPerFrame
+        val sr = sampleRate
+        if (bpf <= 0 || sr <= 0 || ring.isEmpty()) return
+        val chunkBytes = maxOf(bpf * 512, bpf * (sr / 100))
+        var guard = 0
+        while (guard++ < 128) {
+            if (replayOffset >= ring.size) {
+                replayOffset = 0
+                replayRound += 1
+                replayBuffer = null
+            }
+            if (replayOffset == 0 && lastSeamRound != replayRound) {
+                lastSeamRound = replayRound
+                val roundPts = cfg.bUs + (replayRound - 1).toLong() * cfg.loopUs
                 rec.event(
                     "seam",
                     linkedMapOf(
-                        "iter" to (iter + 1),
+                        "iter" to replayRound,
                         "outFrames" to rec.totalFrames,
-                        "ptsUs" to ptsUs,
-                        "src" to "replay",
-                        "trigger" to "replay_start",
+                        "ptsUs" to roundPts,
+                        "src" to "sink2",
+                        "trigger" to "pump",
                     ),
                 )
-                var off = 0
-                while (off < ring.size && !rec.stopped && replayActive) {
-                    val len = minOf(chunkBytes, ring.size - off)
-                    val chunkStart = off
-                    // DefaultAudioSink 要求 buffer 的 order 是 LITTLE_ENDIAN（handleBuffer 内 checkArgument）
-                    val bb = ByteBuffer.allocateDirect(len).order(ByteOrder.LITTLE_ENDIAN)
-                    bb.put(ring, off, len)
-                    bb.flip()
-                    val chunkPts = ptsUs + (off.toLong() / bpf) * 1_000_000L / sr
-                    // 关键：delegate 未吃完时必须用同一个 ByteBuffer 实例重试（DefaultAudioSink 的契约）。
-                    while (bb.hasRemaining() && !rec.stopped && replayActive) {
-                        val posBefore = bb.position()
-                        var accepted = false
-                        try {
-                            synchronized(delegateLock) {
-                                accepted = super.handleBuffer(bb, chunkPts, 0)
-                            }
-                        } catch (t: Throwable) {
-                            rec.event(
-                                "replay_error",
-                                linkedMapOf(
-                                    "iter" to iter,
-                                    "off" to off,
-                                    "error" to t.javaClass.name,
-                                    "message" to (t.message ?: ""),
-                                    "stack" to t.stackTraceToString(),
-                                ),
-                            )
-                            replayActive = false
-                            return
-                        }
-                        val consumed = bb.position() - posBefore
-                        if (consumed > 0) {
-                            val data = ByteArray(consumed)
-                            val dup = bb.duplicate()
-                            dup.position(posBefore)
-                            dup.limit(bb.position())
-                            dup.get(data)
-                            rec.writePcm(data, bpf)
-                            rec.event(
-                                "feed",
-                                linkedMapOf(
-                                    "frames" to consumed / bpf,
-                                    "ptsUs" to chunkPts,
-                                    "bytes" to consumed,
-                                    "ret" to accepted,
-                                    "src" to "replay",
-                                    "iter" to iter,
-                                ),
-                            )
-                            off += consumed
-                        }
-                        if (bb.hasRemaining()) {
-                            // delegate 缓冲满，等它排空后继续用同一个 buffer 重试
-                            try {
-                                Thread.sleep(5L)
-                            } catch (_: InterruptedException) {
-                                replayActive = false
-                                return
-                            }
-                        }
-                    }
-                    if (off == chunkStart) {
-                        rec.event("replay_stall", linkedMapOf("iter" to iter, "off" to off))
-                        break
-                    }
+            }
+            var bb = replayBuffer
+            if (bb == null) {
+                val len = minOf(chunkBytes, ring.size - replayOffset)
+                val buf = ByteBuffer.allocateDirect(len).order(ByteOrder.LITTLE_ENDIAN)
+                buf.put(ring, replayOffset, len)
+                buf.flip()
+                replayBuffer = buf
+                bb = buf
+            }
+            val roundPts = cfg.bUs + (replayRound - 1).toLong() * cfg.loopUs
+            val chunkPts = roundPts + (replayOffset.toLong() / bpf) * 1_000_000L / sr
+            val before = bb.position()
+            val accepted: Boolean
+            try {
+                synchronized(delegateLock) {
+                    accepted = super.handleBuffer(bb, chunkPts, 1)
                 }
-                ptsUs += loopUs
-                iter += 1
-                replayIterations = iter
-            } catch (ie: InterruptedException) {
-                break
             } catch (t: Throwable) {
                 rec.event(
                     "replay_error",
-                    linkedMapOf("iter" to iter, "error" to t.javaClass.name, "message" to (t.message ?: ""), "stack" to t.stackTraceToString()),
+                    linkedMapOf(
+                        "round" to replayRound,
+                        "offset" to replayOffset,
+                        "error" to t.javaClass.name,
+                        "message" to (t.message ?: ""),
+                        "stack" to t.stackTraceToString(),
+                    ),
                 )
-                break
+                replayActive = false
+                return
             }
+            val consumed = bb.position() - before
+            if (consumed > 0) {
+                val data = readBytes(bb, before, bb.position())
+                rec.writePcm(data, bpf)
+                rec.event(
+                    "feed",
+                    linkedMapOf(
+                        "frames" to consumed / bpf,
+                        "ptsUs" to chunkPts,
+                        "bytes" to consumed,
+                        "ret" to accepted,
+                        "src" to "sink2",
+                        "iter" to replayRound,
+                    ),
+                )
+                replayOffset += consumed
+            }
+            if (bb.hasRemaining()) {
+                // delegate 缓冲满：等下一次泵（renderer 的 ~100Hz 轮询）
+                return
+            }
+            replayBuffer = null
         }
-        rec.event(
-            "replay_end",
-            linkedMapOf("iterations" to replayIterations, "stopped" to rec.stopped, "active" to replayActive),
-        )
-        replayActive = false
     }
 
-    fun stopReplay() {
+    private fun resetReplayState() {
         replayActive = false
-        val t = replayThread
-        if (t != null && t.isAlive) {
-            try {
-                t.join(800L)
-            } catch (_: InterruptedException) {
-            }
+        replayBuffer = null
+        ring = null
+        ringFrames = 0L
+        replayRound = 0
+        replayOffset = 0
+        lastSeamRound = 0
+        degradeRequested = false
+        lastFeedEndUs = 0L
+        synchronized(captureLock) {
+            captured.reset()
+            capturedFrames = 0L
+            captureLoggedBegin = false
+            captureLoggedEnd = false
         }
     }
 
     fun replayIsActive(): Boolean = replayActive
 
-    /** 仅供收尾时观察（不回填 M3 的吞 EOS 逻辑）。 */
+    /** 收尾用：停止泵送（不做线程 join，M3' 无独立线程）。 */
+    fun stopReplay() {
+        replayDisabled = true
+        replayActive = false
+    }
+
+    /** M1：源层通知新一轮起点（第一个样本改写后的时间戳），tap 在下一次喂到该 pts 时打 seam。 */
+    fun armSeam(iter: Int, firstPtsUs: Long) {
+        mediaSeamIter = iter
+        mediaSeamTargetRawUs = firstPtsUs
+        mediaSeamArmed = true
+    }
+
     fun probeEnded(): Boolean = super.isEnded()
 
     fun probePending(): Boolean = super.hasPendingData()
@@ -540,7 +704,7 @@ class TapAudioSink(
         android.media.AudioFormat.ENCODING_PCM_24BIT_PACKED -> "pcm24"
         android.media.AudioFormat.ENCODING_PCM_32BIT -> "pcm32"
         android.media.AudioFormat.ENCODING_PCM_FLOAT -> "float32"
-        else -> "enc:$encoding"
+        else -> "enc:" + encoding
     }
 
     private fun bitsPerSample(encoding: Int): Int = when (encoding) {
@@ -553,11 +717,4 @@ class TapAudioSink(
 
     private fun wavFormatTag(encoding: Int): Int =
         if (encoding == android.media.AudioFormat.ENCODING_PCM_FLOAT) 3 else 1
-
-    companion object {
-        private const val TAG = "TapAudioSink"
-
-        // M3 实验开关：true = 在 ExoPlayer playback 线程上喂（会冻结 player 消息循环）。
-        private const val REPLAY_ON_PLAYBACK_THREAD = false
-    }
 }

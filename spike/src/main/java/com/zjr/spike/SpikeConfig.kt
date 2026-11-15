@@ -14,9 +14,12 @@ data class SpikeConfig(
     val seekToMs: Int,
     val seekDelayMs: Int,
     val tag: String,
+    val pauseAtMs: Int = -1,
+    val pauseForMs: Int = 0,
 ) {
     val aUs: Long get() = aMs * 1000L
     val bUs: Long get() = bMs * 1000L
+    val loopUs: Long get() = bUs - aUs
 
     fun toMap(): Map<String, Any?> = linkedMapOf(
         "mode" to mode,
@@ -29,5 +32,7 @@ data class SpikeConfig(
         "seekToMs" to seekToMs,
         "seekDelayMs" to seekDelayMs,
         "tag" to tag,
+        "pauseAtMs" to pauseAtMs,
+        "pauseForMs" to pauseForMs,
     )
 }

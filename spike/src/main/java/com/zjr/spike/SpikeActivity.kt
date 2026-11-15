@@ -1,6 +1,7 @@
 package com.zjr.spike
 
 import android.app.Activity
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -22,6 +23,9 @@ import androidx.media3.exoplayer.source.ClippingMediaSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.LoopingMediaSource
 import androidx.media3.extractor.DefaultExtractorsFactory
+import com.zjr.spike.loopsource.IterationTicker
+import com.zjr.spike.loopsource.LoopSourceConfig
+import com.zjr.spike.loopsource.LoopingWindowMediaSource
 import java.io.File
 
 /**
@@ -84,6 +88,20 @@ class SpikeActivity : Activity() {
             .build()
         val sink = TapAudioSink(defaultSink, rec, cfg, probe)
         tapSink = sink
+        if (cfg.mode == "sink") {
+            // 环回 ring 不完整（seek 进循环区）时的降级：seek 回 A 补一轮完整 [A,B)。
+            sink.onNeedFullRing = {
+                runOnUiThread {
+                    if (!finishing) {
+                        // 回跳要留 250ms 预卷：解码 seek 会落到 A 之后若干毫秒，
+                        // 直接 seek 到 A 会让 ring 头部缺 ~15ms（682 帧）而永远不完整。
+                        val toMs = (cfg.aMs.toLong() - 250L).coerceAtLeast(0L)
+                        rec.event("degrade_seek", linkedMapOf("toMs" to toMs, "ringStartMs" to cfg.aMs))
+                        player?.seekTo(toMs)
+                    }
+                }
+            }
+        }
         val renderersFactory = TapRenderersFactory(this, sink)
         // 与主 app 的 di/MediaModule.kt 完全对齐，否则测到的不是 app 真实行为：
         //  - DefaultExtractorsFactory().setConstantBitrateSeekingEnabled(true)（MP3 seek 精度）
@@ -180,6 +198,42 @@ class SpikeActivity : Activity() {
                     ),
                 )
             }
+            "media" -> {
+                val durationUs = readDurationUs(file)
+                val source = LoopingWindowMediaSource(
+                    LoopSourceConfig(
+                        mediaItem = MediaItem.fromUri(uri),
+                        aUs = cfg.aUs,
+                        bUs = cfg.bUs,
+                        durationUs = durationUs,
+                    ),
+                    mediaSourceFactory,
+                    object : IterationTicker {
+                        override fun onRoundSwitch(iter: Int, baseUs: Long, firstPtsUs: Long) {
+                            rec.event(
+                                "source_switch",
+                                linkedMapOf(
+                                    "iter" to iter,
+                                    "baseUs" to baseUs,
+                                    "firstPtsUs" to firstPtsUs,
+                                ),
+                            )
+                            tapSink?.armSeam(iter, firstPtsUs)
+                        }
+                    },
+                )
+                p.setMediaSource(source)
+                p.repeatMode = Player.REPEAT_MODE_OFF
+                rec.event(
+                    "mode_setup",
+                    linkedMapOf(
+                        "mode" to "media",
+                        "window" to "[" + cfg.aMs + "," + cfg.bMs + ")ms",
+                        "durationUs" to durationUs,
+                        "repeatMode" to "off",
+                    ),
+                )
+            }
             else -> {
                 rec.event(
                     "error",
@@ -201,6 +255,38 @@ class SpikeActivity : Activity() {
         if (cfg.seekToMs > 0) {
             handler.postDelayed({ doSeek() }, cfg.seekDelayMs.toLong())
         }
+        if (cfg.pauseAtMs > 0) {
+            handler.postDelayed({ doPause() }, cfg.pauseAtMs.toLong())
+        }
+        if (cfg.pauseAtMs > 0 && cfg.pauseForMs > 0) {
+            handler.postDelayed({ doResume() }, (cfg.pauseAtMs + cfg.pauseForMs).toLong())
+        }
+    }
+
+    private fun doPause() {
+        val p = player ?: return
+        if (finishing) return
+        rec.event(
+            "pause_request",
+            linkedMapOf(
+                "posMs" to runCatching { p.currentPosition }.getOrDefault(-1L),
+                "replayActive" to (tapSink?.replayIsActive() ?: false),
+            ),
+        )
+        p.pause()
+    }
+
+    private fun doResume() {
+        val p = player ?: return
+        if (finishing) return
+        rec.event(
+            "resume_request",
+            linkedMapOf(
+                "posMs" to runCatching { p.currentPosition }.getOrDefault(-1L),
+                "replayActive" to (tapSink?.replayIsActive() ?: false),
+            ),
+        )
+        p.play()
     }
 
     private fun doSeek() {
@@ -378,6 +464,20 @@ class SpikeActivity : Activity() {
 
     // --------------------------------------------------------------- extras
 
+    private fun readDurationUs(file: File): Long {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(file.absolutePath)
+            val ms = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+            if (ms > 0) ms * 1000L else 0L
+        } catch (t: Throwable) {
+            rec.event("error", linkedMapOf("phase" to "duration", "message" to (t.message ?: "")))
+            0L
+        } finally {
+            runCatching { retriever.release() }
+        }
+    }
+
     private fun parseConfig(): SpikeConfig {
         val extras = intent?.extras
         fun str(name: String, def: String): String =
@@ -414,6 +514,8 @@ class SpikeActivity : Activity() {
             seekToMs = int("seekToMs", -1),
             seekDelayMs = int("seekDelayMs", 1000),
             tag = str("tag", "default"),
+            pauseAtMs = int("pauseAtMs", -1),
+            pauseForMs = int("pauseForMs", 0),
         )
     }
 
