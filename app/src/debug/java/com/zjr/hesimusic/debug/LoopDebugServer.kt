@@ -9,6 +9,8 @@ import androidx.media3.common.Player
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.model.SongLoop
 import com.zjr.hesimusic.data.mapper.toMediaItem
+import com.zjr.hesimusic.loop.LoopPosition
+import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.analysis.AnalysisState
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
 import com.zjr.hesimusic.loop.analysis.LoopCandidateKt
@@ -732,15 +734,36 @@ object LoopDebugServer {
 
     private suspend fun handleLibraryPlaylists(): List<Map<String, Any?>> {
         val d = deps()
-        val repository = d.playlistRepository()
-        return repository.getPlaylists().first().map { playlist ->
-            linkedMapOf(
+        val normalRepository = d.playlistRepository()
+        val normal = normalRepository.getPlaylists().first().map { playlist ->
+            linkedMapOf<String, Any?>(
                 "id" to playlist.id,
                 "name" to playlist.name,
-                "songCount" to repository.getPlaylistSongCount(playlist.id).first(),
+                "songCount" to normalRepository.getPlaylistSongCount(playlist.id).first(),
                 "createdAt" to playlist.createdAt,
+                "smart" to false,
+                "sqlText" to null,
             )
         }
+
+        // 智能歌单与普通歌单同表返回(D1 直接用协议断言,不必走 adbdb):
+        // smart=true + sqlText;songCount 实时求值,SQL 失效/执行失败按 0。
+        val smartRepository = d.smartPlaylistRepository()
+        val smartRows = runCatching { smartRepository.getAllList() }.getOrElse { emptyList() }
+        val smart = smartRows.map { playlist ->
+            val songCount = runCatching {
+                smartRepository.observeSongCount(playlist.id).first()
+            }.getOrDefault(0)
+            linkedMapOf<String, Any?>(
+                "id" to playlist.id,
+                "name" to playlist.name,
+                "songCount" to songCount,
+                "createdAt" to playlist.createdAt,
+                "smart" to true,
+                "sqlText" to playlist.sqlText,
+            )
+        }
+        return normal + smart
     }
 
     private suspend fun handleSongDetail(idText: String): Map<String, Any?> {
@@ -866,6 +889,9 @@ object LoopDebugServer {
     private fun handlePlayerState(): Map<String, Any?> {
         val p = player ?: throw PlayerUnavailable()
         val read = p.snapshotForRead() ?: throw PlayerUnavailable()
+        // 确保 loop bridge/entrypoint 已就绪,使 /player 的 engine 与 positionMs 折返
+        // 在“先打 /player、后打 /state”的顺序下也生效;player 已连说明 Hilt 早已就绪。
+        runCatching { deps() }
         return LinkedHashMap(snapshotMap(read.snapshot)).apply {
             put("connecting", false)
             put("stale", read.stale)
@@ -969,7 +995,9 @@ object LoopDebugServer {
             "shuffle" to snapshot.shuffle,
             "playing" to snapshot.playing,
             "playWhenReady" to snapshot.playWhenReady,
-            "positionMs" to snapshot.positionMs,
+            // 展示口径:MediaController 在 PlaybackState 刷新间会本地外推,重放跨 B 会冲出 B;
+            // 与 UI 一致地按当前 loop window 折返(幂等,无窗口/非当前歌原样返回)。
+            "positionMs" to displayPositionMs(snapshot),
             "durationMs" to snapshot.durationMs,
             "buffering" to snapshot.buffering,
             "playbackState" to snapshot.playbackState,
@@ -989,6 +1017,31 @@ object LoopDebugServer {
             }
         }
         return map
+    }
+
+    /** 当前无缝窗口:audio 实际窗口优先,runtime 为唯一窗口来源作回退;Hilt 未解析时为 null。 */
+    private fun currentLoopWindow(): LoopWindow? {
+        val entry = entryPoint ?: return null
+        return try {
+            entry.loopAudioController().window ?: entry.loopRuntime().window.value
+        } catch (t: Throwable) {
+            Log.w(TAG, "current loop window unavailable", t)
+            null
+        }
+    }
+
+    /** /state、/player 的 positionMs 展示口径折返(window.songId 必须等于当前歌)。 */
+    private fun displayPositionMs(snapshot: PlayerSnapshot): Long {
+        val rawMs = snapshot.positionMs
+        val window = currentLoopWindow() ?: return rawMs
+        val songId = snapshot.songId ?: return rawMs
+        if (window.songId != songId) return rawMs
+        return try {
+            LoopPosition.displayUs(rawMs * 1_000L, window) / 1_000L
+        } catch (t: Throwable) {
+            Log.w(TAG, "display position fold failed", t)
+            rawMs
+        }
     }
 
     private fun engineName(): String {
