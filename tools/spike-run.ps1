@@ -14,7 +14,12 @@ param(
     [int]$Tap = 1,
     [int]$SeekToMs = -1,
     [int]$SeekDelayMs = 1000,
+    [int]$PauseAtMs = -1,
+    [int]$PauseForMs = 0,
     [string]$Tag = 'default',
+
+    # 产物目录名（默认 <mode>-<tag>;M3' 用 sink2-<tag>）
+    [string]$DirName = '',
 
     # 已拷贝过同一首音频时跳过拷贝
     [switch]$Reuse,
@@ -28,7 +33,8 @@ $ErrorActionPreference = 'Stop'
 $adb = Join-Path $env:ANDROID_HOME 'platform-tools\adb.exe'
 if (-not (Test-Path $adb)) { throw "adb not found: $adb" }
 $repo = Split-Path -Parent $PSScriptRoot
-$outDir = Join-Path $repo ("spike\out\" + $Mode + "-" + $Tag)
+if ([string]::IsNullOrEmpty($DirName)) { $DirName = $Mode + "-" + $Tag }
+$outDir = Join-Path $repo ("spike\out\" + $DirName)
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
 $state = & $adb get-state 2>&1
@@ -58,7 +64,8 @@ Write-Host "[spike] audio on device: $ls"
 
 $argsLine = "am start -n com.zjr.spike/.SpikeActivity --es mode $Mode --es path $devPath " +
     "--ei aMs $AMs --ei bMs $BMs --ei seconds $Seconds --ei loops $Loops --ei tap $Tap " +
-    "--ei seekToMs $SeekToMs --ei seekDelayMs $SeekDelayMs --es tag $Tag"
+    "--ei seekToMs $SeekToMs --ei seekDelayMs $SeekDelayMs --ei pauseAtMs $PauseAtMs " +
+    "--ei pauseForMs $PauseForMs --es tag $Tag"
 Write-Host "[spike] adb shell $argsLine"
 & $adb shell $argsLine | Out-Null
 
@@ -92,7 +99,10 @@ Pull-File 'files/spike/latest.jsonl' (Join-Path $outDir 'latest.jsonl')
     tap       = $Tap
     seekToMs  = $SeekToMs
     seekDelay = $SeekDelayMs
+    pauseAtMs = $PauseAtMs
+    pauseForMs = $PauseForMs
     tag       = $Tag
+    dirName   = $DirName
     startedAt = (Get-Date).ToString('s')
     ended     = $ended
 } | ConvertTo-Json | Set-Content -Path (Join-Path $outDir 'run.json') -Encoding UTF8
