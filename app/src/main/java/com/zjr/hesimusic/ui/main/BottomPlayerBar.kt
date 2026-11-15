@@ -86,7 +86,8 @@ fun BottomPlayerBar(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(2.dp)
+                        .height(10.dp),
+                    contentAlignment = androidx.compose.ui.Alignment.Center,
                 ) {
                     LinearProgressIndicator(
                         progress = { (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f) },

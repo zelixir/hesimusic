@@ -52,12 +52,16 @@ fun LoopBarMarkerOverlay(
 ) {
     Canvas(modifier) {
         val fractions = loopMarkerFractions(window.value, durationMs) ?: return@Canvas
+        val tickHeight = size.height
+        val bandHeight = 4.dp.toPx().coerceAtMost(tickHeight)
         drawLoopMarkerLayer(
             fractions = fractions,
             insetPx = 0f,
-            bandTop = 0f,
-            bandHeight = size.height,
+            bandTop = (tickHeight - bandHeight) / 2f,
+            bandHeight = bandHeight,
             tickWidth = 2.dp.toPx(),
+            tickTop = 0f,
+            tickHeight = tickHeight,
         )
     }
 }
@@ -103,6 +107,9 @@ private fun DrawScope.drawLoopMarkerLayer(
     bandTop: Float,
     bandHeight: Float,
     tickWidth: Float,
+    // 刻度可以比高亮带更高(底部细进度条只有 2dp,刻度需要伸出来才看得见)
+    tickTop: Float = bandTop,
+    tickHeight: Float = bandHeight,
 ) {
     val usableWidth = (size.width - insetPx * 2f).coerceAtLeast(0f)
     val xa = insetPx + usableWidth * fractions.start
@@ -119,13 +126,13 @@ private fun DrawScope.drawLoopMarkerLayer(
     // A 刻度(琥珀)
     drawRect(
         color = MarkerAColor,
-        topLeft = Offset(xa - tickWidth / 2f, bandTop),
-        size = Size(tickWidth, bandHeight),
+        topLeft = Offset(xa - tickWidth / 2f, tickTop),
+        size = Size(tickWidth, tickHeight),
     )
     // B 刻度(红)
     drawRect(
         color = MarkerBColor,
-        topLeft = Offset(xb - tickWidth / 2f, bandTop),
-        size = Size(tickWidth, bandHeight),
+        topLeft = Offset(xb - tickWidth / 2f, tickTop),
+        size = Size(tickWidth, tickHeight),
     )
 }

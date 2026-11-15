@@ -44,7 +44,7 @@
 
         <provider
             android:name=".adb.AdbDbProvider"
-            android:authorities="com.zjr.hesimusic.adbdb"
+            android:authorities="${applicationId}.adbdb"
             android:exported="true"
             tools:ignore="ExportedContentProvider" />
 
