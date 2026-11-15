@@ -7,6 +7,7 @@ import com.zjr.hesimusic.data.repository.LibraryRepository
 import com.zjr.hesimusic.data.repository.PlaylistRepository
 import com.zjr.hesimusic.data.repository.SmartPlaylistRepository
 import com.zjr.hesimusic.data.repository.SongRepository
+import com.zjr.hesimusic.loop.LoopIntent
 import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
 import com.zjr.hesimusic.loop.audio.LoopAudioController
@@ -30,6 +31,7 @@ interface DebugEntryPoint {
     fun smartPlaylistRepository(): SmartPlaylistRepository
     fun playbackPreferences(): PlaybackPreferences
     fun loopAnalysisManager(): LoopAnalysisManager
+    fun loopIntent(): LoopIntent
     fun loopRuntime(): LoopRuntime
     fun loopAudioController(): LoopAudioController
     fun songLoopDao(): SongLoopDao

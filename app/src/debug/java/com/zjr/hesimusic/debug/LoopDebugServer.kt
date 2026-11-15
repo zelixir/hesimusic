@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.model.SongLoop
@@ -194,6 +195,13 @@ object LoopDebugServer {
                     "degradeCount" to controller.degradeCount,
                     "isRingComplete" to controller.isRingComplete,
                     "screen" to lastRoute,
+                    // 显式意图(issue 00004):{songId, previousRepeatMode} 或 null。
+                    "intent" to d.loopIntent().armed.value?.let { armed ->
+                        linkedMapOf(
+                            "songId" to armed.songId,
+                            "previousRepeatMode" to armed.previousRepeatMode,
+                        )
+                    },
                 )
             }
         }
@@ -329,6 +337,8 @@ object LoopDebugServer {
             method == "GET" && segments == listOf("player") -> handlePlayerState()
             method == "POST" && segments.size == 2 && segments[0] == "player" ->
                 handlePlayerCommand(segments[1], body)
+            method == "POST" && segments == listOf("loop", "enter") -> handleLoopEnter(body)
+            method == "POST" && segments == listOf("loop", "exit") -> handleLoopExit()
             method == "POST" && segments == listOf("navigate") -> handleNavigate(body)
             method == "POST" && segments == listOf("debug", "tap") -> handleDebugTap(body)
             method == "POST" && segments == listOf("debug", "reconnect") -> handleDebugReconnect()
@@ -621,6 +631,15 @@ object LoopDebugServer {
         )
     }
 
+    /** 全库可见歌曲队列 + 目标歌 index(/confirm autoPlay 与 /loop/enter 共用)。 */
+    private suspend fun libraryQueueFor(d: DebugEntryPoint, songId: Long): Pair<List<MediaItem>, Int>? {
+        val songs = runCatching { d.libraryRepository().getAllSongs().first() }.getOrNull()
+            ?: return null
+        val index = songs.indexOfFirst { it.id == songId }
+        if (index < 0) return null
+        return songs.map { it.toMediaItem() } to index
+    }
+
     /**
      * confirm 的 "先播放该歌 + REPEAT_ONE" 最佳努力实现。
      *
@@ -631,15 +650,17 @@ object LoopDebugServer {
     private suspend fun tryAutoPlay(d: DebugEntryPoint, song: Song): Boolean {
         val p = player ?: return false
         if (p.controllerOrNull() == null) return false
-        val songs = runCatching { d.libraryRepository().getAllSongs().first() }.getOrNull()
-            ?: return false
-        val index = songs.indexOfFirst { it.id == song.id }
-        if (index < 0) return false
-        val mediaItems = songs.map { it.toMediaItem() }
+        val queue = libraryQueueFor(d, song.id) ?: return false
+        val mediaItems = queue.first
+        val index = queue.second
         if (mediaItems.isEmpty()) return false
         val prefs = runCatching { d.playbackPreferences() }.getOrNull()
+        val loopIntent = d.loopIntent()
         return try {
             p.command { controller ->
+                // 与 UI「确认并保存」一致:先 arm 记录进入前 repeat,再 setRepeatMode(ONE)。
+                val previousRepeat = controller.repeatMode
+                loopIntent.arm(song.id, previousRepeat)
                 controller.repeatMode = Player.REPEAT_MODE_ONE
                 prefs?.saveRepeatMode(Player.REPEAT_MODE_ONE)
                 controller.setMediaItems(mediaItems, index, 0L)
@@ -984,6 +1005,59 @@ object LoopDebugServer {
             }
             else -> throw HttpError(404, "unknown player command: $action")
         }
+    }
+
+    /**
+     * POST /loop/enter {songId, play=true} —— 等价于菜单「无缝循环」。
+     *
+     * 顺序与 UI 一致:读当前 repeat 作为 previous → LoopIntent.arm(songId, previous)
+     * → setRepeatMode(ONE) + 持久化 → play=true 时按 /confirm 的保队列方式播放该歌。
+     */
+    private suspend fun handleLoopEnter(body: JSONObject?): Map<String, Any?> {
+        val d = deps()
+        val obj = body ?: throw HttpError(400, "JSON body required")
+        val songId = obj.requireLong("songId")
+        if (songId <= 0L) throw HttpError(400, "songId required")
+        val play = obj.optBooleanOrNull("play") ?: true
+
+        d.songRepository().getSongsByIds(listOf(songId)).firstOrNull()
+            ?: throw HttpError(404, "song not found: $songId")
+        val queue = if (play) {
+            libraryQueueFor(d, songId)
+                ?: throw HttpError(409, "song not in library queue: $songId")
+        } else {
+            null
+        }
+
+        val p = requirePlayer()
+        val prefs = d.playbackPreferences()
+        val loopIntent = d.loopIntent()
+        val result = p.command { controller ->
+            val previousRepeat = controller.repeatMode
+            loopIntent.arm(songId, previousRepeat)
+            controller.repeatMode = Player.REPEAT_MODE_ONE
+            prefs.saveRepeatMode(Player.REPEAT_MODE_ONE)
+            if (queue != null) {
+                controller.setMediaItems(queue.first, queue.second, 0L)
+                controller.prepare()
+                controller.play()
+            }
+            previousRepeat to (queue != null && controller.playWhenReady)
+        }
+        return linkedMapOf(
+            "entered" to true,
+            "songId" to songId,
+            "previousRepeatMode" to result.first,
+            "playing" to result.second,
+        )
+    }
+
+    /** POST /loop/exit —— 只清空显式意图(与 UI 的「退出无缝」一致,不在此恢复 repeat)。 */
+    private fun handleLoopExit(): Map<String, Any?> {
+        val d = deps()
+        d.loopIntent().clear()
+        Log.i(TAG, "loop intent cleared via /loop/exit")
+        return linkedMapOf("exited" to true)
     }
 
     private fun snapshotMap(snapshot: PlayerSnapshot, includeQueue: Boolean = true): Map<String, Any?> {
