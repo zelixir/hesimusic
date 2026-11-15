@@ -45,8 +45,36 @@
     powershell -NoProfile -File tools/loop-e2e.ps1 -Case L3-1,L3-2,L3-4 -AppendResults
     powershell -NoProfile -File tools/loop-e2e.ps1 -IncludeL3 -LongRunSeconds 300
 
+.PARAMETER Pkg
+    被测包名。**默认 com.zjr.hesimusic.dev(Dev 包)**。
+    日常包 com.zjr.hesimusic 是用户主力包,本脚本默认拒绝在其上安装/清数据/重启。
+
+.PARAMETER Install
+    先构建 Dev 变体(cmd /c "gradlew.bat :app:assembleDebug -PdevPackage=.dev")再
+    adb install -r -t app/build/outputs/apk/debug/app-debug.apk。目标包必须是 .dev,否则 abort。
+
+.PARAMETER DryRun
+    只打印运行计划(包名/adbdb URI/用例/是否安装),不执行任何 adb 命令。
+
+.PARAMETER AllowMainPkg
+    逃生开关:显式允许对非 .dev 包执行操作。默认关闭,日常包禁止触碰。
+
+.EXAMPLE
+    powershell -NoProfile -File tools/loop-e2e.ps1
+    powershell -NoProfile -File tools/loop-e2e.ps1 -Case A1,C1,C2
+    powershell -NoProfile -File tools/loop-e2e.ps1 -Case L3-1,L3-2,L3-4 -AppendResults
+    powershell -NoProfile -File tools/loop-e2e.ps1 -IncludeL3 -LongRunSeconds 300
+    powershell -NoProfile -File tools/loop-e2e.ps1 -Install -Case C1
+    powershell -NoProfile -File tools/loop-e2e.ps1 -DryRun
+
 .NOTES
-    前置:debug 包已装(com.zjr.hesimusic)、设备已连接、debug 服务监听 127.0.0.1:8765。
+    安全(2026-11-15 事故后强约束):
+    - **默认只在 Dev 包 com.zjr.hesimusic.dev 上跑**;日常包 com.zjr.hesimusic 是用户主力包,
+      脚本不会对其安装/清数据/重启(启动即校验 -Pkg 以 .dev 结尾,否则 exit 2);
+    - 安装步骤只构建 -PdevPackage=.dev 变体并装 .dev 包(安装前 Assert-SafePkg);
+    - adbdb authority 随 applicationId 走:content://<Pkg>.adbdb(Dev 包即 com.zjr.hesimusic.dev.adbdb);
+    - 脚本不含 pm clear / uninstall;唯一的数据改写用例是 L4-backup(export + import,会清表重导)。
+    前置:Dev debug 包已装、设备已连接、debug 服务监听 127.0.0.1:8765。
     证据目录:e2e-shots/<case>/{result.json,samples.json,state.json,logcat.txt}。
     L3 大文件落 e2e-artifacts/l3-*/。
 #>
@@ -56,8 +84,14 @@ param(
     [string]$Base = "http://127.0.0.1:18765",
     [int]$LocalPort = 18765,
     [int]$RemotePort = 8765,
-    [string]$Serial = "b1e84dad",
-    [string]$Pkg = "com.zjr.hesimusic",
+    [string]$Serial = "",
+    # 安全:默认只对 Dev 包(com.zjr.hesimusic.dev)跑。日常包 com.zjr.hesimusic 是用户主力包,
+    # 任何情况下都不得由本脚本安装/清数据/重启;确需对主包做只读排查时显式加 -AllowMainPkg。
+    [string]$Pkg = "com.zjr.hesimusic.dev",
+    [switch]$AllowMainPkg,
+    [switch]$Install,
+    [switch]$DryRun,
+    [string]$ApkPath = "app/build/outputs/apk/debug/app-debug.apk",
     [long]$SongId = 15579,
     [long]$AltSongId = 14942,
     [long]$UnconfirmedSongId = 14942,
@@ -81,6 +115,62 @@ $NL = [Environment]::NewLine
 $script:Root = (Get-Location).Path
 $script:Adb = Join-Path $env:ANDROID_HOME "platform-tools\adb.exe"
 if (-not (Test-Path $script:Adb)) { throw "adb not found: $script:Adb (set ANDROID_HOME)" }
+
+<# 跨包误操作防护:任何安装/清数据/重启前必须过这一关。 #>
+function Assert-SafePkg([string]$Action = "操作") {
+    if ($Pkg -match "\.dev$") { return }
+    if ($AllowMainPkg) {
+        Write-Host ("WARN: " + $Action + " 目标是主包 " + $Pkg + "(-AllowMainPkg 已显式放行)") -ForegroundColor Yellow
+        return
+    }
+    Write-Host ("ABORT: 拒绝对 " + $Pkg + " 执行「" + $Action + "」——本脚本只允许 Dev 包(以 .dev 结尾)。") -ForegroundColor Red
+    Write-Host "       日常包 com.zjr.hesimusic 是用户主力包;确需操作请显式加 -AllowMainPkg。" -ForegroundColor Red
+    exit 2
+}
+
+if ($Pkg -notmatch "\.dev$" -and -not $AllowMainPkg) {
+    Write-Host ("ABORT: -Pkg " + $Pkg + " 不是 Dev 包(应以 .dev 结尾)。默认/推荐:com.zjr.hesimusic.dev") -ForegroundColor Red
+    Write-Host "       只做只读排查请显式加 -AllowMainPkg;本脚本不会对主包安装/清数据。" -ForegroundColor Red
+    exit 2
+}
+
+if ($DryRun) {
+    Write-Host "== loop-e2e DRY-RUN(不触碰设备)==" -ForegroundColor Cyan
+    Write-Host ("   pkg=" + $Pkg + "  serial=" + $(if ($Serial) { $Serial } else { "(auto)" }) + "  base=" + $Base)
+    Write-Host ("   adb=" + $script:Adb)
+    Write-Host ("   cases=" + $(if ($Case.Count -gt 0) { ($Case -join ",") } else { "(default)" }))
+    Write-Host ("   install=" + $Install + "  apk=" + (Join-Path $script:Root $ApkPath))
+    Write-Host ("   adbdb=content://" + $Pkg + ".adbdb")
+    Write-Host ("   results=" + (Join-Path $script:Root $ResultsPath))
+    Write-Host "   dry-run ok(未执行任何 adb 命令)" -ForegroundColor Green
+    exit 0
+}
+
+<# 安装 Dev 变体:必须 -PdevPackage=.dev(PowerShell 里直接写会被当 task,需 cmd /c 包一层)。 #>
+function Install-DevApp {
+    Assert-SafePkg "安装"
+    $apkFull = Join-Path $script:Root $ApkPath
+    $gradlew = Join-Path $script:Root "gradlew.bat"
+    if (-not (Test-Path $gradlew)) { throw "gradlew.bat not found: $gradlew" }
+    Write-Host "== build dev variant (-PdevPackage=.dev) ==" -ForegroundColor Cyan
+    # 注意:PowerShell 里 -PdevPackage=.dev 会被拆成 task,必须经 cmd /c 传
+    $buildArgs = '""{0}" :app:assembleDebug -PdevPackage=.dev --console=plain"' -f $gradlew
+    & cmd.exe /c $buildArgs
+    if ($LASTEXITCODE -ne 0) { throw ("dev build failed (exit " + $LASTEXITCODE + ")") }
+    if (-not (Test-Path $apkFull)) { throw "apk not found: $apkFull" }
+    Write-Host ("== install -r -t " + $apkFull + " -> " + $Pkg) -ForegroundColor Cyan
+    $installArgs = @("-s", $Serial, "install", "-r", "-t", $apkFull)
+    & $script:Adb @installArgs
+    if ($LASTEXITCODE -ne 0) { throw ("adb install failed (exit " + $LASTEXITCODE + ")") }
+}
+
+if (-not $Serial) {
+    # 设备序列号会因重启/USB 重插而变(实测 b1e84dad -> e95221d0):默认自动挑唯一在线设备
+    $devLines = @((& $script:Adb devices 2>$null) | Where-Object { $_ -match "\s+device\s*$" })
+    if ($devLines.Count -lt 1) { throw "no adb device online" }
+    $Serial = ($devLines[0] -split "\s+")[0].Trim()
+}
+if ($Install) { Install-DevApp }
 $script:ResultsPath = Join-Path $script:Root $ResultsPath
 $script:ShotsDir = Join-Path $script:Root $ShotsDir
 $script:ArtifactsDir = Join-Path $script:Root $ArtifactsDir
@@ -249,7 +339,8 @@ function Get-CaseTitle([string]$Id) {
         'C7' = '重启恢复'; 'C8' = '切到另一首已确认歌自动无缝'; 'C9' = '区内 seek 预卷/degrade';
         'C10' = '暂停/恢复'; 'D1' = '智能歌单「无缝循环」'; 'D3' = '应用名区分';
         'L3-1' = 'PCM 取证 MP3(A=20s/B=50s)'; 'L3-2' = 'PCM 取证 FLAC'; 'L3-4' = '长跑 300s';
-        'C11' = '重放期 seek 落点'; 'L4-queue' = '队列/索引/位置/repeat/shuffle 恢复'; 'L4-wrap' = '首尾绕回';
+        'C11' = '重放期 seek 落点'; 'N1' = '切走恢复 repeat'; 'N2' = '切回无窗口'; 'N3' = '重新进入有窗口'; 'N4' = '用户改 repeat 退出';
+        'L4-queue' = '队列/索引/位置/repeat/shuffle 恢复'; 'L4-wrap' = '首尾绕回';
         'L4-repeat' = 'repeat 切换与持久化'; 'L4-backup' = '备份/恢复(song_loop + 智能歌单)';
         'L4-notify' = '通知/session 位置一致 + 锁屏'; 'L4-smoke' = '库/歌单/收藏基础操作'; 'L5' = '竞态风暴 200 次';
     }
@@ -415,22 +506,71 @@ function Toggle-PlayPause {
     return $r
 }
 
+function Enter-Loop {
+    # 显式意图:arm(songId) + repeat=ONE + 保队列播放(不切歌)。无缝生效的唯一入口。
+    param([long]$Id, [switch]$Play)
+    $body = @{ songId = $Id }
+    if ($Play) { $body["play"] = $true }
+    $r = Invoke-Api -Method POST -Path "/loop/enter" -Body $body
+    if (-not $r.Ok -and $null -ne $script:Cur) {
+        [void]$script:Cur.Repro.Add($r.Repro)
+        if ($r.Status -eq 404) { Add-Failure "/loop/enter 端点未落地(HTTP 404):debug 服务需先补端点" }
+    }
+    return $r
+}
+
+function Exit-Loop {
+    $r = Invoke-Api -Method POST -Path "/loop/exit" -Body @{}
+    if (-not $r.Ok -and $null -ne $script:Cur) { [void]$script:Cur.Repro.Add($r.Repro) }
+    return $r
+}
+
+function Start-PlayKeepRepeat {
+    # 不传 repeatOne:切歌时保持当前 repeat(用于验证"切走恢复 prevRepeat")
+    param([long]$Id)
+    $r = Invoke-Api -Method POST -Path "/player/play" -Body @{ songId = $Id }
+    if (-not $r.Ok -and $null -ne $script:Cur) { [void]$script:Cur.Repro.Add($r.Repro) }
+    return $r
+}
+
+function Get-LoopIntent($s) {
+    if ($null -eq $s -or $null -eq $s.loop) { return $null }
+    return $s.loop.intent
+}
+
 function Initialize-Seamless {
     param([long]$Id, [int]$SeekMs = -1, [int]$TimeoutMs = 8000)
-    Set-Repeat "one" | Out-Null
-    Start-Play $Id $true | Out-Null
-    Start-Sleep -Milliseconds 900
+    # 新语义(issue 00004):必须先 /loop/enter 显式进入,否则即使"已确认 + repeat=ONE"也不无缝。
+    # /loop/enter(play=true) 自己会:arm(记录 previousRepeat) + repeat=ONE + 用完整库队列播放该歌。
+    $enter = Enter-Loop $Id
+    if (-not $enter.Ok) {
+        # 端点不可用/进入失败时退回旧路径,保证其余断言仍有数据可看
+        Set-Repeat "one" | Out-Null
+        Start-Play $Id $true | Out-Null
+        Start-Sleep -Milliseconds 600
+    }
+    # /loop/enter(play=true) 会用完整库队列 setMediaItems:大库时 prepare 可能要十几秒,
+    # 期间 seek 会被忽略、位置不动。先等"真的在前进",再做填环。
+    $ready = Wait-State -Predicate { param($s) ($s.playback.playing -eq $true) -and ($null -ne $s.playback.positionMs) -and ([long]$s.playback.positionMs -gt 200) } -TimeoutMs 30000 -IntervalMs 300 -NoCollect
+    if ($null -ne $script:Cur) { $script:Cur.Metrics["playReadyMs"] = $ready.ElapsedMs; $script:Cur.Metrics["playReadyOk"] = $ready.Ok }
     # 环缓冲必须先完整:ring 不完整时 B 处按设计降级直通(不产生接缝),会让"无缝"用例假失败。
-    # 填环方式:从 A 前 1s 起播,完整经过 [A,B)(约 31s,每个 app 会话只付一次)。
+    # 填环方式:从 A 前 1s 起播,完整经过 [A,B)(约 31s;若 seek 未生效则要 ~50s)。
     $st = Get-State
     if ($null -ne $st -and $st.loop.isRingComplete -ne $true) {
         Invoke-Seek 19000 | Out-Null
-        $ring = Wait-State -Predicate { param($s) $s.loop.isRingComplete -eq $true } -TimeoutMs 45000 -IntervalMs 500 -NoCollect
+        Start-Sleep -Milliseconds 800
+        $afterSeek = Get-State
+        if ($null -ne $afterSeek -and $null -ne $afterSeek.playback.positionMs -and [long]$afterSeek.playback.positionMs -gt 22000) {
+            # seek 没落到位(还在更后面),再试一次
+            Invoke-Seek 19000 | Out-Null
+            Start-Sleep -Milliseconds 600
+        }
+        $ring = Wait-State -Predicate { param($s) $s.loop.isRingComplete -eq $true } -TimeoutMs 75000 -IntervalMs 500 -NoCollect
         if ($null -ne $script:Cur) { $script:Cur.Metrics["ringWaitMs"] = $ring.ElapsedMs; $script:Cur.Metrics["ringWaitOk"] = $ring.Ok }
     }
     if ($SeekMs -ge 0) {
         Invoke-Seek $SeekMs | Out-Null
-        Start-Sleep -Milliseconds 400
+        Start-Sleep -Milliseconds 500
     }
     return Wait-State -Predicate { param($s) ($null -ne $s.loop.window) -and ($s.loop.window.songId -eq $Id) -and ($s.playback.engine -eq 'loop') } -TimeoutMs $TimeoutMs -IntervalMs 200
 }
@@ -479,6 +619,7 @@ function Restart-App {
     # force-stop + 冷启。注意:冷启后必须先静默等 restore 完成再发第一次请求,
     # 否则 debug MediaController 会绑到空 player(reads idle/queue=0,writes 全无效)。
     param([int]$SilentMs = 8000, [long]$ExpectSongId = 0, [int]$ReadyTimeoutMs = 30000)
+    Assert-SafePkg "冷启重启"
     Invoke-Adb "am force-stop $Pkg" | Out-Null
     Start-Sleep -Milliseconds 1200
     Invoke-Adb "am start -n $Pkg/.MainActivity" | Out-Null
@@ -931,8 +1072,13 @@ function Case-C2 {
 function Case-C3 {
     Start-Case 'C3'
     try {
+        # 即使显式 /loop/enter,未确认行也不该出窗口(资格判定第 3 条)
+        $enter = Enter-Loop $UnconfirmedSongId
+        Start-Sleep -Milliseconds 300
         Set-Repeat "one" | Out-Null
         Start-Play $UnconfirmedSongId $true | Out-Null
+        Add-Metric "enterStatus" $enter.Status
+        Add-Metric "intentArmed" ((Get-LoopIntent (Get-State)) | ConvertTo-Json -Compress)
         $obs = Wait-State -Predicate { param($s) $false } -TimeoutMs 3200 -IntervalMs 400
         Add-SampleSeries $obs.Samples
         $s = Get-Sample $obs.State
@@ -957,10 +1103,16 @@ function Case-C3 {
 function Case-C4 {
     Start-Case 'C4'
     try {
-        $setup = Initialize-Seamless -Id $SongId -SeekMs 25000 -TimeoutMs 8000
+        # 进入前 repeat=ALL;进入后引擎设为 ONE;切走应恢复进入前的 ALL
+        Set-Repeat "all" | Out-Null
+        Start-Sleep -Milliseconds 300
+        $setup = Initialize-Seamless -Id $SongId -SeekMs 25000 -TimeoutMs 10000
         if (-not $setup.Ok) { Add-Failure "前置:主歌 window 未命中"; End-Case; return }
         $repeatBefore = $setup.State.playback.repeatMode
-        Start-Play $UnconfirmedSongId $true | Out-Null
+        Add-Metric "repeatBeforeEnter" "all"
+        Add-Metric "repeatWhileSeamless" $repeatBefore
+        Add-Metric "intentWhileSeamless" ((Get-LoopIntent $setup.State) | ConvertTo-Json -Compress)
+        Start-PlayKeepRepeat $UnconfirmedSongId | Out-Null
         $sw = Wait-State -Predicate { param($s) $s.playback.songId -eq $UnconfirmedSongId } -TimeoutMs 5000 -IntervalMs 200
         Add-SampleSeries $sw.Samples
         $after = Wait-State -Predicate { param($s) $null -eq $s.loop.window } -TimeoutMs 3000 -IntervalMs 200
@@ -979,7 +1131,9 @@ function Case-C4 {
         Add-Metric "posBefore" $p0
         Add-Metric "posAfter" $(if ($null -ne $s2) { $s2.pos } else { $null })
         if ($null -ne $s.winSong) { Add-Failure ("切歌后 window 非 null(songId=" + $s.winSong + ")") }
-        if ($s.repeat -ne $repeatBefore) { Add-Failure ("repeat 被引擎改写: " + $repeatBefore + " -> " + $s.repeat) }
+        # 新语义:切走要恢复进入前的 repeat(ALL),而不是保持 ONE
+        if ($s.repeat -ne "all") { Add-Failure ("切走后 repeat 未恢复为进入前的 all,实际 " + $s.repeat) }
+        Add-Metric "intentAfterSwitch" ((Get-LoopIntent $after.State) | ConvertTo-Json -Compress)
         if ($s.songId -ne $UnconfirmedSongId) { Add-Failure ("切歌后当前歌=" + $s.songId + " != " + $UnconfirmedSongId) }
         if ($s.playing -ne $true) { Add-Failure "新歌未在播放" }
         elseif ($null -ne $p0 -and $null -ne $s2.pos -and ($s2.pos - $p0) -lt 300) { Add-Failure ("新歌位置未前进(" + $p0 + " -> " + $s2.pos + ")") }
@@ -1001,8 +1155,10 @@ function Case-C5 {
         $allMs = (Now-Ms) - $t0
         Add-SampleSeries $all.Samples
         $sAll = Get-Sample $all.State
+        # 新语义:repeat 改非 ONE 会清空意图 → 再切回 ONE 也不自动恢复(必须重新 /loop/enter)
+        Add-Metric "intentAfterAll" ((Get-LoopIntent $all.State) | ConvertTo-Json -Compress)
         Set-Repeat "one" | Out-Null
-        $back = Wait-State -Predicate { param($s) $null -ne $s.loop.window } -TimeoutMs 5000 -IntervalMs 200
+        $back = Wait-State -Predicate { param($s) $null -ne $s.loop.window } -TimeoutMs 2500 -IntervalMs 200
         $t1 = Now-Ms
         Set-Repeat "off" | Out-Null
         $off = Wait-State -Predicate { param($s) $null -eq $s.loop.window } -TimeoutMs 1500 -IntervalMs 100
@@ -1023,6 +1179,7 @@ function Case-C5 {
         Add-Metric "posBefore" $p0
         Add-Metric "posAfter" $(if ($null -ne $sOff2) { $sOff2.pos } else { $null })
         Add-Metric "boundMs" 1000
+        if ($back.Ok) { Add-Failure "repeat 改回 one 后 window 自动恢复(新语义应保持 null,需重新 /loop/enter)" }
         if (-not $all.Ok) { Add-Failure ("repeat=all 后 1s 内 window 未变 null(耗时 " + $allMs + "ms)") }
         if (-not $off.Ok) { Add-Failure ("repeat=off 后 1s 内 window 未变 null(耗时 " + $offMs + "ms)") }
         if ($sOff.playing -ne $true) { Add-Failure "repeat=off 后播放中断" }
@@ -1037,27 +1194,152 @@ function Case-C5 {
 function Case-C8 {
     Start-Case 'C8'
     try {
+        # 新语义(issue 00004):从武装歌 A 切到另一首已确认歌 B → B 不无缝(window=null)
+        # 且 repeat 恢复为进入前的模式(而不是保持 ONE)
         $row = Get-LoopRow $AltSongId
         if ($null -eq $row) { Add-Failure ("前置:/song/" + $AltSongId + " 读取失败"); End-Case; return }
-        $conf = Invoke-Api -Method POST -Path "/confirm" -Body @{ songId = $AltSongId }
-        if (-not $conf.Ok) {
-            [void]$script:Cur.Repro.Add($conf.Repro)
-            Add-Failure ("/confirm 失败: HTTP " + $conf.Status + " " + $conf.Text)
-            End-Case; return
+        if ($row.loopConfirmed -ne $true -and $row.loopConfirmed -ne 1) {
+            $conf = Invoke-Api -Method POST -Path "/confirm" -Body @{ songId = $AltSongId }
+            if (-not $conf.Ok) { Add-Failure ("前置 /confirm 失败: HTTP " + $conf.Status + " " + $conf.Text); End-Case; return }
         }
-        Set-Repeat "one" | Out-Null
-        Start-Play $AltSongId $true | Out-Null
-        $w = Wait-State -Predicate { param($s) ($null -ne $s.loop.window) -and ($s.loop.window.songId -eq $AltSongId) -and ($s.playback.engine -eq 'loop') } -TimeoutMs 8000 -IntervalMs 200
+        Set-Repeat "all" | Out-Null
+        Start-Sleep -Milliseconds 300
+        $setup = Initialize-Seamless -Id $SongId -SeekMs 23000 -TimeoutMs 10000
+        if (-not $setup.Ok) { Add-Failure "前置:主歌 window 未命中"; End-Case; return }
+        Add-Metric "repeatWhileSeamless" $setup.State.playback.repeatMode
+        Add-Metric "intentWhileSeamless" ((Get-LoopIntent $setup.State) | ConvertTo-Json -Compress)
+        Start-PlayKeepRepeat $AltSongId | Out-Null
+        $w = Wait-State -Predicate { param($s) ($null -eq $s.loop.window) -and ($s.playback.songId -eq $AltSongId) } -TimeoutMs 5000 -IntervalMs 200
         Add-SampleSeries $w.Samples
         $s = Get-Sample $w.State
         Add-Metric "songId" $AltSongId
-        Add-Metric "confirmed" $(if ($null -ne $conf.Json) { $conf.Json.confirmed } else { $null })
         Add-Metric "windowSongId" $(if ($null -ne $s) { $s.winSong } else { $null })
         Add-Metric "engine" $(if ($null -ne $s) { $s.engine } else { $null })
-        Add-Metric "aMs" $(if ($null -ne $s) { $s.aMs } else { $null })
-        Add-Metric "bMs" $(if ($null -ne $s) { $s.bMs } else { $null })
-        Add-Metric "isReplaying" $(if ($null -ne $s) { $s.replay } else { $null })
-        if (-not $w.Ok) { Add-Failure ("切到已确认歌后 window 未命中(songId=" + $(if ($null -ne $s) { $s.winSong } else { "?" }) + ", engine=" + $(if ($null -ne $s) { $s.engine } else { "?" }) + ")") }
+        Add-Metric "repeatAfterSwitch" $(if ($null -ne $s) { $s.repeat } else { $null })
+        Add-Metric "intentAfterSwitch" ((Get-LoopIntent $w.State) | ConvertTo-Json -Compress)
+        Add-Metric "playing" $(if ($null -ne $s) { $s.playing } else { $null })
+        if (-not $w.Ok) { Add-Failure ("切到已确认歌 B 后 window 未变 null 或当前歌不是 B(window=" + $(if ($null -ne $s) { $s.winSong } else { "?" }) + ", song=" + $(if ($null -ne $s) { $s.songId } else { "?" }) + ")") }
+        if ($null -ne $s -and $s.engine -ne "exo") { Add-Failure ("切走后 engine 应为 exo,实际 " + $s.engine) }
+        if ($null -ne $s -and $s.repeat -ne "all") { Add-Failure ("切走后 repeat 未恢复为进入前的 all,实际 " + $s.repeat) }
+        if ($null -ne $s -and $s.playing -ne $true) { Add-Failure "切走后 B 未正常播放" }
+        End-Case
+    } catch {
+        Add-Failure ("异常: " + $_.Exception.Message)
+        End-Case
+    }
+}
+
+function Case-N1 {
+    Start-Case 'N1'
+    try {
+        # 进入前 repeat=ALL → 进入 A → repeat 变 ONE、intent 武装 A → 切到 B → repeat 恢复 ALL、window=null
+        Set-Repeat "all" | Out-Null
+        Start-Sleep -Milliseconds 300
+        $setup = Initialize-Seamless -Id $SongId -SeekMs 23000 -TimeoutMs 10000
+        if (-not $setup.Ok) { Add-Failure "前置:进入后 window 未命中"; End-Case; return }
+        Add-Metric "repeatWhileSeamless" $setup.State.playback.repeatMode
+        Add-Metric "intentWhileSeamless" ((Get-LoopIntent $setup.State) | ConvertTo-Json -Compress)
+        if ($setup.State.playback.repeatMode -ne "one") { Add-Failure ("/loop/enter 后 repeat 应为 one,实际 " + $setup.State.playback.repeatMode) }
+        Start-PlayKeepRepeat $AltSongId | Out-Null
+        $w = Wait-State -Predicate { param($s) ($null -eq $s.loop.window) -and ($s.playback.songId -eq $AltSongId) } -TimeoutMs 5000 -IntervalMs 200
+        Add-SampleSeries $w.Samples
+        $s = Get-Sample $w.State
+        Add-Metric "repeatAfterSwitch" $(if ($null -ne $s) { $s.repeat } else { $null })
+        Add-Metric "windowAfterSwitch" $(if ($null -ne $s) { $s.winSong } else { $null })
+        Add-Metric "intentAfterSwitch" ((Get-LoopIntent $w.State) | ConvertTo-Json -Compress)
+        if (-not $w.Ok) { Add-Failure "切到 B 后 5s 内 window 未变 null" }
+        if ($null -ne $s -and $s.repeat -ne "all") { Add-Failure ("切到 B 后 repeat 未恢复为 all,实际 " + $s.repeat) }
+        if ($null -ne $s -and $null -ne $s.winSong) { Add-Failure ("切到 B 后 window 非 null(songId=" + $s.winSong + ")") }
+        End-Case
+    } catch {
+        Add-Failure ("异常: " + $_.Exception.Message)
+        End-Case
+    }
+}
+
+function Case-N2 {
+    Start-Case 'N2'
+    try {
+        # 先制造 N1 的终态(在 B、无意图),再切回 A:A 不应自动无缝
+        Set-Repeat "all" | Out-Null
+        Start-Sleep -Milliseconds 300
+        $setup = Initialize-Seamless -Id $SongId -SeekMs 23000 -TimeoutMs 10000
+        if (-not $setup.Ok) { Add-Failure "前置:进入后 window 未命中"; End-Case; return }
+        Start-PlayKeepRepeat $AltSongId | Out-Null
+        $w1 = Wait-State -Predicate { param($s) ($null -eq $s.loop.window) -and ($s.playback.songId -eq $AltSongId) } -TimeoutMs 5000 -IntervalMs 200
+        Add-SampleSeries $w1.Samples
+        if (-not $w1.Ok) { Add-Failure "前置:切到 B 后 window 未清空"; End-Case; return }
+        Start-PlayKeepRepeat $SongId | Out-Null
+        $w2 = Wait-State -Predicate { param($s) $s.playback.songId -eq $SongId } -TimeoutMs 5000 -IntervalMs 200
+        Add-SampleSeries $w2.Samples
+        Start-Sleep -Milliseconds 2500
+        $s = Get-Sample (Get-State)
+        Add-Metric "windowBackOnA" $(if ($null -ne $s) { $s.winSong } else { $null })
+        Add-Metric "engineOnA" $(if ($null -ne $s) { $s.engine } else { $null })
+        Add-Metric "repeatOnA" $(if ($null -ne $s) { $s.repeat } else { $null })
+        Add-Metric "intentOnA" ((Get-LoopIntent (Get-State)) | ConvertTo-Json -Compress)
+        Add-Metric "playingOnA" $(if ($null -ne $s) { $s.playing } else { $null })
+        if ($null -ne $s -and $null -ne $s.winSong) { Add-Failure ("切回 A 后 window 非 null(songId=" + $s.winSong + "):不应自动恢复无缝") }
+        if ($null -ne $s -and $s.engine -ne "exo") { Add-Failure ("切回 A 后 engine 应为 exo,实际 " + $s.engine) }
+        if ($null -ne $s -and $s.playing -ne $true) { Add-Failure "切回 A 后未正常播放" }
+        End-Case
+    } catch {
+        Add-Failure ("异常: " + $_.Exception.Message)
+        End-Case
+    }
+}
+
+function Case-N3 {
+    Start-Case 'N3'
+    try {
+        # 前置:在 A、无意图 → 再次 /loop/enter {A} → window 命中
+        Set-Repeat "all" | Out-Null
+        Start-Sleep -Milliseconds 300
+        Start-PlayKeepRepeat $SongId | Out-Null
+        $base = Wait-State -Predicate { param($s) ($null -eq $s.loop.window) -and ($s.playback.songId -eq $SongId) } -TimeoutMs 6000 -IntervalMs 200
+        Add-SampleSeries $base.Samples
+        Add-Metric "windowBeforeEnter" $(if ($null -ne $base.State) { (Get-Sample $base.State).winSong } else { $null })
+        $enter = Enter-Loop $SongId
+        Add-Metric "enterStatus" $enter.Status
+        $w = Wait-State -Predicate { param($s) ($null -ne $s.loop.window) -and ($s.loop.window.songId -eq $SongId) -and ($s.playback.engine -eq 'loop') } -TimeoutMs 8000 -IntervalMs 200
+        Add-SampleSeries $w.Samples
+        $s = Get-Sample $w.State
+        Add-Metric "windowSongId" $(if ($null -ne $s) { $s.winSong } else { $null })
+        Add-Metric "engine" $(if ($null -ne $s) { $s.engine } else { $null })
+        Add-Metric "repeatAfterEnter" $(if ($null -ne $s) { $s.repeat } else { $null })
+        Add-Metric "intentAfterEnter" ((Get-LoopIntent $w.State) | ConvertTo-Json -Compress)
+        if (-not $w.Ok) { Add-Failure ("再次 /loop/enter 后 8s 内 window 未命中(engine=" + $(if ($null -ne $s) { $s.engine } else { "?" }) + ")") }
+        if ($null -ne $s -and $s.repeat -ne "one") { Add-Failure ("/loop/enter 后 repeat 应为 one,实际 " + $s.repeat) }
+        End-Case
+    } catch {
+        Add-Failure ("异常: " + $_.Exception.Message)
+        End-Case
+    }
+}
+
+function Case-N4 {
+    Start-Case 'N4'
+    try {
+        # 无缝中用户把 repeat 改成 off/all → ≤1s window=null;再改回 one 不自动恢复
+        $setup = Initialize-Seamless -Id $SongId -SeekMs 23000 -TimeoutMs 10000
+        if (-not $setup.Ok) { Add-Failure "前置:window 未命中"; End-Case; return }
+        $t0 = Now-Ms
+        Set-Repeat "off" | Out-Null
+        $off = Wait-State -Predicate { param($s) $null -eq $s.loop.window } -TimeoutMs 1500 -IntervalMs 100
+        $offMs = (Now-Ms) - $t0
+        Add-SampleSeries $off.Samples
+        Add-Metric "repeatOffWindowNull" $off.Ok
+        Add-Metric "repeatOffLatencyMs" $offMs
+        Add-Metric "intentAfterOff" ((Get-LoopIntent $off.State) | ConvertTo-Json -Compress)
+        Set-Repeat "one" | Out-Null
+        $back = Wait-State -Predicate { param($s) $null -ne $s.loop.window } -TimeoutMs 2500 -IntervalMs 200
+        Add-SampleSeries $back.Samples
+        $s = Get-Sample $back.State
+        Add-Metric "windowBackOnOne" $back.Ok
+        Add-Metric "playingAfterOne" $(if ($null -ne $s) { $s.playing } else { $null })
+        if (-not $off.Ok) { Add-Failure ("repeat=off 后 1s 内 window 未变 null(耗时 " + $offMs + "ms)") }
+        if ($back.Ok) { Add-Failure "repeat 改回 one 后 window 自动恢复(新语义应保持 null)" }
+        if ($null -ne $s -and $s.playing -ne $true) { Add-Failure "repeat 改回 one 后播放中断" }
         End-Case
     } catch {
         Add-Failure ("异常: " + $_.Exception.Message)
@@ -1225,6 +1507,7 @@ function Case-C7 {
         Add-SampleSeries $obs.Samples
         $before = Get-Sample $obs.State
         if ($null -eq $before) { Add-Failure "/state 不可用"; End-Case; return }
+        Assert-SafePkg "C7 冷启重启"
         $pidBefore = ((& $script:Adb shell "pidof $Pkg" 2>$null) -join "").Trim()
         Write-Log "   (force-stop + 冷启)" "DarkYellow"
         & $script:Adb shell "am force-stop $Pkg" 2>$null | Out-Null
@@ -1261,7 +1544,8 @@ function Case-C7 {
         if ($after.playing -ne $true) { Toggle-PlayPause | Out-Null }
         $resume = Wait-State -Predicate { param($s) $s.playback.playing -eq $true } -TimeoutMs 5000 -IntervalMs 200
         Add-SampleSeries $resume.Samples
-        $seam = Wait-State -Predicate { param($s) ($null -ne $s.loop.window) -and ($s.loop.window.songId -eq $SongId) } -TimeoutMs 8000 -IntervalMs 200
+        # 新语义(issue 00004):意图是会话级、不持久化 → 冷启后必须没有窗口(即使 repeat 仍是 ONE)
+        $seam = Wait-State -Predicate { param($s) $null -eq $s.loop.window } -TimeoutMs 4000 -IntervalMs 200
         Add-SampleSeries $seam.Samples
         $sFinal = Get-Sample $seam.State
         Start-Sleep -Milliseconds 1500
@@ -1282,7 +1566,9 @@ function Case-C7 {
         Add-Metric "posAfterResume2" $(if ($null -ne $sFinal2) { $sFinal2.pos } else { $null })
         if (-not $pidAfter) { Add-Failure "冷启后进程未起来" }
         if ($null -ne $delta -and [math]::Abs($delta) -gt 15000) { Add-Failure ("冷启后位置偏差 " + $delta + "ms(>±15s):展示 " + $before.pos + " vs 恢复 " + $after.pos) }
-        if (-not $seam.Ok) { Add-Failure ("恢复后 window 未命中(songId=" + $(if ($null -ne $sFinal) { $sFinal.winSong } else { "?" }) + ", engine=" + $(if ($null -ne $sFinal) { $sFinal.engine } else { "?" }) + ")") }
+        Add-Metric "intentAfterRestart" ((Get-LoopIntent (Get-State)) | ConvertTo-Json -Compress)
+        if ($null -ne $sFinal -and $null -ne $sFinal.winSong) { Add-Failure ("冷启后 window 非 null(songId=" + $sFinal.winSong + "):意图不应持久化") }
+        if ($null -ne $sFinal -and $sFinal.engine -ne "exo") { Add-Failure ("冷启后 engine 应为 exo,实际 " + $sFinal.engine) }
         if ($null -ne $sFinal -and $null -ne $after.pos -and [math]::Abs([long]$sFinal.pos - [long]$after.pos) -gt 15000) { Add-Failure ("恢复播放位置未从恢复位继续(" + $after.pos + " -> " + $sFinal.pos + ")") }
         Save-Logcat | Out-Null
         End-Case
@@ -2214,7 +2500,7 @@ function Case-L3-4 {
 
 # ------------------------------------------------------------------ 主流程
 
-$allCases = @('A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8', 'C9', 'C10', 'C11', 'D1', 'D3')
+$allCases = @('A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8', 'C9', 'C10', 'C11', 'N1', 'N2', 'N3', 'N4', 'D1', 'D3')
 $l3Cases = @('L3-1', 'L3-2', 'L3-4')
 $l4Cases = @('L4-queue', 'L4-wrap', 'L4-repeat', 'L4-backup', 'L4-notify', 'L4-smoke')
 $l5Cases = @('L5')
@@ -2269,6 +2555,10 @@ foreach ($c in $selected) {
         'C9' { Case-C9 }
         'C10' { Case-C10 }
         'C11' { Case-C11 }
+        'N1' { Case-N1 }
+        'N2' { Case-N2 }
+        'N3' { Case-N3 }
+        'N4' { Case-N4 }
         'D1' { Case-D1 }
         'L4-queue' { Case-L4-queue }
         'L4-wrap' { Case-L4-wrap }
