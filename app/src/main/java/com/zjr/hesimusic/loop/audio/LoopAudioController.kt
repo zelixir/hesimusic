@@ -51,6 +51,10 @@ class LoopAudioController @Inject constructor() {
             field = value
             engine.setWindow(value)
             schedulePreallocation()
+            synchronized(tapLock) {
+                // tap 运行时:窗口变化写入新的 run 快照(analyzer A2/A3 需要 aMs/bMs)。
+                writeTapRunLocked()
+            }
         }
 
     /**
@@ -130,6 +134,9 @@ class LoopAudioController @Inject constructor() {
     private var tapEventOut: BufferedWriter? = null
     private var tapEventSeq: Long = 0L
     private var tapEventStartNanos: Long = 0L
+    private var tapRunWritten: Boolean = false
+    private var tapRunWindow: LoopWindow? = null
+    private var tapFlushCount: Long = 0L
 
     private data class TapFormat(
         val sampleRate: Int,
@@ -154,11 +161,15 @@ class LoopAudioController @Inject constructor() {
             tapEventOut = null
             tapEventSeq = 0L
             tapEventStartNanos = 0L
+            tapRunWritten = false
+            tapRunWindow = null
+            tapFlushCount = 0L
             tapFailed = false
             if (file != null && tapFormat != null) {
                 openTapLocked()
                 openTapEventsLocked()
                 writeTapConfigureLocked()
+                writeTapRunLocked()
             }
         }
     }
@@ -196,9 +207,11 @@ class LoopAudioController @Inject constructor() {
                 openTapLocked()
                 openTapEventsLocked()
                 writeTapConfigureLocked()
+                if (window != null) writeTapRunLocked()
             } else if (tapFile != null) {
                 // 同一 WAV 继续写；新 sink/流只追加一条 configure。
                 writeTapConfigureLocked()
+                if (window != null) writeTapRunLocked()
             }
         }
     }
@@ -210,7 +223,10 @@ class LoopAudioController @Inject constructor() {
     internal fun onSinkFlush() {
         engine.onFlush()
         synchronized(tapLock) {
-            writeTapEventLocked("flush")
+            if (tapEventOut != null) {
+                tapFlushCount += 1L
+                writeTapEventLocked("flush")
+            }
         }
     }
 
@@ -302,6 +318,8 @@ class LoopAudioController @Inject constructor() {
             dup.position(offset)
             dup.limit(offset + length)
             dup.get(data)
+            // 第一段实际输出前补 run 快照（若 configure 时窗口尚未写入）。
+            if (!tapRunWritten) writeTapRunLocked()
             try {
                 out.write(data)
                 tapDataBytes += length.toLong()
@@ -337,8 +355,16 @@ class LoopAudioController @Inject constructor() {
         val fmt = tapFormat
         val bpf = fmt?.bytesPerFrame ?: 0
         val totalFrames = if (bpf > 0) tapDataBytes / bpf else 0L
-        writeTapEventLocked("end", "totalFrames" to totalFrames)
+        writeTapEventLocked(
+            "end",
+            "totalFrames" to totalFrames,
+            "flushCount" to tapFlushCount,
+            "degradeCount" to engine.degradeCount,
+        )
         closeTapEventLocked()
+        tapFlushCount = 0L
+        tapRunWritten = false
+        tapRunWindow = null
 
         val out = tapOut
         tapOut = null
@@ -388,6 +414,9 @@ class LoopAudioController @Inject constructor() {
             tapEventOut = BufferedWriter(OutputStreamWriter(stream, Charsets.UTF_8))
             tapEventStartNanos = System.nanoTime()
             tapEventSeq = 0L
+            tapRunWritten = false
+            tapRunWindow = null
+            tapFlushCount = 0L
         } catch (e: IOException) {
             tapEventOut = null
         }
@@ -412,6 +441,28 @@ class LoopAudioController @Inject constructor() {
             "ch" to fmt.channels,
             "bpf" to fmt.bytesPerFrame,
         )
+    }
+
+    /**
+     * A2/A3 门禁需要的 run 快照：aMs/bMs 来自当前 controller.window；
+     * window 为 null 时写 null。窗口变化时允许写新的 run（代表新的环回段）。
+     */
+    private fun writeTapRunLocked() {
+        if (tapEventOut == null) return
+        val w = window
+        if (tapRunWritten && tapRunWindow == w) return
+        val sampleRate = tapFormat?.sampleRate ?: 0
+        val aMs = w?.let { it.loopStartUs / 1000L }
+        val bMs = w?.let { it.loopEndUs / 1000L }
+        writeTapEventLocked(
+            "run",
+            "mode" to "sink",
+            "aMs" to aMs,
+            "bMs" to bMs,
+            "sampleRate" to sampleRate,
+        )
+        tapRunWritten = true
+        tapRunWindow = w
     }
 
     private fun writeTapEventLocked(event: String, vararg fields: Pair<String, Any?>) {

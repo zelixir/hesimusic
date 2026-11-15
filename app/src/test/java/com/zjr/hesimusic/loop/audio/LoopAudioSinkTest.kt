@@ -689,6 +689,16 @@ class LoopAudioSinkTest {
                 },
             )
             assertTrue(
+                "run 事件应包含 aMs/bMs/sampleRate",
+                lines.any {
+                    it.contains("\"ev\":\"run\"") &&
+                        it.contains("\"mode\":\"sink\"") &&
+                        it.contains("\"aMs\":100") &&
+                        it.contains("\"bMs\":200") &&
+                        it.contains("\"sampleRate\":1000")
+                },
+            )
+            assertTrue(
                 "seam 事件应包含 iter/outFrames/ptsUs",
                 lines.any {
                     it.contains("\"ev\":\"seam\"") &&
@@ -707,6 +717,8 @@ class LoopAudioSinkTest {
                 (file.length() - 44L) / 2L,
                 totalFrames,
             )
+            assertTrue("end 应带 flushCount=1", endLine.contains("\"flushCount\":1"))
+            assertTrue("end 应带 degradeCount=0", endLine.contains("\"degradeCount\":0"))
         } finally {
             file.delete()
             sidecar.delete()
@@ -745,6 +757,16 @@ class LoopAudioSinkTest {
                         it.contains("\"targetRawUs\":750000")
                 },
             )
+            assertTrue(
+                "run 事件应反映当前窗口",
+                lines.any {
+                    it.contains("\"ev\":\"run\"") &&
+                        it.contains("\"aMs\":1000") &&
+                        it.contains("\"bMs\":2000")
+                },
+            )
+            val endLine = lines.last { it.contains("\"ev\":\"end\"") }
+            assertTrue("end 应带 degradeCount=1", endLine.contains("\"degradeCount\":1"))
         } finally {
             file.delete()
             sidecar.delete()
@@ -754,6 +776,7 @@ class LoopAudioSinkTest {
     @Test
     fun `debug PCM tap 落 WAV 且数据长度正确`() {
         val file = File.createTempFile("loop-tap-", ".wav")
+        val sidecar = File(file.parentFile, file.name + ".jsonl")
         try {
             val controller = LoopAudioController()
             controller.setPcmTap(file)
@@ -770,8 +793,19 @@ class LoopAudioSinkTest {
             assertEquals("WAVE", String(bytes, 8, 4, Charsets.US_ASCII))
             val dataSize = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).getInt(40)
             assertEquals("data chunk 长度应为 200", 200, dataSize)
+
+            val lines = sidecar.readLines()
+            assertTrue(
+                "window=null 时 run 的 aMs/bMs 应为 null",
+                lines.any {
+                    it.contains("\"ev\":\"run\"") &&
+                        it.contains("\"aMs\":null") &&
+                        it.contains("\"bMs\":null")
+                },
+            )
         } finally {
             file.delete()
+            sidecar.delete()
         }
     }
 }
