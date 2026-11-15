@@ -83,6 +83,9 @@ JSON Lines,**每行一个事件**,字段如下(`t` = 相对播放开始的毫秒
 - `feed.frames` = 本次**真正写进 delegate sink** 的帧数(不是 buffer 的原始帧数;若包装层做了拆分/丢弃要如实记);
 - `feed.ptsUs` = 本次写进 delegate 的**时间戳**(机制层可能改写时间戳,这里必须是被改写后的值);
 - `seam` 事件由机制层主动打点(得知轮次时);没有就省略;
+  **字段语义(2026-11-15 裁定,消除歧义)**:`seam.outFrames` = **累计**已输出到 delegate 的帧数(自本次运行开始计,
+  不是本轮帧数);`seam.iter` = 完成这一轮后的轮次序号(从 1 开始,首轮不需要打点);`seam.ptsUs` = 新一轮第一个样本喂给
+  delegate 时使用的时间戳。分析器据此做"零漂移/逐轮逐位相同"判定。
 - `flush` 覆盖 `AudioSink.flush()` 与 `handleDiscontinuity()`(后者单独记为 `{"ev":"discontinuity"}`);
 - `track` 每 500ms 采一次:`underrun` 用 `AudioTrack.getUnderrunCount()`(经 `DefaultAudioSink.Builder.setAudioTrackProvider` 拿到 AudioTrack 引用),`headFrames` = `getPlaybackHeadPosition()`;
 - 日志写入必须线程安全(playback 线程 + 采样线程),用单锁 + 顺序写。
