@@ -95,4 +95,51 @@ object LoopSessionProjection {
         val atLeastCurrent = maxOf(projected, currentDisplayUs)
         return if (durationUs > 0L) atLeastCurrent.coerceAtMost(durationUs) else atLeastCurrent
     }
+
+    // ---------------------------------------------------------------- 窗口来源（C2 修复）
+
+    /** 窗口来源：服务层派生态 / 重放期的音频层权威值 / 无（透传）。 */
+    enum class WindowSource {
+        /** runtime.window（服务层派生态，正常情况下就是它）。 */
+        RUNTIME,
+        /** runtime.window 暂不可用（异步 refresh 尚未落值/还是上一首）时的重放期回退。 */
+        AUDIO_FALLBACK,
+        /** 没有任何可用窗口 → 调用方完全透传。 */
+        NONE,
+    }
+
+    data class ResolvedWindow(
+        val window: LoopWindow?,
+        val source: WindowSource,
+    )
+
+    /**
+     * 选出「当前项该用哪个窗口」。
+     *
+     * 为什么需要回退（E2E 15472/15579 实测）：重放开始后 1.0~1.5s 内，对外 position 会跟着
+     * ExoPlayer 原始位置冲到 B+1381ms（历史最大 2.7s）再折返 —— 因为 runtime.window 由
+     * LoopPlaybackCoordinator.refresh() 的异步协程写入，在 transition/seek 之后的短窗口里
+     * 可能还是 null 或上一首的，而会话层当时只认它 → 退化成透传。
+     *
+     * 音频层的 window 是在 syncShape 里**同步**写的，且引擎只有在 window 非空时才重放，
+     * 所以「isReplaying == true」时 audio.window 就是权威口径。
+     *
+     * 两处都做 songId 归属校验：事件可能早于/晚于 transition。
+     */
+    fun resolveWindow(
+        songId: Long?,
+        runtimeWindow: LoopWindow?,
+        audioWindow: LoopWindow?,
+        isReplaying: Boolean,
+    ): ResolvedWindow {
+        val usableRuntime = runtimeWindow?.takeIf { songId != null && it.songId == songId }
+        if (usableRuntime != null) return ResolvedWindow(usableRuntime, WindowSource.RUNTIME)
+
+        // 只在重放期回退：非重放期音频层没有 window 语义，透传才是正确行为
+        if (isReplaying) {
+            val usableAudio = audioWindow?.takeIf { songId != null && it.songId == songId }
+            if (usableAudio != null) return ResolvedWindow(usableAudio, WindowSource.AUDIO_FALLBACK)
+        }
+        return ResolvedWindow(null, WindowSource.NONE)
+    }
 }

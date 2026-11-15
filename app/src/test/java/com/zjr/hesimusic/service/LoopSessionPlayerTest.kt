@@ -2,6 +2,8 @@ package com.zjr.hesimusic.service
 
 import com.zjr.hesimusic.loop.LoopWindow
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -18,6 +20,9 @@ import org.junit.Test
 class LoopSessionPlayerTest {
 
     private val window = LoopWindow(songId = 7L, loopStartUs = A, loopEndUs = B)
+
+    /** 另一首歌的窗口（songId 归属校验用）。 */
+    private val otherWindow = LoopWindow(songId = 9L, loopStartUs = A, loopEndUs = B)
 
     // ---------------------------------------------------------------- 1. window = null 全透传
 
@@ -247,6 +252,91 @@ class LoopSessionPlayerTest {
         // SessionPlayer 对外的单位是 ms：34_000_000us 的 raw 应报 14_000ms
         val rawUs = LoopSessionProjection.rawUs(true, 34_000_000L, 20_000L)
         assertEquals(14_000L, LoopSessionProjection.displayUs(rawUs, window) / LoopSessionProjection.US_PER_MS)
+    }
+
+    // ---------------------------------------------------------------- 9. 窗口来源回退（C2）
+
+    @Test
+    fun resolveWindow_prefersRuntimeWindow() {
+        val resolved = LoopSessionProjection.resolveWindow(
+            songId = 7L,
+            runtimeWindow = window,
+            audioWindow = otherWindow,
+            isReplaying = true,
+        )
+        assertEquals(LoopSessionProjection.WindowSource.RUNTIME, resolved.source)
+        assertEquals(window, resolved.window)
+    }
+
+    @Test
+    fun resolveWindow_fallsBackToAudioWindowWhileReplaying() {
+        // C2 场景：重放已经开始，但 runtime.window 还是 null（refresh 协程尚未落值）
+        val resolved = LoopSessionProjection.resolveWindow(
+            songId = 7L,
+            runtimeWindow = null,
+            audioWindow = window,
+            isReplaying = true,
+        )
+        assertEquals(LoopSessionProjection.WindowSource.AUDIO_FALLBACK, resolved.source)
+        assertEquals(window, resolved.window)
+        // 对外时长同样基于回退窗口（整曲时长）
+        assertEquals(225_000_000L, LoopSessionProjection.durationUs(resolved.window!!, 225_000_000L))
+    }
+
+    @Test
+    fun resolveWindow_doesNotFallbackWhenNotReplaying() {
+        // 非重放期 audio.window 没有意义：透传才是正确行为
+        val resolved = LoopSessionProjection.resolveWindow(7L, null, window, isReplaying = false)
+        assertEquals(LoopSessionProjection.WindowSource.NONE, resolved.source)
+        assertNull(resolved.window)
+    }
+
+    @Test
+    fun resolveWindow_passesThroughWhenBothWindowsBelongToOtherSongs() {
+        val resolved = LoopSessionProjection.resolveWindow(
+            songId = 8L,
+            runtimeWindow = window, // song 7
+            audioWindow = otherWindow, // song 9
+            isReplaying = true,
+        )
+        assertEquals(LoopSessionProjection.WindowSource.NONE, resolved.source)
+        assertNull(resolved.window)
+        // songId 未知（空队列 / 无当前 item）同样透传
+        assertNull(LoopSessionProjection.resolveWindow(null, window, otherWindow, true).window)
+    }
+
+    @Test
+    fun resolveWindow_staleRuntimeWindowFallsBackToAudioForCurrentSong() {
+        // runtime.window 还是上一首的（songId 不符）→ 视为不可用；重放期回退到当前歌的 audio.window
+        val resolved = LoopSessionProjection.resolveWindow(
+            songId = 7L,
+            runtimeWindow = LoopWindow(songId = 3L, loopStartUs = A, loopEndUs = B),
+            audioWindow = window,
+            isReplaying = true,
+        )
+        assertEquals(LoopSessionProjection.WindowSource.AUDIO_FALLBACK, resolved.source)
+        assertEquals(window, resolved.window)
+    }
+
+    @Test
+    fun fallbackWindow_foldsRawBeyondBBackIntoWindow() {
+        // E2E 实测：A=20s、B=50s，重放开始后 raw 冲到 B+1381ms → display 必须落在 [A,B)
+        val e2e = LoopWindow(songId = 7L, loopStartUs = 20_000_000L, loopEndUs = 50_000_000L)
+        val resolved = LoopSessionProjection.resolveWindow(7L, null, e2e, isReplaying = true)
+        val activeWindow = resolved.window!!
+        // 重放期 raw 取 sink 位置（player 位置会冻结在 B）
+        val rawUs = LoopSessionProjection.rawUs(
+            isReplaying = true,
+            replayPositionUs = 51_381_000L,
+            playerPositionMs = 50_000L,
+        )
+        assertEquals(51_381_000L, rawUs)
+        val displayUs = LoopSessionProjection.displayUs(rawUs, activeWindow)
+        assertEquals(21_381_000L, displayUs)
+        assertTrue(
+            "display 必须落在 [A,B) 内",
+            displayUs >= activeWindow.loopStartUs && displayUs < activeWindow.loopEndUs,
+        )
     }
 
     private companion object {
