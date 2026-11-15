@@ -2,6 +2,7 @@ package com.zjr.hesimusic.ui.common
 
 import android.content.ComponentName
 import android.content.Context
+import android.os.SystemClock
 import android.os.CountDownTimer
 import android.util.Log
 import androidx.lifecycle.ViewModel
@@ -53,6 +54,9 @@ class MusicViewModel @Inject constructor(
 
     companion object {
         private const val TAG = "MusicViewModel"
+
+        /** seek 后强制刷新位置的时长:足够覆盖 MediaController 返回新 PlaybackState 的延迟。 */
+        private const val POSITION_REFRESH_WINDOW_MS = 2_000L
     }
 
     private var mediaControllerFuture: ListenableFuture<MediaController>? = null
@@ -240,10 +244,20 @@ class MusicViewModel @Inject constructor(
         }
     }
 
+    /** seek 之后的强制刷新窗口(毫秒),见 [startProgressUpdateLoop] 的注释。 */
+    @Volatile
+    private var positionRefreshUntilMs = 0L
+
     private fun startProgressUpdateLoop() {
         viewModelScope.launch {
             while (isActive) {
-                if (mediaController?.isPlaying == true) {
+                // 播放中每秒刷新;暂停态只在「刚 seek 过」的 2s 窗口内刷新。
+                // 为什么需要暂停态刷新:MediaController 的位置更新不会触发任何播放状态回调,
+                // 且下方 updateState() 在 seekTo 之后立刻调用时拿到的还是旧快照 —— 若不补刷新,
+                // 暂停时拖动进度条会一直显示旧位置(看起来像"拖动无效/回弹")。
+                if (mediaController?.isPlaying == true ||
+                    SystemClock.elapsedRealtime() < positionRefreshUntilMs
+                ) {
                     updateState()
                 }
                 delay(1000) // Update every second
@@ -398,6 +412,9 @@ class MusicViewModel @Inject constructor(
 
     fun seekTo(position: Long) {
         mediaController?.seekTo(position)
+        // 让进度循环在接下来 2s 内持续刷新,覆盖 MediaController 返回新位置之前的空窗,
+        // 这样暂停态拖动也能在一次 tick 内显示到目标位置。
+        positionRefreshUntilMs = SystemClock.elapsedRealtime() + POSITION_REFRESH_WINDOW_MS
         updateState() // Immediate update for UI responsiveness
     }
 

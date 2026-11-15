@@ -54,6 +54,11 @@ fun SongList(
     selectedSongIds: Set<Long> = emptySet(),
     onBatchSongToggle: ((Song) -> Unit)? = null,
     queueDisplayBySongId: Map<Long, String> = emptyMap(),
+    /**
+     * 无缝循环状态(songId → confirmed),由 ViewModel 一次整表查询得到(issue 00007)。
+     * 默认空 map 保证未接入的调用点零改动;缺失的 songId 表示"无分析结果",不画符号。
+     */
+    loopConfirmed: Map<Long, Boolean> = emptyMap(),
     modifier: Modifier = Modifier,
     appLogger: AppLogger? = null
 ) {
@@ -179,6 +184,7 @@ fun SongList(
                         index = if (isBatchMode) null else index + 1,
                         indexText = if (isBatchMode) null else queueDisplay,
                         indexTextColor = if (queueDisplay != null) Color.Red else null,
+                        loopStatus = loopConfirmed[song.id],
                         onClick = {
                             if (isBatchMode) {
                                 onBatchSongToggle?.invoke(song)
@@ -219,6 +225,7 @@ fun SongList(
                             index = if (isBatchMode) null else globalIndex,
                             indexText = if (isBatchMode) null else queueDisplay,
                             indexTextColor = if (queueDisplay != null) Color.Red else null,
+                            loopStatus = loopConfirmed[song.id],
                             onClick = {
                                 if (isBatchMode) {
                                     onBatchSongToggle?.invoke(song)

@@ -15,7 +15,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,13 +56,7 @@ fun SongActionHost(
      * (null = 无行/查询失败,false = 临时结果,true = 最终结果),由调用方决定
      * 「直接播放 + REPEAT_ONE」还是「导航到分析页」。
      */
-    onSeamlessLoop: ((Song, Boolean?) -> Unit)? = null,
-    /** 「重新分析」:仅已有结果时显示,导航到分析页(页内加载已存结果,不自动重分析)。 */
-    onLoopReanalyze: ((Song) -> Unit)? = null,
-    /** 「取消最终结果」:仅 confirmed=1 时显示,调用方做 demoteFinal。 */
-    onLoopDemote: ((Song) -> Unit)? = null,
-    /** 「删除分析结果」:仅已有结果时显示(确认框在本菜单内),调用方做 deleteResult。 */
-    onLoopDelete: ((Song) -> Unit)? = null
+    onSeamlessLoop: ((Song, Boolean?) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -72,19 +65,10 @@ fun SongActionHost(
     var showInfoDialog by remember(selectedSong) { mutableStateOf(false) }
     var showHideConfirmDialog by remember(selectedSong) { mutableStateOf(false) }
     var showDeleteDialog by remember(selectedSong) { mutableStateOf(false) }
-    var showDeleteLoopDialog by remember(selectedSong) { mutableStateOf(false) }
     var metadata by remember(selectedSong) { mutableStateOf<Map<String, String>>(emptyMap()) }
-    // 当前歌的 song_loop 行(驱动「重新分析 / 取消最终结果 / 删除分析结果」显隐);
-    // 打开菜单即异步预查,点击「无缝循环」时再实时复查一次。
-    var loopRow by remember(selectedSong) { mutableStateOf<SongLoop?>(null) }
     val menuTextStyle = largeMenuTextStyle()
 
-    LaunchedEffect(selectedSong) {
-        val song = selectedSong ?: return@LaunchedEffect
-        loopRow = runCatching { loopEntryViewModel.loopRow(song.id) }.getOrNull()
-    }
-
-    if (selectedSong != null && !showAddDialog && !showInfoDialog && !showHideConfirmDialog && !showDeleteDialog && !showDeleteLoopDialog) {
+    if (selectedSong != null && !showAddDialog && !showInfoDialog && !showHideConfirmDialog && !showDeleteDialog) {
         AlertDialog(
             onDismissRequest = onDismiss,
             title = { Text(selectedSong.title) },
@@ -158,7 +142,6 @@ fun SongActionHost(
                                         val song = selectedSong
                                         scope.launch {
                                             val row = runCatching { loopEntryViewModel.loopRow(song.id) }.getOrNull()
-                                            loopRow = row
                                             onSeamlessLoop.invoke(song, row?.confirmed)
                                             onDismiss()
                                         }
@@ -166,45 +149,6 @@ fun SongActionHost(
                                 }
                         )
                         Spacer(modifier = Modifier.height(12.dp))
-                        if (onLoopReanalyze != null && loopRow != null && !isCueTrack) {
-                            Text(
-                                text = "重新分析",
-                                style = menuTextStyle,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        onLoopReanalyze.invoke(selectedSong)
-                                        onDismiss()
-                                    }
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
-                        }
-                        if (onLoopDemote != null && loopRow?.confirmed == true && !isCueTrack) {
-                            Text(
-                                text = "取消最终结果",
-                                style = menuTextStyle,
-                                color = MaterialTheme.colorScheme.error,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        onLoopDemote.invoke(selectedSong)
-                                        onDismiss()
-                                    }
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
-                        }
-                        if (onLoopDelete != null && loopRow != null && !isCueTrack) {
-                            Text(
-                                text = "删除分析结果",
-                                style = menuTextStyle,
-                                color = MaterialTheme.colorScheme.error,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { showDeleteLoopDialog = true }
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
-                        }
                     }
                     Text(
                         text = "从曲库中隐藏歌曲",
@@ -314,32 +258,10 @@ fun SongActionHost(
             }
         )
     }
-
-    if (selectedSong != null && showDeleteLoopDialog) {
-        AlertDialog(
-            onDismissRequest = { showDeleteLoopDialog = false },
-            title = { Text("删除分析结果") },
-            text = { Text("确定删除这首歌的无缝循环分析结果吗？删除后下次进入需要重新分析。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    onLoopDelete?.invoke(selectedSong)
-                    showDeleteLoopDialog = false
-                    onDismiss()
-                }) {
-                    Text("删除")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDeleteLoopDialog = false }) {
-                    Text("取消")
-                }
-            }
-        )
-    }
 }
 
 /**
- * 菜单侧只读查询 song_loop 行(决定「无缝循环」三态与三个结果菜单项的显隐)。
+ * 菜单侧只读查询 song_loop 行(仅决定「无缝循环」三态:无行 / 临时 / 最终)。
  * **不做任何播放/写库动作** —— 菜单只发事件(契约 §1)。
  */
 @HiltViewModel

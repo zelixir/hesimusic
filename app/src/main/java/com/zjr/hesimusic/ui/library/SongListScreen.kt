@@ -52,10 +52,7 @@ fun SongListScreen(
     onSleepTimerClick: () -> Unit,
     onLogsClick: () -> Unit,
     // 无缝循环菜单事件(仅透传;决策/播放/导航在 MainActivity)
-    onSeamlessLoop: ((Song, Boolean?) -> Unit)? = null,
-    onLoopReanalyze: ((Song) -> Unit)? = null,
-    onLoopDemote: ((Song) -> Unit)? = null,
-    onLoopDelete: ((Song) -> Unit)? = null
+    onSeamlessLoop: ((Song, Boolean?) -> Unit)? = null
 ) {
     val songsFlow = when (type) {
         "artist" -> viewModel.getSongsByArtist(value)
@@ -83,6 +80,8 @@ fun SongListScreen(
     val sleepTimerState by musicViewModel.sleepTimerState.collectAsState()
     val listBackgroundImageUri by settingsViewModel.listBackgroundImageUri.collectAsState()
     val playlists by viewModel.playlists.collectAsState()
+    // 序号下方的无缝循环状态(一次整表 map;Room Flow 驱动,确认/取消/删除后自动刷新)
+    val loopConfirmed by viewModel.loopConfirmed.collectAsState()
     var selectedSongForActions by remember { mutableStateOf<Song?>(null) }
     var isBatchMode by remember { mutableStateOf(false) }
     var batchSelectedSongIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
@@ -207,6 +206,7 @@ fun SongListScreen(
                 isBatchMode = isBatchMode,
                 selectedSongIds = batchSelectedSongIds,
                 queueDisplayBySongId = if (isCurrentPlayingList) buildQueueDisplayBySongId(playQueueSongIds) else emptyMap(),
+                loopConfirmed = loopConfirmed,
                 onBatchSongToggle = { song ->
                     batchSelectedSongIds = if (song.id in batchSelectedSongIds) {
                         batchSelectedSongIds - song.id
@@ -231,10 +231,7 @@ fun SongListScreen(
                 onAddToQueue = if (isCurrentPlayingList) { song ->
                     musicViewModel.addSongsToPlayQueue(listOf(song))
                 } else null,
-                onSeamlessLoop = onSeamlessLoop,
-                onLoopReanalyze = onLoopReanalyze,
-                onLoopDemote = onLoopDemote,
-                onLoopDelete = onLoopDelete
+                onSeamlessLoop = onSeamlessLoop
             )
             if (showBatchAddDialog) {
                 AddToPlaylistDialog(

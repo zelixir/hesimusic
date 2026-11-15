@@ -2,7 +2,6 @@ package com.zjr.hesimusic
 
 import android.os.Bundle
 import android.util.Log
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -17,7 +16,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.res.stringResource
@@ -31,10 +29,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
-import androidx.compose.ui.platform.LocalContext
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.loop.LoopIntent
-import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
 import com.zjr.hesimusic.ui.about.AboutScreen
 import com.zjr.hesimusic.ui.common.UiNavigationHooks
 import com.zjr.hesimusic.ui.debug.TagDebugScreen
@@ -58,7 +54,6 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -83,8 +78,6 @@ class MainActivity : ComponentActivity() {
     lateinit var appLogger: AppLogger
     @Inject
     lateinit var playbackPreferences: PlaybackPreferences
-    @Inject
-    lateinit var loopAnalysisManager: LoopAnalysisManager
     @Inject
     lateinit var loopIntent: LoopIntent
     
@@ -175,7 +168,6 @@ class MainActivity : ComponentActivity() {
                             val loopActions = rememberLoopMenuActions(
                                 navController = navController,
                                 musicViewModel = homeMusicViewModel,
-                                loopAnalysisManager = loopAnalysisManager,
                                 loopIntent = loopIntent,
                             )
                             MainScreen(
@@ -199,9 +191,6 @@ class MainActivity : ComponentActivity() {
                                 onSleepTimerClick = { navController.navigate("sleep_timer") },
                                 onLogsClick = { navController.navigate("logs") },
                                 onSeamlessLoop = loopActions.onSeamlessLoop,
-                                onLoopReanalyze = loopActions.onReanalyze,
-                                onLoopDemote = loopActions.onDemote,
-                                onLoopDelete = loopActions.onDelete,
                             )
                         }
 
@@ -272,7 +261,6 @@ class MainActivity : ComponentActivity() {
                             val loopActions = rememberLoopMenuActions(
                                 navController = navController,
                                 musicViewModel = detailMusicViewModel,
-                                loopAnalysisManager = loopAnalysisManager,
                                 loopIntent = loopIntent,
                             )
                             SongListScreen(
@@ -290,9 +278,6 @@ class MainActivity : ComponentActivity() {
                                 onSleepTimerClick = { navController.navigate("sleep_timer") },
                                 onLogsClick = { navController.navigate("logs") },
                                 onSeamlessLoop = loopActions.onSeamlessLoop,
-                                onLoopReanalyze = loopActions.onReanalyze,
-                                onLoopDemote = loopActions.onDemote,
-                                onLoopDelete = loopActions.onDelete,
                             )
                         }
 
@@ -355,12 +340,9 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** 菜单「无缝循环」相关事件的处理集合(MainActivity 负责播放/导航/写库,菜单只发事件)。 */
+/** 菜单「无缝循环」事件(MainActivity 负责播放/导航,菜单只发事件)。 */
 private data class LoopMenuActions(
     val onSeamlessLoop: (Song, Boolean?) -> Unit,
-    val onReanalyze: (Song) -> Unit,
-    val onDemote: (Song) -> Unit,
-    val onDelete: (Song) -> Unit,
 )
 
 /**
@@ -368,19 +350,16 @@ private data class LoopMenuActions(
  * - 行 confirmed=1 → **显式武装该歌的无缝意图** + 播放该歌 + repeatMode=ONE;
  * - 行 confirmed=0(临时)或无行 → 导航 loop/{songId}(进页加载已存结果 / 自动分析)。
  *
- * 「重新分析」导航到同一路由(页面加载已存结果,重分析走页内按钮);
- * 「取消最终结果」「删除分析结果」直接调 Manager(菜单不写播放逻辑)。
+ * 「重新分析 / 取消最终结果 / 删除分析结果」已从长按菜单移入结果页(页内自行处理),
+ * 这里只保留入口。
  */
 @Composable
 private fun rememberLoopMenuActions(
     navController: NavHostController,
     musicViewModel: MusicViewModel,
-    loopAnalysisManager: LoopAnalysisManager,
     loopIntent: LoopIntent,
 ): LoopMenuActions {
-    val scope = rememberCoroutineScope()
-    val context = LocalContext.current
-    return remember(navController, musicViewModel, loopAnalysisManager, loopIntent) {
+    return remember(navController, musicViewModel, loopIntent) {
         LoopMenuActions(
             onSeamlessLoop = { song, confirmed ->
                 when (confirmed) {
@@ -392,19 +371,6 @@ private fun rememberLoopMenuActions(
                         musicViewModel.setRepeatMode(Player.REPEAT_MODE_ONE)
                     }
                     else -> navController.navigate("loop/${song.id}")
-                }
-            },
-            onReanalyze = { song -> navController.navigate("loop/${song.id}") },
-            onDemote = { song ->
-                scope.launch {
-                    runCatching { loopAnalysisManager.demoteFinal(song.id) }
-                    Toast.makeText(context, "已转为临时结果，不再无缝", Toast.LENGTH_SHORT).show()
-                }
-            },
-            onDelete = { song ->
-                scope.launch {
-                    runCatching { loopAnalysisManager.deleteResult(song.id) }
-                    Toast.makeText(context, "已删除分析结果，下次进入将重新分析", Toast.LENGTH_SHORT).show()
                 }
             },
         )

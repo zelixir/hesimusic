@@ -70,6 +70,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
@@ -97,11 +98,17 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.ViewModel
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.loop.analysis.AnalysisState
+import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
 import com.zjr.hesimusic.loop.analysis.WaveformPeaks
 import com.zjr.hesimusic.ui.common.MusicViewModel
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import java.util.Locale
+import javax.inject.Inject
 import kotlin.math.abs
 import kotlin.math.floor
 
@@ -155,7 +162,7 @@ private fun niceStep(durationSec: Double): Double {
 }
 
 // ---------------------------------------------------------------------------
-// LoopScreen:分析 / 预览页(契约 §2;入口 = 长按菜单「无缝循环」/「重新分析」)
+// LoopScreen:分析 / 预览页(契约 §2;入口 = 长按菜单「无缝循环」)
 // ---------------------------------------------------------------------------
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -354,6 +361,11 @@ private fun ResultContent(
     val ringReady by viewModel.ringReady.collectAsState()
     val ringPreparing by viewModel.ringPreparing.collectAsState()
     val durationMs by viewModel.durationMs.collectAsState()
+
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    // 删除走独立通道:必须等落库完成再 onBack,否则 pop 会取消 LoopViewModel 的协程(见类注释)。
+    val resultActions: LoopResultActionsViewModel = hiltViewModel()
 
     val durationSec = durationMs.coerceAtLeast(0L) / 1000.0
     val peaks = result.peaks
@@ -571,12 +583,15 @@ private fun ResultContent(
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            OutlinedButton(
-                onClick = { showDeleteDialog = true },
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-            ) {
-                Text("删除分析结果", maxLines = 1, fontSize = 12.sp)
+            // 「删除分析结果」:仅确有结果(候选已加载/已落库)时出现;删除成功后页面已无数据,直接返回列表。
+            if (result.candidates.isNotEmpty()) {
+                OutlinedButton(
+                    onClick = { showDeleteDialog = true },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) {
+                    Text("删除分析结果", maxLines = 1, fontSize = 12.sp)
+                }
             }
             OutlinedButton(onClick = onBack, modifier = Modifier.weight(1f)) {
                 Text("返回", maxLines = 1)
@@ -638,8 +653,20 @@ private fun ResultContent(
             text = { Text("确定删除这首歌的无缝循环分析结果吗？删除后下次进入需要重新分析。") },
             confirmButton = {
                 TextButton(onClick = {
-                    viewModel.deleteResult()
                     showDeleteDialog = false
+                    // 先等删除落库,再返回:onBack() 会 pop 路由并 clear ViewModelStore,
+                    // 过早返回会把删除协程一起取消,列表/播放条的 A-B 标记就会残留。
+                    scope.launch {
+                        val deleted = runCatching { resultActions.deleteResult(result.songId) }
+                            .onFailure { if (it is CancellationException) throw it }
+                            .isSuccess
+                        if (deleted) {
+                            Toast.makeText(context, "已删除分析结果，下次进入将重新分析", Toast.LENGTH_SHORT).show()
+                            onBack()
+                        } else {
+                            Toast.makeText(context, "删除失败，请重试", Toast.LENGTH_SHORT).show()
+                        }
+                    }
                 }) {
                     Text("删除")
                 }
@@ -650,6 +677,23 @@ private fun ResultContent(
                 }
             },
         )
+    }
+}
+
+/**
+ * 结果页「删除分析结果」的写库通道。
+ *
+ * 为什么不直接用 [LoopViewModel.deleteResult]:那里的删除跑在 viewModelScope 里,
+ * 而「删除后必须返回列表」要求先落库再 pop —— pop 会 clear 该路由的 ViewModelStore 并
+ * 取消 viewModelScope,若先返回,删除可能被中途取消(列表/播放条 A-B 标记残留)。
+ * 这里只提供一个可 await 的直连入口,删除成功后由 UI 负责 toast + 返回。
+ */
+@HiltViewModel
+class LoopResultActionsViewModel @Inject constructor(
+    private val analysisManager: LoopAnalysisManager,
+) : ViewModel() {
+    suspend fun deleteResult(songId: Long) {
+        analysisManager.deleteResult(songId)
     }
 }
 

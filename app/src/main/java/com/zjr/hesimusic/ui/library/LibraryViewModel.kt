@@ -7,6 +7,8 @@ import com.zjr.hesimusic.data.model.Artist
 import com.zjr.hesimusic.data.model.FileSystemItem
 import com.zjr.hesimusic.data.model.HiddenSong
 import com.zjr.hesimusic.data.model.Playlist
+import com.zjr.hesimusic.data.dao.SongLoopDao
+import com.zjr.hesimusic.data.dao.SongLoopStatus
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.model.SmartPlaylist
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
@@ -29,6 +31,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -43,6 +46,7 @@ class LibraryViewModel @Inject constructor(
     private val favoriteRepository: FavoriteRepository,
     private val songRepository: SongRepository,
     private val smartPlaylistRepository: SmartPlaylistRepository,
+    private val songLoopDao: SongLoopDao,
     private val tagLibHelper: TagLibHelper,
     private val playbackPreferences: PlaybackPreferences,
     private val sortPreferences: SortPreferences
@@ -71,6 +75,17 @@ class LibraryViewModel @Inject constructor(
     // Lazy load favorites - only when favorites tab is accessed
     private val allFavoriteSongs: StateFlow<List<Song>> = repository.getFavoriteSongs()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    /**
+     * 歌曲列表序号下方的无缝循环状态(songId → confirmed,issue 00007)。
+     *
+     * 一次整表轻量查询(只取 songId/confirmed)+ 一次 map 构建,再 stateIn 共享给所有列表;
+     * 列表只读这张 map,不做逐行 DB 查询。Room Flow 观察 song_loop 整表,分析自动落库
+     * (临时结果)、确认、取消确认、删除都会自动重新发射,列表随之刷新。
+     */
+    val loopConfirmed: StateFlow<Map<Long, Boolean>> = songLoopDao.getAllStatusFlow()
+        .map { rows -> buildLoopConfirmedMap(rows) }
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyMap())
 
     val songs: StateFlow<List<Song>> = combine(allSongs, debouncedSearchQuery) { songs, query ->
         filterSongs(songs, query)
@@ -258,6 +273,14 @@ class LibraryViewModel @Inject constructor(
         }
     }
 }
+
+/**
+ * 把 song_loop 的轻量投影折叠成列表用的 songId → confirmed map。
+ *
+ * song_loop 以 songId 为主键,同 id 不会重复;空表返回空 map(列表不画任何符号)。
+ */
+internal fun buildLoopConfirmedMap(rows: List<SongLoopStatus>): Map<Long, Boolean> =
+    rows.associate { it.songId to it.confirmed }
 
 internal fun filterArtists(artists: List<Artist>, query: String, minArtistTrackCount: Int): List<Artist> {
     val artistsWithEnoughSongs = artists.filter { artist -> artist.songCount >= minArtistTrackCount }

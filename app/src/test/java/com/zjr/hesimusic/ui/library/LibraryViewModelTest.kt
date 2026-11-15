@@ -1,11 +1,33 @@
 package com.zjr.hesimusic.ui.library
 
+import com.zjr.hesimusic.data.dao.SongLoopStatus
 import com.zjr.hesimusic.data.model.Album
 import com.zjr.hesimusic.data.model.Artist
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LibraryViewModelTest {
+
+    @Test
+    fun `loop state map maps songId to confirmed and keeps both states`() {
+        val map = buildLoopConfirmedMap(
+            listOf(
+                SongLoopStatus(songId = 1L, confirmed = true),
+                SongLoopStatus(songId = 2L, confirmed = false)
+            )
+        )
+
+        assertEquals(mapOf(1L to true, 2L to false), map)
+    }
+
+    @Test
+    fun `loop state map is empty for songs without analysis result`() {
+        val map = buildLoopConfirmedMap(emptyList())
+
+        assertTrue("无 song_loop 行时列表不应画任何符号", map.isEmpty())
+        assertEquals(null, map[42L])
+    }
 
     @Test
     fun `filterAlbums excludes albums with fewer than five songs`() {

@@ -62,6 +62,8 @@ fun PlaylistTabScreen(
     val musicUiState by musicViewModel.uiState.collectAsState()
     val playlists by viewModel.playlists.collectAsState()
     val smartPlaylists by viewModel.smartPlaylists.collectAsState()
+    // 序号下方的无缝循环状态(一次整表 map;Room Flow 驱动,确认/取消/删除后自动刷新)
+    val loopConfirmed by viewModel.loopConfirmed.collectAsState()
     var selectedPlaylistId by rememberSaveable(initialSelectedPlaylistId) {
         mutableLongStateOf(initialSelectedPlaylistId ?: 0L)
     }
@@ -135,6 +137,7 @@ fun PlaylistTabScreen(
                 } else {
                     emptyMap()
                 },
+                loopConfirmed = loopConfirmed,
                 onBatchSongToggle = onBatchSongToggle,
                 modifier = Modifier.fillMaxSize()
             )
@@ -176,6 +179,7 @@ fun PlaylistTabScreen(
                 } else {
                     emptyMap()
                 },
+                loopConfirmed = loopConfirmed,
                 onBatchSongToggle = onBatchSongToggle,
                 modifier = Modifier.fillMaxSize()
             )

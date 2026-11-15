@@ -1,9 +1,12 @@
 package com.zjr.hesimusic.ui.player
 
 import android.media.audiofx.Equalizer
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.DragInteraction
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -28,9 +31,13 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.zjr.hesimusic.loop.LoopPosition
+import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.ui.common.LoopSliderMarkerOverlay
 import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.utils.TimeFormatter
+import kotlin.math.abs
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -148,23 +155,79 @@ fun PlayerScreen(
                 // 拖动期间的**本地**位置(issue 00001)。
                 // 无缝态下 LoopSessionPlayer.seekTo 会把展示位置映射到引擎位置并触发真实 flush,
                 // 拖动中每帧都 seek 会不断打断环回、位置又被回写,滑块与播放位置互相打架(拖动没反应/被弹回)。
-                // 因此拖动中只更新这里、绝不 seek;松手(onValueChangeFinished)才下发一次 seek。
+                // 因此拖动中只更新这里、绝不 seek;松手才下发一次 seek。
                 var draggingMs by remember { mutableStateOf<Long?>(null) }
-                // 拖动中本地值优先,播放位置回写不再能把滑块拽回去;松手后立即回归服务端位置口径
-                val sliderPositionMs = (draggingMs ?: safePosition).coerceIn(0L, safeDuration)
+                // 松手后**待生效**的 seek 目标(issue 00001 第 2 条:松手后不再闪回旧位置)。
+                // seek 要经过 MediaController → MediaSession → LoopSessionPlayer → 引擎才生效,
+                // 而 UI 读到的位置来自 MediaController 的 PlaybackState 快照(约 1s 才刷新一次);
+                // 松手就把滑块交还给服务端位置,会先跳回旧位置、下一拍才跳到目标(中间闪一下)。
+                // 所以继续显示目标位置,直到位置真的收敛或超时,见 [SeekOverlayPolicy]。
+                var pendingSeekMs by remember { mutableStateOf<Long?>(null) }
+                val sliderInteractionSource = remember { MutableInteractionSource() }
+
+                // 松手提交:onValueChangeFinished 与 interactionSource 兜底共用,靠 draggingMs 保证幂等。
+                // pendingSeekMs 先赋值、draggingMs 后清空(同一次快照内生效),滑块不会闪回旧位置。
+                val commitDragSeek = {
+                    val target = draggingMs
+                    if (target != null) {
+                        pendingSeekMs = target
+                        draggingMs = null
+                        viewModel.seekTo(target)
+                    }
+                }
+
+                // 兜底提交:Material3 Slider 的指针事件被上层消费 / 手势 cancel 时不保证回调
+                // onValueChangeFinished,这里在拖拽交互结束时再提交一次(没有拖动时是空操作)。
+                LaunchedEffect(sliderInteractionSource) {
+                    sliderInteractionSource.interactions.collect { interaction ->
+                        if (interaction is DragInteraction.Stop || interaction is DragInteraction.Cancel) {
+                            commitDragSeek()
+                        }
+                    }
+                }
+
+                // 待生效目标的生命周期:位置收敛(±1200ms)或超时(1500ms)后释放覆盖层。
+                // 期望落点必须用**折返后的展示位置**(有循环窗口时引擎会把目标折回 [A,B)),
+                // 否则在无缝态下会永远等不到"收敛"。
+                LaunchedEffect(pendingSeekMs) {
+                    val target = pendingSeekMs ?: return@LaunchedEffect
+                    val expected = SeekOverlayPolicy.expectedDisplayMs(target, loopWindowState.value)
+                    val startedAtMs = SystemClock.uptimeMillis()
+                    while (!SeekOverlayPolicy.shouldRelease(
+                            actualDisplayMs = uiState.currentPosition,
+                            expectedDisplayMs = expected,
+                            elapsedMs = SystemClock.uptimeMillis() - startedAtMs,
+                        )
+                    ) {
+                        delay(50L)
+                    }
+                    pendingSeekMs = null
+                }
+
+                // 切歌/切走时旧目标失效,避免把上一首的目标位置套到新歌上。
+                LaunchedEffect(uiState.currentMediaItem?.mediaId) {
+                    draggingMs = null
+                    pendingSeekMs = null
+                }
+
+                // 拖动中 > 待生效目标 > 服务端回写的展示位置(issue 00001)
+                val sliderPositionMs = SeekOverlayPolicy.shownPositionMs(
+                    draggingMs = draggingMs,
+                    pendingSeekMs = pendingSeekMs,
+                    safePositionMs = safePosition,
+                ).coerceIn(0L, safeDuration)
                 // 滑条 + 无缝循环 A/B 标记层(未命中当前歌时标记层不画任何像素)
                 Box(modifier = Modifier.fillMaxWidth()) {
                     Slider(
                         value = sliderPositionMs.toFloat(),
-                        onValueChange = { draggingMs = it.toLong().coerceIn(0L, safeDuration) },
-                        onValueChangeFinished = {
-                            // 只在松手时发起一次 seek:无缝态下位置落在松手处(窗口内精确),
-                            // 而不是拖动过程中被反复打断
-                            val target = draggingMs
-                            draggingMs = null
-                            if (target != null) viewModel.seekTo(target)
+                        onValueChange = {
+                            // 新的拖动开始:上一次的待生效目标立即失效,避免覆盖层与新拖动打架
+                            pendingSeekMs = null
+                            draggingMs = it.toLong().coerceIn(0L, safeDuration)
                         },
-                        valueRange = 0f..safeDuration.toFloat()
+                        onValueChangeFinished = { commitDragSeek() },
+                        valueRange = 0f..safeDuration.toFloat(),
+                        interactionSource = sliderInteractionSource,
                     )
                     LoopSliderMarkerOverlay(
                         window = loopWindowState,
@@ -176,7 +239,8 @@ fun PlayerScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    // 左侧时间与滑块同口径:拖动中显示松手将落到的位置,松手后回到真实播放位置
+                    // 左侧时间与滑块同口径:拖动中显示拖到的位置,松手后继续显示 seek 目标
+                    // (直到位置收敛或超时),不会在 seek 生效前先跳回旧位置(issue 00001)
                     Text(
                         text = TimeFormatter.formatTime(sliderPositionMs),
                         style = MaterialTheme.typography.bodySmall
@@ -470,4 +534,57 @@ fun EqualizerDialog(
             }
         }
     )
+}
+
+/**
+ * 松手 seek 的「待生效目标」覆盖层策略(纯函数,无 Compose/Android 依赖,便于单测)。
+ *
+ * 背景(issue 00001 第 2 条):seek 下发后要经过
+ * `MediaController → MediaSession → LoopSessionPlayer → 引擎` 才真正生效,而 UI 读到的位置
+ * 来自 MediaController 的 PlaybackState 快照(约 1s 才刷新一次,实测偶发更久,见
+ * docs/loop-v3-final-report.md)。松手瞬间就把滑块交还给服务端位置,会先跳回旧位置、下一拍
+ * 才跳到目标(中间闪一下)。因此松手后继续显示目标位置,直到位置收敛或超时。
+ */
+internal object SeekOverlayPolicy {
+
+    /** 收敛判定容差(毫秒):展示位置与期望落点相差不超过该值即视为 seek 已生效。 */
+    const val CONVERGE_TOLERANCE_MS: Long = 1_200L
+
+    /** 待生效目标最长保留时间(毫秒):超时强制释放,避免位置永远停在目标上。 */
+    const val MAX_HOLD_MS: Long = 1_500L
+
+    /** 毫秒转微秒前的溢出上限(与 [com.zjr.hesimusic.ui.common.foldDisplayPositionMs] 同口径)。 */
+    private const val MAX_FOLDABLE_POSITION_MS: Long = Long.MAX_VALUE / 1_000L
+
+    /**
+     * 松手 seek 目标在**展示口径**下的期望落点。
+     *
+     * 有无缝窗口时引擎会把目标折回 [A, B)(见 [LoopPosition.displayUs]),UI 之后读到的展示
+     * 位置就是折返后的值,所以收敛判定必须用折返后的目标;无窗口(或非法窗口)时就是目标本身。
+     */
+    fun expectedDisplayMs(targetMs: Long, window: LoopWindow?): Long {
+        if (window == null) return targetMs
+        if (targetMs > MAX_FOLDABLE_POSITION_MS || targetMs < -MAX_FOLDABLE_POSITION_MS) {
+            return targetMs
+        }
+        return LoopPosition.displayUs(targetMs * 1_000L, window) / 1_000L
+    }
+
+    /** 覆盖层显示的位置:拖动中 > 待生效目标 > 服务端回写的展示位置。 */
+    fun shownPositionMs(
+        draggingMs: Long?,
+        pendingSeekMs: Long?,
+        safePositionMs: Long,
+    ): Long = draggingMs ?: pendingSeekMs ?: safePositionMs
+
+    /** 展示位置是否已收敛到期望落点(容差 [CONVERGE_TOLERANCE_MS])。 */
+    fun hasConverged(actualDisplayMs: Long, expectedDisplayMs: Long): Boolean =
+        abs(actualDisplayMs - expectedDisplayMs) <= CONVERGE_TOLERANCE_MS
+
+    /** 待生效目标是否已超过最长保留时间。 */
+    fun isExpired(elapsedMs: Long): Boolean = elapsedMs >= MAX_HOLD_MS
+
+    /** 是否应释放覆盖层:已收敛,或已超时兜底(位置一直没追上来时避免永远卡住)。 */
+    fun shouldRelease(actualDisplayMs: Long, expectedDisplayMs: Long, elapsedMs: Long): Boolean =
+        isExpired(elapsedMs) || hasConverged(actualDisplayMs, expectedDisplayMs)
 }

@@ -85,10 +85,7 @@ fun MainScreen(
     onSleepTimerClick: () -> Unit,
     onLogsClick: () -> Unit,
     // 无缝循环菜单事件(仅透传给 SongActionHost;决策/播放/导航在 MainActivity)
-    onSeamlessLoop: ((Song, Boolean?) -> Unit)? = null,
-    onLoopReanalyze: ((Song) -> Unit)? = null,
-    onLoopDemote: ((Song) -> Unit)? = null,
-    onLoopDelete: ((Song) -> Unit)? = null
+    onSeamlessLoop: ((Song, Boolean?) -> Unit)? = null
 ) {
     // Get AppLogger from Application context
     val context = LocalContext.current
@@ -108,6 +105,8 @@ fun MainScreen(
     val listBackgroundImageUri by settingsViewModel.listBackgroundImageUri.collectAsState()
     val focusRequester = remember { FocusRequester() }
     val playlists by viewModel.playlists.collectAsState()
+    // 序号下方的无缝循环状态(一次整表 map;Room Flow 驱动,确认/取消/删除后自动刷新)
+    val loopConfirmed by viewModel.loopConfirmed.collectAsState()
     var selectedSongForActions by remember { mutableStateOf<Song?>(null) }
     var selectedSongPlaylistContext by remember { mutableStateOf<PlaylistContext?>(null) }
     var batchModeSongs by remember { mutableStateOf<List<Song>>(emptyList()) }
@@ -424,6 +423,7 @@ fun MainScreen(
                             } else {
                                 emptyMap()
                             },
+                            loopConfirmed = loopConfirmed,
                             onBatchSongToggle = { song ->
                                 batchSelectedSongIds = if (song.id in batchSelectedSongIds) {
                                     batchSelectedSongIds - song.id
@@ -493,6 +493,7 @@ fun MainScreen(
                             } else {
                                 emptyMap()
                             },
+                            loopConfirmed = loopConfirmed,
                             onBatchSongToggle = { song ->
                                 batchSelectedSongIds = if (song.id in batchSelectedSongIds) {
                                     batchSelectedSongIds - song.id
@@ -545,10 +546,7 @@ fun MainScreen(
                 onAddToQueue = if (selectedSongPlaylistContext == musicUiState.playlistContext) { song ->
                     musicViewModel.addSongsToPlayQueue(listOf(song))
                 } else null,
-                onSeamlessLoop = onSeamlessLoop,
-                onLoopReanalyze = onLoopReanalyze,
-                onLoopDemote = onLoopDemote,
-                onLoopDelete = onLoopDelete
+                onSeamlessLoop = onSeamlessLoop
             )
             if (showBatchAddDialog) {
                 AddToPlaylistDialog(
