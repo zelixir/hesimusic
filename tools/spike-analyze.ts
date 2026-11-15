@@ -4,15 +4,16 @@
  *
  * 用法:
  *   bun run tools/spike-analyze.ts <tap.wav> <tap.jsonl> [选项]
+ *   bun run tools/spike-analyze.ts <tap.jsonl> [选项]        (tap=0/无 WAV,只做日志判定)
  *   bun run tools/spike-analyze.ts --selftest
  *
  * 判据(契约 §5 / docs/loop-v3-plan.md §6.2):
  *   A1 零间隙        —— 接缝 ±window 内不存在 >=zeroMinRun 帧的全零段(所有声道为 0)
  *   A2 零漂移        —— 相邻接缝的输出帧距 == 理论 L 帧(0 误差)
- *   A3 零重放/丢帧   —— 总帧数 == 前奏 + N×L(+ 收尾部分轮);有前奏时只报偏差不硬判
+ *   A3 零重放/丢帧   —— full-b 口径:期望 = B + (N-1)×L;a 口径:期望 = A + N×L(自动识别,可 --prelude-mode 覆盖)
  *   A4 零 flush/underrun —— 硬判据:稳态期 flush/discontinuity 计数 0、underrun 增量 0;
  *                        喂数间隔默认仅作参考警告(> 30ms 标 WARN,不 FAIL),显式 --feed-gap-ms 才硬判
- *   B  逐位相同      —— 有 seam 事件时每轮 PCM 与首轮逐字节相同
+ *   B  逐位相同      —— 有 seam 事件时只比较完整轮;最后一轮若短于首轮视为收尾截断丢弃
  *   附加:PTS 连续性 —— 由 feed 事件重建,pts 增量与 frames/sr 偏差 > 1ms 记为 discontinuity;
  *                        ret=false / 同 pts 的"部分消费续写"合并,不计 discontinuity
  *   附加:机制结论    —— 按 mode(可用 --mode 覆盖)在摘要里给出一行机制判断,只影响文案
@@ -23,7 +24,7 @@
 import { open, readFile, writeFile, mkdir } from "node:fs/promises";
 import * as path from "node:path";
 
-const VERSION = "spike-analyze/2";
+const VERSION = "spike-analyze/3";
 
 const SCRIPT_DIR: string = (() => {
   const anyImport: any = import.meta as any;
@@ -92,6 +93,7 @@ interface WavChunk {
 }
 
 interface WavInfo {
+  present: boolean;
   path: string;
   fileSize: number;
   riff: string;
@@ -228,6 +230,7 @@ async function parseWav(fh: any, filePath: string): Promise<WavInfo> {
   }
 
   return {
+    present: true,
     path: filePath,
     fileSize,
     riff,
@@ -294,6 +297,34 @@ class WavReader {
     const usable = got - (got % bytesPerFrame);
     return got === len ? buf : buf.subarray(0, usable);
   }
+}
+
+/** tap=0 / 无 WAV 时的合成 WavInfo:不参与 PCM 判据,只用于统一的字段输出。 */
+function makeSyntheticWavInfo(filePath: string | null, error: string | null, sampleRate: number): WavInfo {
+  return {
+    present: false,
+    path: filePath ?? "(未提供)",
+    fileSize: 0,
+    riff: "",
+    formatTag: 0,
+    effectiveTag: 0,
+    codec: "pcm16",
+    sampleRate,
+    channels: 0,
+    bitsPerSample: 0,
+    bytesPerSample: 0,
+    blockAlign: 0,
+    bytesPerFrame: 0,
+    dataOffset: 0,
+    dataBytes: 0,
+    declaredDataBytes: 0,
+    frames: 0,
+    durationMs: 0,
+    truncated: false,
+    trailingBytes: 0,
+    chunks: [],
+    warnings: [error ? "WAV 不可用: " + error : "未提供 WAV(tap=0),仅基于日志判定"],
+  };
 }
 
 /** 判断一帧(所有声道)是否全零。返回 true 表示该帧是数字静音。 */
@@ -438,6 +469,8 @@ interface SeamMark {
   tMs: number | null;
   outFrames: number | null;
   ptsUs: number | null;
+  src: string | null;
+  trigger: string | null;
   position: number | null;
   source: PosSource;
 }
@@ -487,7 +520,7 @@ function framesAtTimeMs(timeline: FeedPoint[], t: number): number | null {
   return timeline[ans].cumulative;
 }
 
-function resolveSeams(log: LogData, params: any, totalFrames: number): SeamResolution {
+function resolveSeams(log: LogData, params: any, totalFrames: number, hasPcm: boolean): SeamResolution {
   const seamEvents = log.events.filter((e) => e.ev === "seam");
   const L: number | null = params.loopFrames;
   const preamble: number | null = params.preambleFrames;
@@ -507,6 +540,8 @@ function resolveSeams(log: LogData, params: any, totalFrames: number): SeamResol
           tMs: framesToMs(p, sr),
           outFrames: null,
           ptsUs: null,
+          src: null,
+          trigger: null,
           position: p,
           source: "theory",
         });
@@ -525,6 +560,8 @@ function resolveSeams(log: LogData, params: any, totalFrames: number): SeamResol
     tMs: numOf(e.t),
     outFrames: firstNum(e, ["outFrames", "outFrame", "frame", "framePos", "cumulativeFrames", "totalOutFrames", "frames"]),
     ptsUs: numOf(e.ptsUs),
+    src: typeof e.src === "string" ? e.src : null,
+    trigger: typeof e.trigger === "string" ? e.trigger : null,
     position: null,
     source: "none",
   }));
@@ -537,7 +574,7 @@ function resolveSeams(log: LogData, params: any, totalFrames: number): SeamResol
   if (allHaveOutFrames) {
     const vals = ofs as number[];
     const nonDecreasing = vals.every((v, i) => i === 0 || v >= vals[i - 1]);
-    const inRange = vals.every((v) => v >= 0 && v <= totalFrames + Math.max(1, Math.round(totalFrames * 0.02)));
+    const inRange = !hasPcm || vals.every((v) => v >= 0 && v <= totalFrames + Math.max(1, Math.round(totalFrames * 0.02)));
     const allApproxL = L != null && L > 0 && vals.every((v) => Math.abs(v - L) <= Math.max(1, Math.round(L * 0.01)));
     if (!nonDecreasing || !inRange) {
       notes.push("seam.outFrames 非单调或越界,不按累计帧解释");
@@ -595,10 +632,12 @@ function resolveSeams(log: LogData, params: any, totalFrames: number): SeamResol
   // 归一化:裁剪越界、去重、按位置排序
   const positioned = marks.filter((m) => m.position != null && Number.isFinite(m.position) && (m.position as number) >= 0);
   let clamped = 0;
-  for (const m of positioned) {
-    if ((m.position as number) > totalFrames) {
-      m.position = totalFrames;
-      clamped++;
+  if (hasPcm) {
+    for (const m of positioned) {
+      if ((m.position as number) > totalFrames) {
+        m.position = totalFrames;
+        clamped++;
+      }
     }
   }
   if (clamped > 0) notes.push(clamped + " 个接缝位置超出总帧数,已裁剪到 " + totalFrames);
@@ -897,6 +936,7 @@ interface AnalyzeOptions {
   ptsThresholdUs: number;
   strict: boolean;
   modeOverride: string | null;
+  preludeMode: "auto" | "full-b" | "a";
   maxMismatches: number;
   maxZeroRuns: number;
 }
@@ -912,30 +952,91 @@ function defaultOptions(): AnalyzeOptions {
     ptsThresholdUs: 1000,
     strict: false,
     modeOverride: null,
+    preludeMode: "auto",
     maxMismatches: 10,
     maxZeroRuns: 2000,
   };
 }
 
-async function analyze(wavPath: string, jsonlPath: string, opts: AnalyzeOptions): Promise<any> {
-  const wav = await WavReader.open(wavPath);
+interface PreludeInfo {
+  mode: "full-b" | "a" | "unknown";
+  source: "cli" | "auto" | "fallback";
+  preludeFrames: number | null;
+  aFrames: number | null;
+  bFrames: number | null;
+  toleranceFrames: number;
+  detectedOffsetFrames?: number | null;
+}
+
+/**
+ * 前奏口径:
+ *   a      —— 旧 baseline 语义,前奏 = [0,A),首个折返在 A;
+ *   full-b —— M3′ 语义(clip 到 B、从 0 起播),前奏 = [0,B),首个折返在 B。
+ * 自动识别:首个接缝位置更接近 B_frames 还是 A_frames(容差 = 10% L)。
+ */
+function detectPrelude(
+  opts: AnalyzeOptions,
+  positions: number[],
+  loopFrames: number | null,
+  aFrames: number | null,
+  bFrames: number | null,
+): PreludeInfo {
+  const requested = opts.preludeMode;
+  if (requested === "a" || requested === "full-b") {
+    return {
+      mode: requested,
+      source: "cli",
+      preludeFrames: requested === "full-b" ? bFrames : aFrames,
+      aFrames,
+      bFrames,
+      toleranceFrames: 1,
+    };
+  }
+  if (positions.length > 0 && loopFrames != null && loopFrames > 0 && aFrames != null && bFrames != null) {
+    const tol = Math.max(1, Math.round(loopFrames * 0.1));
+    const dA = Math.abs(positions[0] - aFrames);
+    const dB = Math.abs(positions[0] - bFrames);
+    if (dB <= tol && dB <= dA) {
+      return { mode: "full-b", source: "auto", preludeFrames: bFrames, aFrames, bFrames, toleranceFrames: 1, detectedOffsetFrames: positions[0] - bFrames };
+    }
+    if (dA <= tol) {
+      return { mode: "a", source: "auto", preludeFrames: aFrames, aFrames, bFrames, toleranceFrames: 1, detectedOffsetFrames: positions[0] - aFrames };
+    }
+  }
+  return { mode: "unknown", source: "fallback", preludeFrames: aFrames, aFrames, bFrames, toleranceFrames: 1 };
+}
+
+async function analyze(wavPath: string | null, jsonlPath: string, opts: AnalyzeOptions): Promise<any> {
+  const log = await parseLogFile(jsonlPath);
+  const tapDisabled = log.run != null && (log.run.tap === false || log.run.tap === 0);
+  let wav: WavReader | null = null;
+  let wavError: string | null = null;
+  if (wavPath) {
+    try {
+      wav = await WavReader.open(wavPath);
+    } catch (e: any) {
+      wavError = String(e?.message ?? e);
+      // tap=0 时探针可能只写占位 WAV(或完全没有 WAV):降级为日志判定。
+      if (!tapDisabled) throw e;
+    }
+  } else {
+    wavError = "未提供 WAV 文件(单文件模式)";
+  }
   try {
-    const log = await parseLogFile(jsonlPath);
-    return await analyzeCore(wav, log, wavPath, jsonlPath, opts);
+    return await analyzeCore(wav, log, wavPath, jsonlPath, opts, wavError);
   } finally {
-    await wav.close();
+    if (wav) await wav.close();
   }
 }
 
 async function analyzeCore(
-  wav: WavReader,
+  wav: WavReader | null,
   log: LogData,
-  wavPath: string,
+  wavPath: string | null,
   jsonlPath: string,
   opts: AnalyzeOptions,
+  wavError: string | null = null,
 ): Promise<any> {
-  const wi = wav.info;
-  const totalFrames = wi.frames;
   const warnings: string[] = [];
   const run = log.run ?? {};
   const cfg = log.configure ?? {};
@@ -943,9 +1044,22 @@ async function analyzeCore(
 
   // ---- 参数 ----
   const srLog = numOf(cfg.sampleRate) ?? numOf(run.sampleRate);
-  const sampleRate = srLog ?? wi.sampleRate;
-  if (srLog != null && srLog !== wi.sampleRate) {
+  const wavSr = wav ? wav.info.sampleRate : 0;
+  const sampleRate = srLog ?? wavSr;
+  if (!sampleRate || sampleRate <= 0) {
+    throw new Error("无法确定采样率:日志没有 configure.sampleRate,且没有可用 WAV");
+  }
+  const wi = wav ? wav.info : makeSyntheticWavInfo(wavPath, wavError, sampleRate);
+  const hasPcm = !!wav && wi.frames > 0;
+  const totalFrames = hasPcm ? wi.frames : (numOf(log.endEvent?.totalFrames) ?? 0);
+  if (hasPcm && srLog != null && srLog !== wi.sampleRate) {
     warnings.push("日志采样率 " + srLog + " 与 WAV " + wi.sampleRate + " 不一致,帧换算以日志采样率为准");
+  }
+  if (!hasPcm) {
+    warnings.push(
+      "无有效 PCM(" + (wavError ?? (wav ? "WAV 帧数为 0" : "未提供 WAV")) + "),A1/B 跳过,总帧数取自 end 事件" +
+      (totalFrames > 0 ? "(" + totalFrames + " 帧)" : ""),
+    );
   }
   const runMode: string | null = typeof run.mode === "string" ? run.mode.trim().toLowerCase() : null;
   const mode: string | null = opts.modeOverride != null ? opts.modeOverride : runMode;
@@ -953,14 +1067,16 @@ async function analyzeCore(
   const aMs = numOf(run.aMs) ?? numOf(looping?.aMs);
   const bMs = numOf(run.bMs) ?? numOf(looping?.bMs);
   const loopFrames = aMs != null && bMs != null && bMs > aMs ? msToFrames(bMs - aMs, sampleRate) : null;
-  const preambleFrames = aMs != null && aMs >= 0 ? msToFrames(aMs, sampleRate) : null;
+  const aFrames = aMs != null && aMs >= 0 ? msToFrames(aMs, sampleRate) : null;
+  const bFrames = bMs != null && bMs >= 0 ? msToFrames(bMs, sampleRate) : null;
+  const preambleFrames = aFrames;
   const loopingLikely =
     (mode != null && ["baseline", "window", "sink", "media"].includes(mode)) ||
     (mode == null && aMs != null && bMs != null && bMs > aMs);
 
   const logDurationRaw = numOf(log.endEvent?.durationMs) ?? log.lastT;
   const durationMs =
-    logDurationRaw != null && logDurationRaw > 0 ? logDurationRaw : framesToMs(totalFrames, sampleRate);
+    logDurationRaw != null && logDurationRaw > 0 ? logDurationRaw : (hasPcm ? framesToMs(totalFrames, sampleRate) : 0);
 
   const params = {
     sampleRate,
@@ -970,29 +1086,43 @@ async function analyzeCore(
     path: typeof run.path === "string" ? run.path : null,
     aMs,
     bMs,
+    aFrames,
+    bFrames,
     preambleFrames,
+    preludeMode: opts.preludeMode,
+    preludeFrames: null as number | null,
+    preludeSource: null as string | null,
     loopFrames,
     loopMs: loopFrames != null ? framesToMs(loopFrames, sampleRate) : null,
     loopingLikely,
     durationMs,
     totalFrames,
-    wavDurationMs: wi.durationMs,
+    hasPcm,
+    wavDurationMs: hasPcm ? wi.durationMs : null,
   };
 
   // ---- 接缝 ----
-  const seamRes = resolveSeams(log, params, totalFrames);
+  const seamRes = resolveSeams(log, params, totalFrames, hasPcm);
   const marks = seamRes.marks;
   const positions = marks.map((m) => m.position as number);
   const seamSource = seamRes.source;
 
+  // ---- 前奏口径(full-b / a / 自动识别)----
+  const prelude = detectPrelude(opts, positions, loopFrames, aFrames, bFrames);
+  params.preludeMode = prelude.mode;
+  params.preludeFrames = prelude.preludeFrames;
+  params.preludeSource = prelude.source;
+
   // ---- A1 零间隙 ----
   const halfWindow = Math.max(1, msToFrames(opts.seamWindowMs, sampleRate));
-  const windows = positions.map((p, i) => ({
+  const windows = hasPcm ? positions.map((p, i) => ({
     seamIndex: i,
     start: Math.max(0, p - halfWindow),
     end: Math.min(totalFrames, p + halfWindow + 1),
-  }));
-  const zeroScan = await scanZeroRuns(wav, windows, opts.maxZeroRuns, opts.zeroMinRun);
+  })) : [];
+  const zeroScan: ZeroScanResult = hasPcm
+    ? await scanZeroRuns(wav as WavReader, windows, opts.maxZeroRuns, opts.zeroMinRun)
+    : { globalLongest: null, zeroFrames: 0, totalRuns: 0, runsInWindows: [], runsTruncated: false };
 
   const seamChecks = windows.map((w, i) => ({
     seamIndex: i,
@@ -1038,7 +1168,10 @@ async function analyzeCore(
   let a1Status: "pass" | "fail" | "warn" | "skipped";
   let a1Summary: string;
   let a1Vacuous = false;
-  if (positions.length === 0) {
+  if (!hasPcm) {
+    a1Status = "skipped";
+    a1Summary = "无有效 PCM(tap=0 或未提供 WAV),A1 跳过";
+  } else if (positions.length === 0) {
     a1Status = "pass";
     a1Vacuous = true;
     a1Summary = "无接缝(单段播放或无法定位接缝),A1 空真通过";
@@ -1099,80 +1232,163 @@ async function analyzeCore(
     a2Summary = a2Deviations.length + " 段接缝帧距全部 == L=" + loopFrames + " 帧(偏差 0)";
   }
 
-  // ---- B 逐位相同 ----
-  const bRounds: RoundRange[] = [];
+  // ---- B 逐位相同(只比较完整轮;最后一轮若短于首轮,视为收尾截断丢弃)----
+  const allRounds: RoundRange[] = [];
   for (let i = 0; i < positions.length; i++) {
     const start = positions[i];
     const end = i + 1 < positions.length ? positions[i + 1] : totalFrames;
     const frames = end - start;
-    if (frames > 0) bRounds.push({ index: i, startFrame: start, endFrame: end, frames });
+    if (frames > 0) allRounds.push({ index: i, startFrame: start, endFrame: end, frames });
   }
+  const droppedRounds: any[] = [];
+  let compareRoundsList: RoundRange[] = [];
+  if (allRounds.length >= 2) {
+    compareRoundsList = allRounds.slice();
+    const last = compareRoundsList[compareRoundsList.length - 1];
+    if (last.frames < compareRoundsList[0].frames) {
+      droppedRounds.push({
+        roundIndex: last.index,
+        startFrame: last.startFrame,
+        frames: last.frames,
+        expectedFrames: compareRoundsList[0].frames,
+        deltaFrames: last.frames - compareRoundsList[0].frames,
+        reason: "尾部部分轮(收尾截断)",
+      });
+      compareRoundsList.pop();
+    }
+  }
+  const droppedFrames = droppedRounds.reduce((s, r) => s + r.frames, 0);
+  const bRoundsForReport = allRounds.map((r) => ({
+    index: r.index,
+    startFrame: r.startFrame,
+    endFrame: r.endFrame,
+    frames: r.frames,
+    compared: compareRoundsList.some((c) => c.index === r.index),
+    dropped: droppedRounds.some((d) => d.roundIndex === r.index),
+  }));
   let bStatus: "pass" | "fail" | "warn" | "skipped";
   let bSummary: string;
   let bResult: any = null;
   const bMeasurable = seamSource === "outFrames" || seamSource === "feedTime";
-  if (bRounds.length < 2) {
+  const bDropInfo = droppedRounds.length > 0
+    ? ";丢弃尾部部分轮 " + droppedRounds.length + " 轮(" + droppedFrames + " 帧,首轮 " + allRounds[0].frames + " 帧)"
+    : "";
+  if (!hasPcm) {
+    bStatus = "skipped";
+    bSummary = "无有效 PCM(tap=0 或未提供 WAV),B 跳过";
+  } else if (allRounds.length < 2) {
     bStatus = "skipped";
     bSummary = "可用轮次少于 2(无 seam 事件或接缝不足),B 跳过";
+  } else if (compareRoundsList.length < 2) {
+    bStatus = "skipped";
+    bSummary = "总轮数 " + allRounds.length + " 中可比较的完整轮少于 2" + bDropInfo + ",B 跳过";
   } else if (!bMeasurable) {
     bStatus = "skipped";
     bSummary = "接缝位置不可信(理论推算),B 跳过";
   } else {
-    bResult = await compareRounds(wav, bRounds, opts.maxMismatches);
+    bResult = await compareRounds(wav as WavReader, compareRoundsList, opts.maxMismatches);
     if (bResult.mismatchCount > 0 || bResult.lengthMismatches.length > 0) {
       bStatus = "fail";
       const first = bResult.mismatches[0];
       const lenInfo = bResult.lengthMismatches.length > 0
         ? ";" + bResult.lengthMismatches.length + " 处轮长不一致(例:第 " + (bResult.lengthMismatches[0].roundIndex + 1) + " 轮 " + bResult.lengthMismatches[0].actualFrames + " 帧,首轮 " + bResult.lengthMismatches[0].expectedFrames + " 帧)"
         : "";
-      bSummary = first
-        ? "轮间 PCM 不一致:第 " + (first.roundIndex + 1) + " 轮帧 " + first.roundFrame + "(绝对帧 " + first.absFrame + ",声道 " + first.channel + ")字节不同" + lenInfo
-        : "轮间 PCM 不一致" + lenInfo;
+      bSummary = "参与比较 " + compareRoundsList.length + "/" + allRounds.length + " 轮" + bDropInfo + ";" + (first
+        ? "轮间 PCM 不一致:第 " + (first.roundIndex + 1) + " 轮帧 " + first.roundFrame + "(绝对帧 " + first.absFrame + ",声道 " + first.channel + ")字节不同"
+        : "轮间 PCM 不一致") + lenInfo;
     } else {
       bStatus = "pass";
-      bSummary = bRounds.length + " 轮 PCM 与首轮逐字节相同(共 " + bRounds[0].frames + " 帧/轮)";
+      bSummary = "参与比较 " + compareRoundsList.length + "/" + allRounds.length + " 轮" + bDropInfo + ";" + compareRoundsList.length + " 轮 PCM 与首轮逐字节相同(共 " + compareRoundsList[0].frames + " 帧/轮)";
     }
   }
 
-  // ---- A3 零重放/丢帧 ----
+  // ---- A3 零重放/丢帧(前奏口径 full-b / a)----
   let a3Status: "pass" | "fail" | "warn" | "skipped";
   let a3Summary: string;
   let a3: any;
-  if (loopFrames == null || preambleFrames == null || loopFrames <= 0) {
+  const preludeFrames = prelude.preludeFrames;
+  const preludeTolerance = prelude.toleranceFrames ?? 1;
+  const preludeLabel =
+    prelude.mode === "full-b" ? "full-b(前奏 = [0,B),首次折返在 B)"
+      : prelude.mode === "a" ? "a(前奏 = [0,A),首次折返在 A)"
+        : "未识别(按 a 语义)";
+  if (loopFrames == null || preludeFrames == null || loopFrames <= 0 || totalFrames <= 0) {
     a3Status = "skipped";
-    a3Summary = "日志缺少 aMs/bMs 或 L<=0,无法核对总帧数,A3 跳过";
-    a3 = { preambleFrames, loopFrames, measuredFirstSeam: null, seamCount: positions.length, expectedFrames: null, totalFrames, deviationFrames: null, tailFrames: null, preambleDeviationFrames: null };
+    a3Summary = "日志缺少 aMs/bMs、L<=0 或没有总帧数,无法核对总帧数,A3 跳过";
+    a3 = {
+      preludeMode: prelude.mode,
+      preludeSource: prelude.source,
+      preludeFrames,
+      aFrames,
+      bFrames,
+      preambleFrames: preludeFrames,
+      loopFrames,
+      measuredFirstSeam: null,
+      seamCount: positions.length,
+      expectedFrames: null,
+      totalFrames,
+      deviationFrames: null,
+      tailFrames: null,
+      preambleDeviationFrames: null,
+      preambleOffsetToleranceFrames: preludeTolerance,
+    };
   } else {
     const seamCount = positions.length;
-    const expectedFrames = preambleFrames + seamCount * loopFrames;
+    // full-b:第一轮本身就是前奏,B 处第一次折返;因此期望 = B + (N-1)×L。
+    const expectedFrames = prelude.mode === "full-b"
+      ? preludeFrames + Math.max(0, seamCount - 1) * loopFrames
+      : preludeFrames + seamCount * loopFrames;
     const tailFrames = totalFrames - expectedFrames;
     const measuredFirstSeam = seamSource !== "theory" && positions.length > 0 ? positions[0] : null;
-    const preambleDeviationFrames = measuredFirstSeam != null ? measuredFirstSeam - preambleFrames : null;
-    a3 = { preambleFrames, loopFrames, measuredFirstSeam, seamCount, expectedFrames, totalFrames, deviationFrames: tailFrames, tailFrames, preambleDeviationFrames };
+    const preambleDeviationFrames = measuredFirstSeam != null ? measuredFirstSeam - preludeFrames : null;
+    a3 = {
+      preludeMode: prelude.mode,
+      preludeSource: prelude.source,
+      preludeFrames,
+      aFrames,
+      bFrames,
+      preambleFrames: preludeFrames,
+      loopFrames,
+      measuredFirstSeam,
+      seamCount,
+      expectedFrames,
+      totalFrames,
+      deviationFrames: tailFrames,
+      tailFrames,
+      preambleDeviationFrames,
+      preambleOffsetToleranceFrames: preludeTolerance,
+      expectedFormula: prelude.mode === "full-b" ? "B + (N-1)×L" : "A + N×L",
+    };
     const issues: string[] = [];
-    if (preambleDeviationFrames != null && preambleDeviationFrames !== 0) {
-      issues.push("首个接缝位置 " + measuredFirstSeam + " 与理论前奏 " + preambleFrames + " 相差 " + preambleDeviationFrames + " 帧");
+    if (preambleDeviationFrames != null && Math.abs(preambleDeviationFrames) > preludeTolerance) {
+      issues.push("首个接缝位置 " + measuredFirstSeam + " 与理论前奏 " + preludeFrames + " 相差 " + preambleDeviationFrames + " 帧");
     }
     if (tailFrames < 0) {
       issues.push("总帧数 " + totalFrames + " 比期望 " + expectedFrames + " 少 " + (-tailFrames) + " 帧(疑似丢帧/提前结束)");
     } else if (tailFrames >= loopFrames) {
       issues.push("总帧数比期望多 " + tailFrames + " 帧(超过一整轮,疑似重放)");
     }
+    const formulaText = prelude.mode === "full-b"
+      ? "前奏口径 " + preludeLabel + ":总帧数 " + totalFrames + " == B " + preludeFrames + " + (" + seamCount + "-1)×L " + loopFrames + " + 尾部 " + tailFrames + " 帧"
+      : "前奏口径 " + preludeLabel + ":总帧数 " + totalFrames + " == 前奏 " + preludeFrames + " + " + seamCount + "×L " + loopFrames + " + 尾部 " + tailFrames + " 帧";
     if (seamCount === 0) {
       a3Status = "skipped";
       a3Summary = "无可定位接缝,无法按 N×L 核对总帧数,A3 跳过";
     } else if (issues.length === 0) {
       a3Status = "pass";
-      a3Summary = "总帧数 " + totalFrames + " == 前奏 " + preambleFrames + " + " + seamCount + "×L " + loopFrames + " + 尾部 " + tailFrames + " 帧(收尾部分轮属正常)";
-    } else if (preambleFrames > 0 && !opts.strict) {
+      a3Summary = formulaText + "(收尾部分轮属正常)";
+    } else if (preludeFrames > 0 && !opts.strict) {
       a3Status = "warn";
-      a3Summary = "有前奏(baseline 语义),按报告不硬判:" + issues.join(";");
+      a3Summary = "前奏口径 " + preludeLabel + ",有前奏按报告不硬判:" + issues.join(";");
     } else {
       a3Status = "fail";
       a3Summary = issues.join(";");
     }
+    if (preambleDeviationFrames != null && preambleDeviationFrames !== 0 && Math.abs(preambleDeviationFrames) <= preludeTolerance) {
+      a3.note = "首个接缝相对理论前奏偏移 " + preambleDeviationFrames + " 帧(≤" + preludeTolerance + " 帧,视为打点偏移)";
+    }
     if (tailFrames > 0 && tailFrames < loopFrames) {
-      a3.note = "尾部 " + tailFrames + " 帧为到点停止时的部分轮,正常";
+      a3.note = (a3.note ? a3.note + ";" : "") + "尾部 " + tailFrames + " 帧为到点停止时的部分轮,正常";
     }
   }
 
@@ -1387,7 +1603,7 @@ async function analyzeCore(
     A3: {
       id: "A3",
       name: "零重放/丢帧",
-      must: opts.strict || preambleFrames === 0,
+      must: opts.strict || preludeFrames === 0,
       status: a3Status,
       summary: a3Summary,
       ...a3,
@@ -1406,7 +1622,13 @@ async function analyzeCore(
       must: !!opts.strict,
       status: bStatus,
       summary: bSummary,
-      ...(bResult ?? { roundCount: bRounds.length, rounds: bRounds, lengthMismatches: [], mismatches: [], mismatchCount: 0 }),
+      totalRounds: allRounds.length,
+      comparedRounds: compareRoundsList.length,
+      droppedRounds,
+      droppedFrames,
+      missingPcm: !hasPcm,
+      ...(bResult ?? { roundCount: compareRoundsList.length, lengthMismatches: [], mismatches: [], mismatchCount: 0 }),
+      rounds: bRoundsForReport,
     },
   };
 
@@ -1459,6 +1681,8 @@ async function analyzeCore(
     generatedAt: new Date().toISOString(),
     inputs: { wav: wavPath, jsonl: jsonlPath },
     wav: {
+      present: hasPcm,
+      error: wavError,
       path: wi.path,
       fileSize: wi.fileSize,
       formatTag: wi.formatTag,
@@ -1544,15 +1768,20 @@ function renderHuman(report: any, opts: AnalyzeOptions): string {
   push("生成时间: " + report.generatedAt);
 
   rule("输入");
-  push("WAV : " + report.inputs.wav + " (" + safeSize(report.wav.fileSize) + ")");
+  push("WAV : " + (report.inputs.wav ?? "(未提供,单文件/日志模式)") + " (" + safeSize(report.wav.fileSize) + ")");
   push("日志: " + report.inputs.jsonl);
 
   rule("WAV");
   const w = report.wav;
-  push("编码: " + w.codec + " (formatTag=" + w.formatTag + (w.effectiveTag !== w.formatTag ? "→" + w.effectiveTag : "") + ") / " + w.sampleRate + " Hz / " + w.channels + " 声道 / " + w.bitsPerSample + " bit / " + w.bytesPerFrame + " B/帧");
-  push("帧数: " + w.frames + " (" + fmtNum(w.durationMs, 3) + " ms),data " + w.dataBytes + " B(声明 " + w.declaredDataBytes + " B)" + (w.truncated ? ",已截断" : ""));
-  if (w.trailingBytes > 0) push("  尾部 " + w.trailingBytes + " 字节不足一帧,已忽略");
-  for (const warn of w.warnings) push("  ! " + warn);
+  if (!w.present) {
+    push("未提供有效 WAV(tap=0 或文件无效" + (w.error ? ": " + w.error : "") + "),仅基于日志判定");
+    for (const warn of w.warnings) push("  ! " + warn);
+  } else {
+    push("编码: " + w.codec + " (formatTag=" + w.formatTag + (w.effectiveTag !== w.formatTag ? "→" + w.effectiveTag : "") + ") / " + w.sampleRate + " Hz / " + w.channels + " 声道 / " + w.bitsPerSample + " bit / " + w.bytesPerFrame + " B/帧");
+    push("帧数: " + w.frames + " (" + fmtNum(w.durationMs, 3) + " ms),data " + w.dataBytes + " B(声明 " + w.declaredDataBytes + " B)" + (w.truncated ? ",已截断" : ""));
+    if (w.trailingBytes > 0) push("  尾部 " + w.trailingBytes + " 字节不足一帧,已忽略");
+    for (const warn of w.warnings) push("  ! " + warn);
+  }
 
   rule("日志");
   const lg = report.log;
@@ -1572,7 +1801,7 @@ function renderHuman(report: any, opts: AnalyzeOptions): string {
 
   rule("参数");
   const p = report.params;
-  push("前奏: " + (p.preambleFrames ?? "—") + " 帧" + (p.preambleFrames != null ? " (" + fmtNum(framesToMs(p.preambleFrames, p.sampleRate), 3) + " ms)" : ""));
+  push("前奏: " + (p.preludeFrames ?? p.preambleFrames ?? "—") + " 帧" + ((p.preludeFrames ?? p.preambleFrames) != null ? " (" + fmtNum(framesToMs(p.preludeFrames ?? p.preambleFrames, p.sampleRate), 3) + " ms)" : "") + " 口径=" + (p.preludeMode ?? "?") + "(" + (p.preludeSource ?? "?") + ")");
   push("L   : " + (p.loopFrames ?? "—") + " 帧" + (p.loopMs != null ? " (" + fmtNum(p.loopMs, 3) + " ms)" : ""));
   push("时长: " + fmtNum(p.durationMs, 1) + " ms(WAV " + fmtNum(p.wavDurationMs, 1) + " ms)");
   push("模式: " + (p.mode ?? "?") + "(来源:" + (p.modeSource ?? "?") + ")");
@@ -1585,7 +1814,7 @@ function renderHuman(report: any, opts: AnalyzeOptions): string {
   for (const m of sm.marks.slice(0, 30)) {
     const tm = m.tMs != null ? "t=" + fmtNum(m.tMs, 1) + "ms" : "t=—";
     const ptsStr = m.ptsUs != null ? "pts=" + m.ptsUs + "µs" : "pts=—";
-    push("  #" + (m.index + 1) + " iter=" + (m.iter ?? "—") + " pos=" + (m.position ?? "—") + " (" + (m.position != null ? fmtNum(framesToMs(m.position, p.sampleRate), 3) : "—") + " ms) " + tm + " " + ptsStr + " 源=" + m.source);
+    push("  #" + (m.index + 1) + " iter=" + (m.iter ?? "—") + " pos=" + (m.position ?? "—") + " (" + (m.position != null ? fmtNum(framesToMs(m.position, p.sampleRate), 3) : "—") + " ms) " + tm + " " + ptsStr + " 源=" + m.source + " src=" + (m.src ?? "—") + " trigger=" + (m.trigger ?? "—"));
   }
   if (sm.marks.length > 30) push("  ... 其余 " + (sm.marks.length - 30) + " 处省略(见 JSON)");
 
@@ -1615,7 +1844,7 @@ function renderHuman(report: any, opts: AnalyzeOptions): string {
   for (const d of c.A2.deviations) {
     push("A2 接缝 #" + (d.seamIndex + 1) + ": " + d.fromPosition + " → " + d.toPosition + ",帧距 " + d.distanceFrames + ",理论 " + d.expectedFrames + ",偏差 " + d.deltaFrames + " 帧 (" + fmtNum(d.deltaMs, 3) + " ms)");
   }
-  push("A3 期望: 前奏 " + (c.A3.preambleFrames ?? "—") + " + " + (c.A3.seamCount ?? 0) + "×" + (c.A3.loopFrames ?? "—") + " = " + (c.A3.expectedFrames ?? "—") + " 帧,实际 " + c.A3.totalFrames + " 帧,偏差 " + (c.A3.deviationFrames ?? "—") + " 帧");
+  push("A3 前奏口径: " + (c.A3.preludeMode ?? "?") + "(来源 " + (c.A3.preludeSource ?? "?") + "),公式 " + (c.A3.expectedFormula ?? "A + N×L") + ";期望 " + (c.A3.expectedFrames ?? "—") + " 帧,实际 " + c.A3.totalFrames + " 帧,偏差 " + (c.A3.deviationFrames ?? "—") + " 帧");
   push("A4 稳态 [" + fmtNum(c.A4.steady.startMs, 0) + ", " + fmtNum(c.A4.steady.endMs, 0) + ") ms: flush " + c.A4.flush.steady + "/" + c.A4.flush.total + ", discontinuity " + c.A4.discontinuity.steady + "/" + c.A4.discontinuity.total + ", underrun 增量 " + c.A4.underrun.steadyDelta + "(全段 " + c.A4.underrun.wholeRunDelta + "), 最大喂数间隔 " + (c.A4.feed.maxGapMs != null ? fmtNum(c.A4.feed.maxGapMs, 2) + "ms" : "n/a"));
   for (const hp of c.A4.hardProblems ?? []) push("   A4 硬判据失败: " + hp);
   for (const sw of c.A4.softWarnings ?? []) push("   A4 参考警告: " + sw);
@@ -1630,8 +1859,11 @@ function renderHuman(report: any, opts: AnalyzeOptions): string {
       push("B 不一致: 第 " + (mm.roundIndex + 1) + " 轮帧 " + mm.roundFrame + "(绝对 " + mm.absFrame + "),声道 " + mm.channel + ",字节 " + mm.expectedByte + " vs " + mm.actualByte);
     }
   }
+  if (c.B.droppedRounds && c.B.droppedRounds.length > 0) {
+    push("B 丢弃尾部部分轮: " + c.B.droppedRounds.map((x: any) => "第 " + (x.roundIndex + 1) + " 轮 " + x.frames + " 帧(首轮 " + x.expectedFrames + " 帧)").join(", ") + ",共 " + (c.B.droppedFrames ?? 0) + " 帧");
+  }
   if (c.B.rounds && c.B.rounds.length > 0) {
-    push("B 轮次: " + c.B.rounds.length + " 轮,帧数 " + c.B.rounds.map((x: any) => x.frames).join(" / "));
+    push("B 轮次: 总 " + (c.B.totalRounds ?? c.B.rounds.length) + " 轮,参与比较 " + (c.B.comparedRounds ?? "—") + " 轮;帧数 " + c.B.rounds.map((x: any) => x.frames + (x.dropped ? "(丢弃)" : "")).join(" / "));
   }
 
   rule("PTS 连续性");
@@ -1751,6 +1983,24 @@ async function writeFixture(name: string, wav: Buffer, events: any[]): Promise<{
   return { wavPath, jsonlPath };
 }
 
+async function writeJsonlOnly(name: string, events: any[]): Promise<{ wavPath: string; jsonlPath: string }> {
+  const jsonlPath = path.join(FIXTURE_DIR, name + ".jsonl");
+  await writeFile(jsonlPath, events.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+  return { wavPath: path.join(FIXTURE_DIR, name + ".wav"), jsonlPath };
+}
+
+/** 按 10ms/441 帧喂数(最后一包可能更短),帧数与 totalFrames 严格相等。 */
+function pushFeeds(events: any[], totalFrames: number): void {
+  let remaining = totalFrames;
+  let i = 0;
+  while (remaining > 0) {
+    const n = Math.min(441, remaining);
+    events.push(makeFeed(i * 10, n, Math.round(((totalFrames - remaining) * 1e6) / FIX_SR)));
+    remaining -= n;
+    i++;
+  }
+}
+
 async function selftest(): Promise<number> {
   await mkdir(FIXTURE_DIR, { recursive: true });
   let passed = 0;
@@ -1772,7 +2022,7 @@ async function selftest(): Promise<number> {
   };
 
   console.log("fixtures 目录: " + FIXTURE_DIR);
-  console.log("生成并分析 6 个场景 ...\n");
+  console.log("生成并分析 9 个场景 ...\n");
 
   // -------- 场景 1:连续正弦,无接缝 -> A1/A2/A4 PASS --------
   {
@@ -1995,6 +2245,101 @@ async function selftest(): Promise<number> {
     expect("同 pts 无 ret 续写 = 1", pts.continuationBySamePtsNoRet === 1, String(pts.continuationBySamePtsNoRet));
   }
 
+  // -------- 场景 7:B 只比较完整轮,最后一轮收尾截断丢弃 --------
+  {
+    console.log("\n── 场景 7:B 只比较完整轮(最后一轮收尾截断应丢弃) ──");
+    const preamble = FIX_SR;
+    const loopFrames = FIX_SR;
+    const totalFrames = preamble + 2 * loopFrames + 1000;
+    const pcm = concatPcm([makeTone(preamble), makeTone(loopFrames), makeTone(loopFrames), makeTone(1000)]);
+    const events = baseLogEvents("baseline", 1000, 2000);
+    pushFeeds(events, totalFrames);
+    events.push(ev("seam", 1000, { iter: 1, outFrames: preamble, src: "sink2", trigger: "pump" }));
+    events.push(ev("seam", 2000, { iter: 2, outFrames: preamble + loopFrames, src: "sink2", trigger: "pump" }));
+    events.push(ev("seam", 3000, { iter: 3, outFrames: preamble + 2 * loopFrames, src: "sink2", trigger: "pump" }));
+    for (let t = 0; t <= 4000; t += 500) events.push(makeTrack(t));
+    events.push(ev("end", 4000, { totalFrames, durationMs: 4000 }));
+    const f = await writeFixture("07-partial-last-round", pcm16WavBuffer(pcm), events);
+    const rep = await runAnalyze(f);
+    const b = rep.criteria.B;
+    console.log("  结果: B=" + b.status + " total=" + b.totalRounds + " compared=" + b.comparedRounds + " dropped=" + JSON.stringify(b.droppedRounds));
+    console.log("  B: " + b.summary);
+    expect("B PASS(丢弃尾部部分轮)", b.status === "pass", b.status);
+    expect("总轮数 = 3", b.totalRounds === 3, String(b.totalRounds));
+    expect("参与比较 = 2 轮", b.comparedRounds === 2, String(b.comparedRounds));
+    expect("丢弃 1 轮 = 1000 帧", b.droppedRounds.length === 1 && b.droppedFrames === 1000, JSON.stringify(b.droppedRounds));
+    expect("A3 参考警告不影响门禁", rep.verdict.exitCode === 0, String(rep.verdict.exitCode));
+
+    // 7b:中间轮短于首轮(非最后一轮)必须 FAIL
+    console.log("\n── 场景 7b:中间轮短于首轮(非最后一轮)-> B 应 FAIL ──");
+    const events2 = baseLogEvents("baseline", 1000, 2000);
+    pushFeeds(events2, 176400);
+    events2.push(ev("seam", 1000, { iter: 1, outFrames: 44100 }));
+    events2.push(ev("seam", 2000, { iter: 2, outFrames: 88200 }));
+    events2.push(ev("seam", 3000, { iter: 3, outFrames: 132200 }));
+    events2.push(ev("end", 4000, { totalFrames: 176400, durationMs: 4000 }));
+    const f2 = await writeFixture("07b-mismatched-middle-round", pcm16WavBuffer(concatPcm([makeTone(44100), makeTone(44100), makeTone(44100), makeTone(44100)])), events2);
+    const rep2 = await runAnalyze(f2);
+    const b2 = rep2.criteria.B;
+    console.log("  结果: B=" + b2.status + " lengthMismatches=" + JSON.stringify(b2.lengthMismatches));
+    console.log("  B: " + b2.summary);
+    expect("B FAIL(非最后轮长度不一致)", b2.status === "fail", b2.status);
+    expect("轮长不一致已报告", (b2.lengthMismatches ?? []).length > 0, JSON.stringify(b2.lengthMismatches));
+  }
+
+  // -------- 场景 8:A3 full-b 口径自动识别 + seam src/trigger --------
+  {
+    console.log("\n── 场景 8:A3 full-b 口径自动识别(前奏=[0,B))+ seam src/trigger ──");
+    const aFrames = 44100;   // aMs=1000
+    const bFrames = 88200;   // bMs=2000
+    const loopFrames = bFrames - aFrames;
+    const totalFrames = bFrames + 2 * loopFrames + 1000; // B + (N-1)L + 尾部
+    const pcm = concatPcm([makeTone(bFrames), makeTone(loopFrames), makeTone(loopFrames), makeTone(1000)]);
+    const events = baseLogEvents("sink", 1000, 2000);
+    pushFeeds(events, totalFrames);
+    events.push(ev("seam", 2000, { iter: 1, outFrames: bFrames, src: "sink2", trigger: "pump" }));
+    events.push(ev("seam", 3000, { iter: 2, outFrames: bFrames + loopFrames, src: "sink2", trigger: "pump" }));
+    events.push(ev("seam", 4000, { iter: 3, outFrames: bFrames + 2 * loopFrames, src: "sink2", trigger: "pump" }));
+    events.push(ev("end", 5000, { totalFrames, durationMs: 5000 }));
+    const f = await writeFixture("08-full-b-prelude", pcm16WavBuffer(pcm), events);
+    const rep = await runAnalyze(f);
+    const a3 = rep.criteria.A3;
+    const b = rep.criteria.B;
+    const m0 = rep.seams.marks[0];
+    console.log("  结果: A3=" + a3.status + " prelude=" + a3.preludeMode + "/" + a3.preludeSource + " expected=" + a3.expectedFrames + " B=" + b.status + " src=" + m0.src + "/" + m0.trigger);
+    console.log("  A3: " + a3.summary);
+    expect("A3 PASS", a3.status === "pass", a3.status);
+    expect("自动识别为 full-b", a3.preludeMode === "full-b" && a3.preludeSource === "auto", a3.preludeMode + "/" + a3.preludeSource);
+    expect("期望公式 = B + (N-1)×L", a3.expectedFormula === "B + (N-1)×L", a3.expectedFormula);
+    expect("期望总帧 = " + (bFrames + 2 * loopFrames), a3.expectedFrames === bFrames + 2 * loopFrames, String(a3.expectedFrames));
+    expect("B PASS(2/3 轮)", b.status === "pass" && b.comparedRounds === 2, b.status + "/" + b.comparedRounds);
+    expect("seam src=sink2", m0.src === "sink2" && m0.trigger === "pump", m0.src + "/" + m0.trigger);
+  }
+
+  // -------- 场景 9:tap=0 / 无有效 WAV -> 仅日志判定 --------
+  {
+    console.log("\n── 场景 9:tap=0 / 无有效 WAV 时仅日志判定(A1/B 跳过,A2 仍判) ──");
+    const events = baseLogEvents("sink", 5000, 15000);
+    events[0].tap = false; // tap=0:探针不落 PCM
+    events.push(ev("seam", 15000, { iter: 1, outFrames: 661500, src: "sink2", trigger: "pump" }));
+    events.push(ev("seam", 25000, { iter: 2, outFrames: 1102500, src: "sink2", trigger: "pump" }));
+    events.push(ev("end", 30000, { totalFrames: 1323000, durationMs: 30000 }));
+    const f = await writeJsonlOnly("09-log-only", events);
+    // 模拟 tap=0 的占位 WAV(非 RIFF,55 字节)
+    await writeFile(f.wavPath, Buffer.from("cat /dev/null placeholder (tap=0, no wav)", "ascii"));
+    const rep = await runAnalyze(f);
+    const c = rep.criteria;
+    console.log("  结果: wav.present=" + rep.wav.present + " A1=" + c.A1.status + " A2=" + c.A2.status + " A3=" + c.A3.status + " A4=" + c.A4.status + " B=" + c.B.status);
+    console.log("  A2: " + c.A2.summary);
+    console.log("  A3: " + c.A3.summary);
+    expect("WAV 标记为不可用", rep.wav.present === false, String(rep.wav.present));
+    expect("A1 SKIP(无 PCM)", c.A1.status === "skipped", c.A1.status);
+    expect("B SKIP(无 PCM)", c.B.status === "skipped", c.B.status);
+    expect("A2 仍 PASS", c.A2.status === "pass", c.A2.status);
+    expect("A3 PASS(full-b)", c.A3.status === "pass", c.A3.status);
+    expect("退出码 0", rep.verdict.exitCode === 0, String(rep.verdict.exitCode));
+  }
+
   console.log("\n自测结果: " + passed + " 通过," + failed + " 失败");
   if (failed === 0) console.log("全部自测场景通过。");
   return failed === 0 ? 0 : 1;
@@ -2010,6 +2355,7 @@ function printHelp(): void {
     "",
     "用法:",
     "  bun run tools/spike-analyze.ts <tap.wav> <tap.jsonl> [选项]",
+    "  bun run tools/spike-analyze.ts <tap.jsonl> [选项]   (tap=0 无 WAV,仅日志判定)",
     "  bun run tools/spike-analyze.ts --selftest",
     "",
     "选项:",
@@ -2021,6 +2367,7 @@ function printHelp(): void {
     "  --steady-end-ms <n>       稳态终点(从时长里扣),默认 1000",
     "  --feed-gap-ms <n>         喂数间隔阈值,默认 30;显式传入=开启硬判(默认仅参考警告)",
     "  --mode <m>                覆盖 run.mode(plain/baseline/window/sink/media),仅影响机制结论文案",
+    "  --prelude-mode <m>        A3 前奏口径:auto(默认)/full-b(前奏=[0,B))/a(前奏=[0,A))",
     "  --pts-threshold-us <n>    PTS 不连续阈值(µs),默认 1000",
     "  --max-mismatches <n>      B 每轮最多报告的不一致样本数,默认 10",
     "  --strict                  A3/B 也作为必须判据",
@@ -2071,6 +2418,10 @@ function parseArgs(argv: string[]): CliConfig {
       const m = (argv[++i] ?? "").trim().toLowerCase();
       if (!m) throw new Error("--mode 需要一个模式名");
       cfg.opts.modeOverride = m;
+    } else if (a === "--prelude-mode") {
+      const m = (argv[++i] ?? "").trim().toLowerCase();
+      if (m !== "auto" && m !== "full-b" && m !== "a") throw new Error("--prelude-mode 只支持 auto/full-b/a");
+      cfg.opts.preludeMode = m as any;
     }
     else if (a === "--pts-threshold-us") cfg.opts.ptsThresholdUs = needNum(a, argv[++i]);
     else if (a === "--max-mismatches") cfg.opts.maxMismatches = needNum(a, argv[++i]);
@@ -2105,12 +2456,19 @@ async function main(): Promise<void> {
     process.exit(code);
   }
 
-  if (cfg.files.length < 2) {
+  if (cfg.files.length < 1) {
     console.error("用法: bun run tools/spike-analyze.ts <tap.wav> <tap.jsonl> [选项](或 --selftest)");
     process.exit(2);
   }
 
-  const [wavPath, jsonlPath] = cfg.files;
+  let wavPath: string | null = null;
+  let jsonlPath: string;
+  if (cfg.files.length === 1) {
+    jsonlPath = cfg.files[0]; // 单文件模式:tap=0 无 WAV,仅日志判定
+  } else {
+    wavPath = cfg.files[0];
+    jsonlPath = cfg.files[1];
+  }
   let report: any;
   try {
     report = await analyze(wavPath, jsonlPath, cfg.opts);
