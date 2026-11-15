@@ -38,14 +38,14 @@
 
 | # | 用例 | 判据 |
 |---|---|---|
-| C1 | 已确认歌 + 单曲循环 = 无缝 | 3s 后 /state: window!=null 且 seamCount 增长或 isReplaying=true |
+| C1 | 显式进入无缝 | `POST /loop/enter {songId}`(等价菜单「无缝循环」)→ 3s 后 /state: window 命中、seamCount 增长或 isReplaying=true |
 | C2 | 环回正确 | 200ms 采样 60 次跨 B:displayPos 全程 ∈ [A-1s, B+0.5s];跨越后回落到 [A,A+3s];playing 恒 true。**displayPos 取折返后的展示口径**(协议端再折返一次是幂等的);MediaSession 内部约 1s 的 PlaybackState 外推不算缺陷 |
 | C3 | 未确认歌不无缝 | window=null、无 A/B 标记 |
 | C4 | 切歌取消 | window=null;repeat 未被引擎改写(前后一致);新歌正常播放 |
 | C5 | repeat 改 ALL/OFF | <=1s window=null;整曲播放 |
 | C6 | demote/delete | <=1s window=null;播放不中断 |
-| C7 | 重启恢复 | seek 到区内 -> 2s -> 杀进程冷启:恢复位置 ≈ 展示位置(±15s);再 play 后仍无缝并从恢复位继续 |
-| C8 | 切到另一首已确认歌 | 新歌自动无缝(window.songId=新歌) |
+| C7 | 重启恢复 | 无缝中杀进程冷启:恢复位置 ≈ 展示位置(±15s);**重启后不自动无缝**(意图是会话级的,window=null);需重新显式进入 |
+| C8 | 切到另一首已确认歌 | **新歌不无缝**(window=null),且 repeat **恢复为进入无缝前的模式**(显式意图驱动,见 issue 00004) |
 | C9 | 通知栏/协议 seek 到区内 | 预卷或 degrade <=1 次,1 轮内恢复 seamless |
 | C10 | 暂停/恢复 | seamCount 继续增长;位置不跳变(±1s) |
 
