@@ -137,6 +137,18 @@ class LoopPcmEngine {
     private var incompleteDegraded = false
     private var replayUnavailable = false
 
+    /** 是否由 controller 要求“音频线程不做大分配”（生产路径）。 */
+    private var preallocationRequired = false
+    private var preallocated: Preallocated? = null
+
+    /** 音频线程上实际发生过几次 ring 分配（用于单测断言预分配生效）。 */
+    internal var audioThreadAllocationCount: Long = 0L
+        private set
+
+    /** 降级事件回调（由 controller 注入；engine 保证同一事件只回调一次）。 */
+    internal var onDegrade: ((targetRawUs: Long) -> Unit)? = null
+    private var degradeCallbackArmed = true
+
     // ------------------------------------------------------------------ 配置
 
     /** 记录输出格式。格式变化时 ring 失效并等待下一次输入重建。 */
@@ -158,6 +170,7 @@ class LoopPcmEngine {
             pendingAdvancedFrames = 0L
             cursorFrames = 0L
             round = 1L
+            degradeCallbackArmed = true
             state = if (region != null) State.CAPTURING else State.PASS_THROUGH
             return
         }
@@ -172,6 +185,86 @@ class LoopPcmEngine {
         if (window == newWindow) return
         window = newWindow
         invalidateRegionLocked()
+    }
+
+    /**
+     * 由 controller 开启“预分配模式”：window/format 写入时后台分配 ring，
+     * 音频线程只做容量校验；ring 未就绪时 onBuffer 不分配、保持 pending。
+     */
+    @Synchronized
+    fun requirePreallocation() {
+        preallocationRequired = true
+    }
+
+    /** 当前 window/format 是否已经有一块可用的 ring（预分配或已在捕获）。 */
+    @Synchronized
+    fun hasRingFor(window: LoopWindow, format: Format): Boolean {
+        val r = region
+        return r != null && ring != null && r.window == window && r.format == format
+    }
+
+    /**
+     * 后台线程完成分配后安装 ring。window/format 必须仍是当前值，字节数必须匹配
+     * planRing 预算；已存在同窗口 ring 时保留现有捕获进度。
+     */
+    @Synchronized
+    internal fun offerPreallocatedRing(
+        window: LoopWindow,
+        format: Format,
+        bytes: ByteArray,
+    ): Boolean {
+        if (released) return false
+        if (this.window != window || this.format != format) return false
+        val plan = planRing(window, format) ?: return false
+        if (bytes.size.toLong() != plan.byteSize) return false
+        if (hasRingForLocked(window, format)) return true
+        preallocated = Preallocated(window, format, plan.loopFrames, bytes)
+        // 后台线程直接把 ring/region 安装好，音频线程首次回调只剩容量校验。
+        regionDirty = false
+        region = Region(window, format, plan.aFrame, plan.bFrame)
+        ring = bytes
+        coverage = Coverage()
+        ringFrames = plan.loopFrames
+        capturedFrames = 0L
+        isRingComplete = false
+        incompleteDegraded = false
+        cursorFrames = 0L
+        round = 1L
+        pendingChunk = null
+        pendingConsumedBytes = 0
+        pendingAdvancedFrames = 0L
+        degradeCallbackArmed = true
+        state = if (replayUnavailable) State.PASS_THROUGH else State.CAPTURING
+        return true
+    }
+
+    /**
+     * 预分配是否仍未就绪。sink 在首个 handleBuffer 里据此施加背压，避免音频线程
+     * 自己分配大 ring，也避免丢数据。
+     */
+    @Synchronized
+    fun isPreallocationPending(): Boolean {
+        if (!preallocationRequired || released || replayUnavailable) return false
+        if (region != null && ring != null) return false
+        val w = window ?: return false
+        val f = format ?: return false
+        val plan = planRing(w, f) ?: return false
+        val pre = preallocated
+        return pre == null ||
+            pre.window != w ||
+            pre.format != f ||
+            pre.loopFrames != plan.loopFrames ||
+            pre.bytes.size.toLong() != plan.byteSize
+    }
+
+    /** 预分配等待超时/失败后的兜底：放弃预分配并降级为直通。 */
+    @Synchronized
+    fun abandonPreallocation() {
+        if (region != null) return
+        if (!isPreallocationPending()) return
+        replayUnavailable = true
+        degradeCount += 1L
+        state = State.PASS_THROUGH
     }
 
     /** 由服务层/调试显式废弃 ring（窗口变更等）。 */
@@ -287,6 +380,7 @@ class LoopPcmEngine {
             if (!incompleteDegraded) {
                 incompleteDegraded = true
                 degradeCount += 1L
+                notifyDegradeLocked()
             }
             // 不完整时不能让 sink 永久停在“循环态”空转：降级为直通，
             // 由服务层（seek 回 A 补环 / 清窗口）决定后续。
@@ -319,6 +413,7 @@ class LoopPcmEngine {
             if (!incompleteDegraded) {
                 incompleteDegraded = true
                 degradeCount += 1L
+                notifyDegradeLocked()
             }
             replayUnavailable = true
             state = State.PASS_THROUGH
@@ -415,14 +510,15 @@ class LoopPcmEngine {
     /** flush：退出重放、清 pending；ring/覆盖进度保留（窗口不变时下次仍可用）。 */
     @Synchronized
     fun onFlush() {
-        // flush 通常由 seek 触发：允许重新捕获补环。
+        // flush 通常由 seek 触发：允许重新捕获补环、允许再次降级通知。
         replayUnavailable = false
+        incompleteDegraded = false
+        degradeCallbackArmed = true
         pendingChunk = null
         pendingConsumedBytes = 0
         pendingAdvancedFrames = 0L
         cursorFrames = 0L
         round = 1L
-        incompleteDegraded = false
         state = when {
             released -> State.PASS_THROUGH
             region != null -> State.CAPTURING
@@ -451,7 +547,10 @@ class LoopPcmEngine {
     /** 重放写 delegate 抛异常时调用：降级并退出重放。 */
     @Synchronized
     fun onReplayFailure() {
-        if (state == State.REPLAYING) degradeCount += 1L
+        if (state == State.REPLAYING) {
+            degradeCount += 1L
+            notifyDegradeLocked()
+        }
         replayUnavailable = true
         pendingChunk = null
         pendingConsumedBytes = 0
@@ -462,6 +561,29 @@ class LoopPcmEngine {
     }
 
     // ------------------------------------------------------------------ 内部
+
+    /**
+     * 降级事件只回调一次（同一事件/同一 epoch）。flush 会重新 arm，允许补环失败后再次通知。
+     * 注意：回调在 engine 锁内、音频线程上执行；controller 必须把它 dispatch 到主线程。
+     */
+    private fun notifyDegradeLocked() {
+        if (!degradeCallbackArmed) return
+        degradeCallbackArmed = false
+        val target = degradeTargetUsLocked()
+        onDegrade?.invoke(target)
+    }
+
+    /** 建议 seek 目标：当前轮起点 - 250ms，下限 0。 */
+    private fun degradeTargetUsLocked(): Long {
+        val r = region
+        val roundStart = if (r != null) {
+            r.window.loopStartUs +
+                (round - 1L).coerceAtLeast(0L) * r.loopDurationUs
+        } else {
+            window?.loopStartUs ?: 0L
+        }
+        return (roundStart - DEGRADE_SEEK_BACK_US).coerceAtLeast(0L)
+    }
 
     private fun passThroughPlan(srcPos: Int, frameCount: Int, remainingBytes: Int): BufferPlan {
         val frames = if (frameCount > 0) frameCount else {
@@ -477,13 +599,13 @@ class LoopPcmEngine {
         )
     }
 
-    /** 计算/重建 region 与 ring。返回 null 表示当前不可环回（window 空/非法/超限）。 */
+    /** 计算/重建 region 与 ring。返回 null 表示当前不可环回（window 空/非法/超限/预分配未就绪）。 */
     private fun ensureRegionLocked(): Region? {
         if (!regionDirty) return region
-        regionDirty = false
         val fmt = format
         val w = window
         if (released || fmt == null || !fmt.isValid() || w == null || !w.isValid()) {
+            regionDirty = false
             region = null
             ring = null
             ringFrames = 0L
@@ -493,15 +615,12 @@ class LoopPcmEngine {
             return null
         }
 
-        val aFrame = usToFrameCeil(w.loopStartUs, fmt.sampleRate)
-        val bFrame = usToFrameCeil(w.loopEndUs, fmt.sampleRate)
-        val loopFrames = bFrame - aFrame
-        val tooLong = w.lengthUs > MAX_LOOP_DURATION_US
-        val tooManyBytes = loopFrames > MAX_RING_BYTES / fmt.bytesPerFrame
-        if (loopFrames <= 0L || tooLong || tooManyBytes) {
+        val plan = planRing(w, fmt)
+        if (plan == null) {
+            regionDirty = false
             region = null
             ring = null
-            ringFrames = if (loopFrames > 0L) loopFrames else 0L
+            ringFrames = 0L
             capturedFrames = 0L
             isRingComplete = false
             state = State.PASS_THROUGH
@@ -512,31 +631,61 @@ class LoopPcmEngine {
             return null
         }
 
-        val ringBytes = loopFrames * fmt.bytesPerFrame
-        val newRing = try {
-            ByteArray(ringBytes.toInt())
-        } catch (t: Throwable) {
-            region = null
-            ring = null
-            ringFrames = loopFrames
-            capturedFrames = 0L
-            isRingComplete = false
-            state = State.PASS_THROUGH
-            if (unavailableWindow != w) {
-                unavailableWindow = w
-                degradeCount += 1L
-            }
-            return null
+        val pre = preallocated
+        val reusable = if (pre != null &&
+            pre.window == w &&
+            pre.format == fmt &&
+            pre.loopFrames == plan.loopFrames &&
+            pre.bytes.size.toLong() == plan.byteSize
+        ) {
+            pre.bytes
+        } else {
+            null
         }
 
-        region = Region(w, fmt, aFrame, bFrame)
+        val newRing = if (reusable != null) {
+            reusable
+        } else {
+            if (preallocationRequired) {
+                // 预分配还没完成/失败：音频线程绝不做大分配，保持 pending。
+                // 保持 regionDirty=true，下一次 ensure 时重新检查。
+                region = null
+                ring = null
+                ringFrames = plan.loopFrames
+                capturedFrames = 0L
+                isRingComplete = false
+                state = State.PASS_THROUGH
+                return null
+            }
+            audioThreadAllocationCount += 1L
+            try {
+                ByteArray(plan.byteSize.toInt())
+            } catch (t: Throwable) {
+                regionDirty = false
+                region = null
+                ring = null
+                ringFrames = plan.loopFrames
+                capturedFrames = 0L
+                isRingComplete = false
+                state = State.PASS_THROUGH
+                if (unavailableWindow != w) {
+                    unavailableWindow = w
+                    degradeCount += 1L
+                }
+                return null
+            }
+        }
+
+        regionDirty = false
+        region = Region(w, fmt, plan.aFrame, plan.bFrame)
         ring = newRing
         coverage = Coverage()
-        ringFrames = loopFrames
+        ringFrames = plan.loopFrames
         capturedFrames = 0L
         isRingComplete = false
         incompleteDegraded = false
         replayUnavailable = false
+        degradeCallbackArmed = true
         cursorFrames = 0L
         round = 1L
         pendingChunk = null
@@ -544,6 +693,11 @@ class LoopPcmEngine {
         pendingAdvancedFrames = 0L
         state = State.CAPTURING
         return region
+    }
+
+    private fun hasRingForLocked(window: LoopWindow, format: Format): Boolean {
+        val r = region
+        return r != null && ring != null && r.window == window && r.format == format
     }
 
     private fun invalidateRegionLocked() {
@@ -556,6 +710,8 @@ class LoopPcmEngine {
         isRingComplete = false
         incompleteDegraded = false
         replayUnavailable = false
+        preallocated = null
+        degradeCallbackArmed = true
         cursorFrames = 0L
         round = 1L
         pendingChunk = null
@@ -634,6 +790,14 @@ class LoopPcmEngine {
         return roundBaseUs + offsetUs
     }
 
+    /** 后台预分配安装的 ring。 */
+    private class Preallocated(
+        val window: LoopWindow,
+        val format: Format,
+        val loopFrames: Long,
+        val bytes: ByteArray,
+    )
+
     /** 覆盖区间集合：支持 seek 进区间中部后回补前半段。 */
     private class Coverage {
         private val intervals = ArrayList<LongArray>()
@@ -676,6 +840,37 @@ class LoopPcmEngine {
 
         /** 每次重放喂送约 10ms（与探针一致）。 */
         const val REPLAY_CHUNK_MS: Int = 10
+
+        /** 降级时建议 seek 回“该轮起点 - 250ms”（探针验证过的预卷量）。 */
+        const val DEGRADE_SEEK_BACK_US: Long = 250_000L
+
+        /** ring 容量预算：由 controller 在后台按同一份计划预分配。 */
+        data class RingPlan(
+            val aFrame: Long,
+            val bFrame: Long,
+            val loopFrames: Long,
+            val byteSize: Long,
+        )
+
+        /**
+         * 纯计算 ring 计划；null = window/format 非法、长度 <= 0、超 300s 或超 64MB。
+         * controller 后台预分配与 engine 音频线程容量校验共用此函数。
+         */
+        fun planRing(window: LoopWindow, format: Format): RingPlan? {
+            if (!window.isValid() || !format.isValid()) return null
+            val aFrame = usToFrameCeil(window.loopStartUs, format.sampleRate)
+            val bFrame = usToFrameCeil(window.loopEndUs, format.sampleRate)
+            val loopFrames = bFrame - aFrame
+            if (loopFrames <= 0L) return null
+            if (window.lengthUs > MAX_LOOP_DURATION_US) return null
+            if (loopFrames > MAX_RING_BYTES / format.bytesPerFrame) return null
+            return RingPlan(
+                aFrame = aFrame,
+                bFrame = bFrame,
+                loopFrames = loopFrames,
+                byteSize = loopFrames * format.bytesPerFrame,
+            )
+        }
 
         private const val US_PER_SECOND: Long = 1_000_000L
 

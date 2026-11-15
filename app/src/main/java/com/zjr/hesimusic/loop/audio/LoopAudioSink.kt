@@ -59,6 +59,9 @@ class LoopAudioSink(
     private var pendingInput: PendingInput? = null
     private var pendingReplay: PendingReplay? = null
 
+    /** ring 预分配未完成时的背压重试计数。 */
+    private var preallocRetries: Int = 0
+
     /** 上一次同步给引擎的窗口；窗口变化时丢弃旧窗口的 pending 重放 chunk。 */
     private var observedWindow: LoopWindow? = null
 
@@ -115,6 +118,18 @@ class LoopAudioSink(
         }
 
         syncWindow()
+
+        // ring 预分配未完成：对 delegate 施加背压（不消费本 buffer），
+        // 避免音频线程自己分配 64MB，也避免丢数据。超时后降级为直通。
+        if (engine.isPreallocationPending()) {
+            if (preallocRetries++ < MAX_PREALLOC_RETRIES) {
+                return false
+            }
+            preallocRetries = 0
+            engine.abandonPreallocation()
+        } else {
+            preallocRetries = 0
+        }
 
         // 背压重试：delegate 没吃完的输入必须用同一个 ByteBuffer 继续。
         val pending = pendingInput
@@ -229,6 +244,7 @@ class LoopAudioSink(
     override fun flush() {
         pendingInput = null
         pendingReplay = null
+        preallocRetries = 0
         engine.onFlush()
         controller.onSinkFlush()
         super.flush()
@@ -237,6 +253,7 @@ class LoopAudioSink(
     override fun reset() {
         pendingInput = null
         pendingReplay = null
+        preallocRetries = 0
         engine.onReset()
         controller.onSinkReset()
         super.reset()
@@ -247,6 +264,7 @@ class LoopAudioSink(
         disabled = true
         pendingInput = null
         pendingReplay = null
+        preallocRetries = 0
         engine.onRelease()
         controller.onSinkRelease()
         super.release()
@@ -266,6 +284,7 @@ class LoopAudioSink(
             observedWindow = window
             // 旧窗口的 ring/游标已失效，旧 chunk 不能再喂给 delegate。
             pendingReplay = null
+            preallocRetries = 0
         }
         engine.setWindow(window)
     }
@@ -373,5 +392,8 @@ class LoopAudioSink(
 
     private companion object {
         const val MAX_CHUNKS_PER_PUMP = 128
+
+        /** 预分配背压上限：约 2s（renderer ~100Hz 轮询）。 */
+        const val MAX_PREALLOC_RETRIES = 200
     }
 }

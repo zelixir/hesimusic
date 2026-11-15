@@ -1,11 +1,15 @@
 package com.zjr.hesimusic.loop.audio
 
+import android.os.Handler
+import android.os.Looper
 import com.zjr.hesimusic.loop.LoopWindow
 import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -20,18 +24,68 @@ class LoopAudioController @Inject constructor() {
 
     internal val engine = LoopPcmEngine()
 
+    private val preallocGeneration = AtomicLong(0L)
+
+    /** 测试可替换为同步执行；生产默认单线程 daemon executor。 */
+    internal var preallocDispatcher: ((Runnable) -> Unit)? = null
+
+    private val preallocExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "LoopRingPrealloc").apply { isDaemon = true }
+    }
+
+    @Volatile
+    private var currentFormat: LoopPcmEngine.Format? = null
+
     /**
      * 无缝窗口；null = 纯直通。仅服务层写。
      *
-     * 写入时同步到引擎（会重建 ring）；sink 在每个音频回调里也会再同步一次，
-     * 避免服务层在 configure 之前写窗口时丢失。
+     * 写入时同步到引擎（会重建 ring），并在后台按 window/format 预分配 ring；
+     * sink 在音频回调里只做容量校验，不会做大分配。
      */
     @Volatile
     var window: LoopWindow? = null
         set(value) {
             field = value
             engine.setWindow(value)
+            schedulePreallocation()
         }
+
+    /**
+     * 降级回调（主线程触发）：targetRawUs = 当前轮起点 - 250ms（下限 0）。
+     *
+     * 服务层应在这里 seekTo(targetRawUs)；回调绝不会在音频线程上执行。
+     * 同一个降级事件只回调一次；flush 后可再次触发。
+     *
+     * 仅“ring 不完整 / 重放失败”这类可通过 seek 回补的降级会回调；
+     * 容量超限、预分配失败只递增 [degradeCount]（seek 无法修复，服务层应清窗口/提示）。
+     */
+    @Volatile
+    var onDegradeRequested: ((targetRawUs: Long) -> Unit)? = null
+        set(value) {
+            field = value
+            if (value == null) return
+            val pending = synchronized(degradeLock) {
+                val target = pendingDegradeTargetUs
+                pendingDegradeTargetUs = null
+                target
+            }
+            if (pending != null) {
+                dispatchDegrade { value(pending) }
+            }
+        }
+
+    private val degradeLock = Any()
+    private var pendingDegradeTargetUs: Long? = null
+
+    /** 测试可替换为同步/队列执行；生产默认主线程 Handler。 */
+    internal var degradeDispatcher: ((Runnable) -> Unit)? = null
+
+    private val mainHandler: Handler by lazy { Handler(Looper.getMainLooper()) }
+
+    init {
+        engine.requirePreallocation()
+        engine.onDegrade = { targetRawUs -> handleEngineDegrade(targetRawUs) }
+    }
 
     /** 当前歌整曲时长（µs），会话层 getDuration 投影用。 */
     @Volatile
@@ -96,15 +150,16 @@ class LoopAudioController @Inject constructor() {
         bytesPerFrame: Int,
         pcmIsFloat: Boolean,
     ) {
-        engine.configure(
-            LoopPcmEngine.Format(
-                sampleRate = sampleRate,
-                channelCount = channels,
-                bytesPerFrame = bytesPerFrame,
-                pcmIsFloat = pcmIsFloat,
-            )
+        val fmt = LoopPcmEngine.Format(
+            sampleRate = sampleRate,
+            channelCount = channels,
+            bytesPerFrame = bytesPerFrame,
+            pcmIsFloat = pcmIsFloat,
         )
+        engine.configure(fmt)
         engine.setWindow(window)
+        currentFormat = fmt
+        schedulePreallocation()
         synchronized(tapLock) {
             val newFormat = TapFormat(
                 sampleRate = sampleRate,
@@ -135,9 +190,70 @@ class LoopAudioController @Inject constructor() {
     }
 
     internal fun onSinkRelease() {
+        preallocGeneration.incrementAndGet()
+        currentFormat = null
         engine.onRelease()
         synchronized(tapLock) {
             closeTapLocked()
+        }
+    }
+
+    // ------------------------------------------------------------ ring 预分配
+
+    /**
+     * window/format 写入后调用：后台按 planRing 分配 ring，完成后安装到 engine。
+     * 音频线程只做容量校验；预分配未完成时由 sink 施加背压。
+     */
+    private fun schedulePreallocation() {
+        val generation = preallocGeneration.incrementAndGet()
+        val w = window ?: return
+        val f = currentFormat ?: return
+        if (engine.hasRingFor(w, f)) return
+        val plan = LoopPcmEngine.planRing(w, f) ?: return
+
+        val task = Runnable {
+            if (preallocGeneration.get() != generation) return@Runnable
+            if (window != w || currentFormat != f) return@Runnable
+            if (engine.hasRingFor(w, f)) return@Runnable
+            val bytes = try {
+                ByteArray(plan.byteSize.toInt())
+            } catch (t: Throwable) {
+                return@Runnable
+            }
+            if (preallocGeneration.get() != generation) return@Runnable
+            if (window != w || currentFormat != f) return@Runnable
+            engine.offerPreallocatedRing(w, f, bytes)
+        }
+
+        val dispatcher = preallocDispatcher
+        if (dispatcher != null) {
+            dispatcher(task)
+        } else {
+            preallocExecutor.execute(task)
+        }
+    }
+
+    // ------------------------------------------------------------ 降级回调
+
+    private fun handleEngineDegrade(targetRawUs: Long) {
+        var callback: ((Long) -> Unit)? = null
+        synchronized(degradeLock) {
+            callback = onDegradeRequested
+            if (callback == null) {
+                pendingDegradeTargetUs = targetRawUs
+                return
+            }
+        }
+        val cb = callback ?: return
+        dispatchDegrade { cb(targetRawUs) }
+    }
+
+    private fun dispatchDegrade(block: () -> Unit) {
+        val dispatcher = degradeDispatcher
+        if (dispatcher != null) {
+            dispatcher(Runnable(block))
+        } else {
+            mainHandler.post(Runnable(block))
         }
     }
 

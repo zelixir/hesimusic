@@ -25,6 +25,9 @@ class LoopAudioSinkTest {
         maxFramesPerCall: Int = Int.MAX_VALUE,
     ): Triple<LoopAudioController, LoopAudioSink, FakeAudioSink> {
         val controller = LoopAudioController()
+        // 单测里让预分配/降级 dispatch 同步执行，保证确定性。
+        controller.preallocDispatcher = { it.run() }
+        controller.degradeDispatcher = { it.run() }
         val fake = FakeAudioSink()
         fake.maxFramesPerCall = maxFramesPerCall
         val sink = LoopAudioSink(controller, fake)
@@ -321,6 +324,141 @@ class LoopAudioSinkTest {
             "delegate 未设置位置时 controller 仍应保持引擎媒体位置",
             replayController.positionUs >= bUs,
         )
+    }
+
+    @Test
+    fun `降级回调经 dispatch 异步抛出且目标正确 同一事件只一次`() {
+        val controller = LoopAudioController()
+        controller.preallocDispatcher = { it.run() }
+        val queued = mutableListOf<Runnable>()
+        controller.degradeDispatcher = { queued.add(it) }
+        val targets = mutableListOf<Long>()
+        controller.onDegradeRequested = { targets.add(it) }
+
+        val fake = FakeAudioSink()
+        val sink = LoopAudioSink(controller, fake)
+        sink.configure(PcmTestSupport.format(), 4096, null)
+        controller.window = window(1000, 2000)
+
+        // 从 1.5s 进入，只捕获 [1.5s,2s)，ring 不完整 -> 降级
+        assertTrue(
+            sink.handleBuffer(
+                PcmTestSupport.pcm16Buffer(1500, 1000),
+                1_500_000L,
+                1,
+            )
+        )
+
+        assertEquals("音频线程不得直接调用服务层回调", 0, targets.size)
+        assertEquals("降级应 dispatch 到主线程", 1, queued.size)
+        queued.removeAt(0).run()
+        assertEquals("主线程执行后应回调一次", 1, targets.size)
+        assertEquals("target = A - 250ms", 750_000L, targets[0])
+
+        // 同一事件后继续喂普通输入，不应再次回调
+        assertTrue(sink.handleBuffer(PcmTestSupport.pcm16Buffer(0, 10), 0L, 1))
+        assertEquals("同一降级事件不得重复回调", 1, targets.size)
+
+        // flush 后再次失败 -> 再次回调
+        sink.flush()
+        assertTrue(
+            sink.handleBuffer(
+                PcmTestSupport.pcm16Buffer(2000, 10),
+                2_000_000L,
+                1,
+            )
+        )
+        assertEquals("flush 后应重新排队一次回调", 1, queued.size)
+        queued.removeAt(0).run()
+        assertEquals("flush 后应再次回调", 2, targets.size)
+        assertEquals("目标值仍为 A - 250ms", 750_000L, targets[1])
+    }
+
+    @Test
+    fun `降级发生在回调注册前时注册后补发一次`() {
+        val controller = LoopAudioController()
+        controller.preallocDispatcher = { it.run() }
+        val queued = mutableListOf<Runnable>()
+        controller.degradeDispatcher = { queued.add(it) }
+        val fake = FakeAudioSink()
+        val sink = LoopAudioSink(controller, fake)
+        sink.configure(PcmTestSupport.format(), 4096, null)
+        controller.window = window(1000, 2000)
+
+        assertTrue(
+            sink.handleBuffer(
+                PcmTestSupport.pcm16Buffer(1500, 1000),
+                1_500_000L,
+                1,
+            )
+        )
+        assertEquals("回调未注册时不应 dispatch", 0, queued.size)
+
+        val targets = mutableListOf<Long>()
+        controller.onDegradeRequested = { targets.add(it) }
+        assertEquals("注册回调后应补发 pending 事件", 1, queued.size)
+        queued.removeAt(0).run()
+        assertEquals(1, targets.size)
+        assertEquals(750_000L, targets[0])
+    }
+
+    @Test
+    fun `预分配在首次 handleBuffer 前完成且音频线程不分配`() {
+        val controller = LoopAudioController()
+        controller.preallocDispatcher = { it.run() }
+        val fake = FakeAudioSink()
+        val sink = LoopAudioSink(controller, fake)
+        sink.configure(PcmTestSupport.format(), 4096, null)
+
+        controller.window = window(100, 200)
+
+        assertEquals("window 写入时就应完成预分配", 100L, controller.engine.ringFrames)
+        assertFalse("预分配完成后不应 pending", controller.engine.isPreallocationPending())
+
+        assertTrue(sink.handleBuffer(PcmTestSupport.pcm16Buffer(0, 250), 0L, 1))
+        assertTrue(controller.isReplaying)
+        assertEquals("首次回调不得在音频线程分配 ring", 0L, controller.engine.audioThreadAllocationCount)
+    }
+
+    @Test
+    fun `预分配未完成时 handleBuffer 背压且不消费 buffer`() {
+        val controller = LoopAudioController()
+        var pending: Runnable? = null
+        controller.preallocDispatcher = { pending = it }
+        val fake = FakeAudioSink()
+        val sink = LoopAudioSink(controller, fake)
+        sink.configure(PcmTestSupport.format(), 4096, null)
+        controller.window = window(100, 200)
+
+        assertTrue(controller.engine.isPreallocationPending())
+        val src = PcmTestSupport.pcm16Buffer(0, 250)
+        assertFalse("预分配未完成应背压", sink.handleBuffer(src, 0L, 1))
+        assertEquals("背压时不得消费 buffer", 0, src.position())
+        assertEquals("背压时不得喂 delegate", 0, fake.feeds.size)
+        assertEquals("音频线程不得分配", 0L, controller.engine.audioThreadAllocationCount)
+
+        pending!!.run()
+        assertFalse("预分配完成后不应 pending", controller.engine.isPreallocationPending())
+        assertTrue(sink.handleBuffer(src, 0L, 1))
+        assertTrue(controller.isReplaying)
+        assertEquals("预分配完成后的首次回调不分配", 0L, controller.engine.audioThreadAllocationCount)
+    }
+
+    @Test
+    fun `window 先于 configure 写入时 configure 后完成预分配`() {
+        val controller = LoopAudioController()
+        controller.preallocDispatcher = { it.run() }
+        controller.window = window(100, 200)
+        assertEquals("format 未知时无法预分配", 0L, controller.engine.ringFrames)
+
+        val fake = FakeAudioSink()
+        val sink = LoopAudioSink(controller, fake)
+        sink.configure(PcmTestSupport.format(), 4096, null)
+
+        assertEquals("configure 后应完成预分配", 100L, controller.engine.ringFrames)
+        assertFalse(controller.engine.isPreallocationPending())
+        assertTrue(sink.handleBuffer(PcmTestSupport.pcm16Buffer(0, 250), 0L, 1))
+        assertEquals(0L, controller.engine.audioThreadAllocationCount)
     }
 
     @Test

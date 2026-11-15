@@ -353,6 +353,84 @@ class LoopPcmEngineTest {
     }
 
     @Test
+    fun `降级回调目标为轮起点减 250ms 且同一事件只回调一次`() {
+        val engine = newEngine()
+        engine.setWindow(window(1000, 2000))
+        val targets = mutableListOf<Long>()
+        engine.onDegrade = { targets.add(it) }
+
+        // 从区间中部进来：只捕获 [1500,2000) 共 500 帧（缺前 500 帧）
+        val partial = engine.onBuffer(1_500_000L, 1000, PcmTestSupport.pcm16Buffer(1500, 1000))
+        engine.onInputDrained(partial)
+
+        assertEquals("降级应回调一次", 1, targets.size)
+        assertEquals("target = A - 250ms", 750_000L, targets[0])
+        assertEquals("降级计数 +1", 1L, engine.degradeCount)
+
+        // 同一事件重复消费不应重复回调
+        engine.onInputDrained(partial)
+        assertEquals("同一降级事件只回调一次", 1, targets.size)
+
+        // flush 重新 arm 后再次失败，应再次回调
+        engine.onFlush()
+        val atB = engine.onBuffer(2_000_000L, 10, PcmTestSupport.pcm16Buffer(2000, 10))
+        engine.onInputDrained(atB)
+        assertEquals("flush 后应可再次触发", 2, targets.size)
+        assertEquals("目标值仍为 A - 250ms", 750_000L, targets[1])
+    }
+
+    @Test
+    fun `预分配 ring 后首次 onBuffer 不在音频线程分配`() {
+        val fmt = LoopPcmEngine.Format(
+            sampleRate = 1000,
+            channelCount = 1,
+            bytesPerFrame = 2,
+            pcmIsFloat = false,
+        )
+        val w = window(100, 200)
+        val engine = LoopPcmEngine()
+        engine.requirePreallocation()
+        engine.configure(fmt)
+        engine.setWindow(w)
+
+        assertTrue("预分配未完成时应为 pending", engine.isPreallocationPending())
+        val plan = LoopPcmEngine.planRing(w, fmt)!!
+        assertEquals("ring 预算 100 帧 * 2B", 200L, plan.byteSize)
+        assertTrue(engine.offerPreallocatedRing(w, fmt, ByteArray(plan.byteSize.toInt())))
+        assertFalse("offer 后不应再 pending", engine.isPreallocationPending())
+        assertEquals("ring 帧数应已就绪", 100L, engine.ringFrames)
+
+        val inputPlan = engine.onBuffer(0L, 250, PcmTestSupport.pcm16Buffer(0, 250))
+        assertEquals("应正常捕获", 100L, engine.capturedFrames)
+        assertTrue("ring 应完整", engine.isRingComplete)
+        assertEquals("音频线程不得再分配 ring", 0L, engine.audioThreadAllocationCount)
+        assertTrue("应进入重放", inputPlan.enterReplayWhenDrained)
+        engine.onInputDrained(inputPlan)
+        assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
+    }
+
+    @Test
+    fun `预分配未完成时引擎保持 pending 且音频线程不分配`() {
+        val fmt = LoopPcmEngine.Format(
+            sampleRate = 1000,
+            channelCount = 1,
+            bytesPerFrame = 2,
+            pcmIsFloat = false,
+        )
+        val engine = LoopPcmEngine()
+        engine.requirePreallocation()
+        engine.configure(fmt)
+        engine.setWindow(window(100, 200))
+
+        assertTrue(engine.isPreallocationPending())
+        assertFalse(engine.isLoopConfigured())
+        val plan = engine.onBuffer(0L, 250, PcmTestSupport.pcm16Buffer(0, 250))
+        assertFalse("pending 时不应进入环回捕获", plan.enterReplayWhenDrained)
+        assertEquals("pending 时音频线程不得分配", 0L, engine.audioThreadAllocationCount)
+        assertEquals("pending 时不应捕获", 0L, engine.capturedFrames)
+    }
+
+    @Test
     fun `release 后同格式 configure 可恢复环回能力`() {
         val fmt = LoopPcmEngine.Format(
             sampleRate = 1000,
