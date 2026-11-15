@@ -6,7 +6,9 @@ import com.zjr.hesimusic.data.preferences.PlaybackPreferences
 import com.zjr.hesimusic.data.repository.LibraryRepository
 import com.zjr.hesimusic.data.repository.PlaylistRepository
 import com.zjr.hesimusic.data.repository.SongRepository
+import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
+import com.zjr.hesimusic.loop.audio.LoopAudioController
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
@@ -26,6 +28,8 @@ interface DebugEntryPoint {
     fun playlistRepository(): PlaylistRepository
     fun playbackPreferences(): PlaybackPreferences
     fun loopAnalysisManager(): LoopAnalysisManager
+    fun loopRuntime(): LoopRuntime
+    fun loopAudioController(): LoopAudioController
     fun songLoopDao(): SongLoopDao
     fun appDatabase(): AppDatabase
 }

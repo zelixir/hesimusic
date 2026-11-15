@@ -25,6 +25,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import java.io.BufferedInputStream
+import java.io.File
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -110,6 +111,10 @@ object LoopDebugServer {
     @Volatile
     private var libraryCache: Map<String, Any?>? = null
 
+    /** 最近一次成功的 /navigate route;初始 "unknown"。/state.screen 与 loop.snapshot.screen 共用。 */
+    @Volatile
+    private var lastRoute: String = "unknown"
+
     // ------------------------------------------------------------ 生命周期
 
     /** 启动监听线程(幂等)。只做 socket 监听,不解析 Hilt 依赖,避免拖慢 app 启动。 */
@@ -135,6 +140,7 @@ object LoopDebugServer {
             try {
                 val entry = EntryPointAccessors.fromApplication(ctx, DebugEntryPoint::class.java)
                 entryPoint = entry
+                installLoopBridge(entry)
                 Log.i(TAG, "Hilt entry point resolved")
                 return entry
             } catch (t: Throwable) {
@@ -145,6 +151,51 @@ object LoopDebugServer {
         }
         Log.e(TAG, "Hilt entry point unavailable", last)
         throw HttpError(503, "debug server initializing")
+    }
+
+    /**
+     * 安装播放层只读桥(debug 源集内完成,main 不反向引用 debug):
+     * - engine:controller.window 命中当前歌 → "loop",否则 "exo";
+     * - window: controller.window 优先,缺失时回退 LoopRuntime.window(唯一窗口来源);
+     * - positionUs/seam/degrade/ring 直接读 LoopAudioController 的 volatile 计数。
+     */
+    private fun installLoopBridge(d: DebugEntryPoint) {
+        if (DebugHooks.loopBridge != null) return
+        DebugHooks.loopBridge = object : LoopDebugBridge {
+            override fun snapshot(): Map<String, Any?> {
+                val runtime = d.loopRuntime()
+                val controller = d.loopAudioController()
+                val audioWindow = controller.window
+                val window = audioWindow ?: runtime.window.value
+                val currentSongId = player?.cachedSongId()
+                // 冷启动时 Player.Listener 缓存可能还没拿到当前歌:此时 window 本身已由
+                // LoopPlaybackCoordinator 按当前歌算出,视为命中;缓存有值时严格比对。
+                val engine = if (audioWindow != null &&
+                    (currentSongId == null || currentSongId == audioWindow.songId)
+                ) {
+                    "loop"
+                } else {
+                    "exo"
+                }
+                return linkedMapOf(
+                    "engine" to engine,
+                    "window" to window?.let {
+                        linkedMapOf(
+                            "songId" to it.songId,
+                            "loopStartUs" to it.loopStartUs,
+                            "loopEndUs" to it.loopEndUs,
+                        )
+                    },
+                    "positionUs" to controller.positionUs,
+                    "isReplaying" to controller.isReplaying,
+                    "seamCount" to controller.seamCount,
+                    "degradeCount" to controller.degradeCount,
+                    "isRingComplete" to controller.isRingComplete,
+                    "screen" to lastRoute,
+                )
+            }
+        }
+        Log.i(TAG, "loop bridge installed")
     }
 
     private fun acceptLoop() {
@@ -277,6 +328,8 @@ object LoopDebugServer {
             method == "POST" && segments.size == 2 && segments[0] == "player" ->
                 handlePlayerCommand(segments[1], body)
             method == "POST" && segments == listOf("navigate") -> handleNavigate(body)
+            method == "POST" && segments == listOf("debug", "tap") -> handleDebugTap(body)
+            method == "POST" && segments == listOf("debug", "reconnect") -> handleDebugReconnect()
             else -> throw HttpError(404, "unknown endpoint: $method ${request.path}")
         }
     }
@@ -298,7 +351,7 @@ object LoopDebugServer {
             linkedMapOf("error" to (t.message ?: t.javaClass.simpleName))
         }
         return linkedMapOf(
-            "screen" to "unknown",
+            "screen" to lastRoute,
             "analysis" to analysisSummary(d),
             "playback" to playbackMapForState(),
             "loop" to loop,
@@ -309,6 +362,8 @@ object LoopDebugServer {
                 "port" to PORT,
                 "startedAtEpochMs" to startedAtEpochMs,
                 "uptimeMs" to (System.currentTimeMillis() - startedAtEpochMs),
+                // E2E 判断冷启动抢跑:controller 建立时刻到现在;未连接为 null。
+                "controllerAgeMs" to (player?.controllerAgeMs() ?: null),
             ),
         )
     }
@@ -386,7 +441,7 @@ object LoopDebugServer {
         "currentIndex" to null,
         "queue" to emptyList<Any?>(),
         "engine" to "exo",
-        "connecting" to (p?.isConnecting() ?: true),
+        "connecting" to (p?.isStartingUp() ?: true),
         "stale" to true,
     )
 
@@ -431,6 +486,26 @@ object LoopDebugServer {
 
     // ------------------------------------------------------------ 分析写操作
 
+    /**
+     * 开始分析前暂停当前播放。player 未连接/冷启动 restore 中直接跳过,
+     * 不让分析因为播放器状态而失败(返回 false)。
+     */
+    private fun pausePlaybackForAnalysis(): Boolean {
+        val p = player ?: return false
+        if (p.isStartingUp()) {
+            Log.d(TAG, "analyze pause skipped: player starting up")
+            return false
+        }
+        return try {
+            p.command { controller -> controller.pause() }
+            Log.d(TAG, "analyze pause ok")
+            true
+        } catch (t: Throwable) {
+            Log.w(TAG, "analyze pause skipped: ${t.message}")
+            false
+        }
+    }
+
     private suspend fun handleAnalyze(body: JSONObject?): Map<String, Any?> {
         val d = deps()
         val songId = body.requireLong("songId")
@@ -443,6 +518,9 @@ object LoopDebugServer {
         try {
             val song = d.songRepository().getSongsByIds(listOf(songId)).firstOrNull()
                 ?: throw HttpError(404, "song not found: $songId")
+            // 产品口径:开始分析即暂停正在播的歌(UI 进页时已 pause,协议路径补齐)。
+            // player 未就绪/冷启动无效时跳过 pause,绝不让分析因此失败。
+            val paused = pausePlaybackForAnalysis()
             analyzingSongId = songId
             analyzeJob = analysisScope.launch {
                 try {
@@ -462,7 +540,7 @@ object LoopDebugServer {
                 }
             }
             launched = true
-            return linkedMapOf("started" to true, "songId" to songId)
+            return linkedMapOf("started" to true, "songId" to songId, "paused" to paused)
         } finally {
             if (!launched && analysisGeneration.get() == generation) {
                 analysisGuard.set(false)
@@ -526,7 +604,7 @@ object LoopDebugServer {
             manager.confirmAndSave(songId, candidate, sampleRate, song.duration)
         }
         libraryCache = null
-        val autoPlay = tryAutoPlay(song)
+        val autoPlay = tryAutoPlay(d, song)
         val stored = d.songLoopDao().getBySongId(songId)
         return linkedMapOf(
             "saved" to true,
@@ -541,15 +619,28 @@ object LoopDebugServer {
         )
     }
 
-    private fun tryAutoPlay(song: Song): Boolean {
+    /**
+     * confirm 的 "先播放该歌 + REPEAT_ONE" 最佳努力实现。
+     *
+     * 关键:必须与 UI 的 MusicViewModel.playList 等价 —— 用**完整上下文列表**
+     * setMediaItems(items, index, 0) 定位,而不是 setMediaItem(单项),否则会把
+     * 播放队列压成一首,E2E 的队列/恢复用例全部失真。
+     */
+    private suspend fun tryAutoPlay(d: DebugEntryPoint, song: Song): Boolean {
         val p = player ?: return false
         if (p.controllerOrNull() == null) return false
-        val prefs = runCatching { deps().playbackPreferences() }.getOrNull()
+        val songs = runCatching { d.libraryRepository().getAllSongs().first() }.getOrNull()
+            ?: return false
+        val index = songs.indexOfFirst { it.id == song.id }
+        if (index < 0) return false
+        val mediaItems = songs.map { it.toMediaItem() }
+        if (mediaItems.isEmpty()) return false
+        val prefs = runCatching { d.playbackPreferences() }.getOrNull()
         return try {
             p.command { controller ->
                 controller.repeatMode = Player.REPEAT_MODE_ONE
                 prefs?.saveRepeatMode(Player.REPEAT_MODE_ONE)
-                controller.setMediaItem(song.toMediaItem())
+                controller.setMediaItems(mediaItems, index, 0L)
                 controller.prepare()
                 controller.play()
             }
@@ -837,8 +928,13 @@ object LoopDebugServer {
                 linkedMapOf("positionMs" to applied, "requestedMs" to requested)
             }
             "repeat" -> {
-                val modeText = body?.let { it.optString("mode", it.optString("repeatMode", "")) }.orEmpty()
-                    .trim().lowercase()
+                val modeText = body?.let { obj ->
+                    when {
+                        obj.has("mode") && !obj.isNull("mode") -> obj.optString("mode", "")
+                        obj.has("repeatMode") && !obj.isNull("repeatMode") -> obj.optString("repeatMode", "")
+                        else -> ""
+                    }
+                }.orEmpty().trim().lowercase()
                 val mode = when (modeText) {
                     "off", "0" -> Player.REPEAT_MODE_OFF
                     "one", "1" -> Player.REPEAT_MODE_ONE
@@ -912,15 +1008,70 @@ object LoopDebugServer {
     }
 
     private fun handleNavigate(body: JSONObject?): Map<String, Any?> {
-        val route = body?.optString("route", "")?.trim().orEmpty()
+        val route = if (body == null || !body.has("route") || body.isNull("route")) {
+            ""
+        } else {
+            body.optString("route", "").trim()
+        }
         if (route.isEmpty()) throw HttpError(400, "route required")
         val hook = resolveNavigateHook()
             ?: throw HttpError(501, "navigate 未接线(main 侧 UiNavigationHooks.navigate == null)")
+        // 先记 lastRoute:POST 返回后立刻 GET /state 就能断言页面;导航失败只记日志(主线程 runCatching)。
+        lastRoute = route
         mainHandler.post {
             runCatching { hook.invoke(route) }
                 .onFailure { Log.e(TAG, "navigate hook failed", it) }
         }
         return linkedMapOf("navigated" to true, "route" to route)
+    }
+
+    /** POST /debug/reconnect —— 显式丢弃当前 controller 并重建(最多等 2s)。 */
+    private fun handleDebugReconnect(): Map<String, Any?> {
+        val p = player ?: throw PlayerUnavailable()
+        val reconnected = p.forceReconnectAndAwait(2_000L)
+        Log.i(TAG, "explicit reconnect -> $reconnected")
+        return linkedMapOf(
+            "reconnected" to reconnected,
+            "controllerAgeMs" to p.controllerAgeMs(),
+            "connecting" to p.isStartingUp(),
+        )
+    }
+
+    /**
+     * POST /debug/tap {path?: String} —— L3 PCM 取证开关。
+     * path 非空 → LoopAudioController.setPcmTap(File(path));空/缺省 → 关闭。
+     * 相对路径按 filesDir 解析;返回 tapping/path,便于 PC 用 run-as 拉文件。
+     */
+    private suspend fun handleDebugTap(body: JSONObject?): Map<String, Any?> {
+        val d = deps()
+        // JSON null 时 optString 会返回字面量 "null",必须显式判 isNull。
+        val rawPath = if (body == null || !body.has("path") || body.isNull("path")) {
+            ""
+        } else {
+            body.optString("path", "").trim()
+        }
+        val file = if (rawPath.isEmpty()) {
+            null
+        } else {
+            val candidate = File(rawPath)
+            val resolved = if (candidate.isAbsolute) {
+                candidate
+            } else {
+                File(appContext?.filesDir ?: throw HttpError(503, "debug server initializing"), rawPath)
+            }
+            resolved.parentFile?.mkdirs()
+            resolved
+        }
+        try {
+            d.loopAudioController().setPcmTap(file)
+        } catch (t: Throwable) {
+            Log.e(TAG, "pcm tap setup failed", t)
+            throw HttpError(500, "tap failed: ${t.message}")
+        }
+        return linkedMapOf(
+            "tapping" to (file != null),
+            "path" to file?.absolutePath,
+        )
     }
 
     /**
