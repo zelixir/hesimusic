@@ -39,7 +39,7 @@
 | # | 用例 | 判据 |
 |---|---|---|
 | C1 | 已确认歌 + 单曲循环 = 无缝 | 3s 后 /state: window!=null 且 seamCount 增长或 isReplaying=true |
-| C2 | 环回正确 | 200ms 采样 60 次跨 B:displayPos 全程 ∈ [A-1s, B+0.5s];跨越后回落到 [A,A+3s];playing 恒 true |
+| C2 | 环回正确 | 200ms 采样 60 次跨 B:displayPos 全程 ∈ [A-1s, B+0.5s];跨越后回落到 [A,A+3s];playing 恒 true。**displayPos 取折返后的展示口径**(协议端再折返一次是幂等的);MediaSession 内部约 1s 的 PlaybackState 外推不算缺陷 |
 | C3 | 未确认歌不无缝 | window=null、无 A/B 标记 |
 | C4 | 切歌取消 | window=null;repeat 未被引擎改写(前后一致);新歌正常播放 |
 | C5 | repeat 改 ALL/OFF | <=1s window=null;整曲播放 |
