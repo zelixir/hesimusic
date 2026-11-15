@@ -1,5 +1,17 @@
 # 服务层接线契约(P1-c):窗口 → 播放形态 → 位置投影
 
+> **【定稿更新 2026-11-15 · 重要】** 本文档 §2/§3/§4 里描述的「给当前项套 `ClippingMediaSource(0,B)`」**已废弃**,实现改为**完全不裁剪**。
+> 原因与收益(真机实证):
+> 1. `ClippingMediaSource`/`ClippingConfiguration` 会让 sink 侧媒体时间整体偏移 `1e12`(ExoPlayer 先 `setOutputStreamOffsetUs(1e12)` 再 `configure`),导致音频层按 PTS 捕获 [A,B) 永远不命中;
+> 2. 不裁剪同样能环回(音频层在 B 处切到 PCM 重放,越 B 的输入丢弃),因此:
+>    - **进入/退出无缝不需要任何媒体操作**(只写 `LoopAudioController.window` 一个 volatile 值);
+>    - `player.duration` 天然等于整曲时长(不需要 clip 补偿);
+>    - `replaceMediaItem` + `NonUpdatableMediaSource` 那套强制重建机制**已全部删除**。
+> 3. 现实现组件:`service/LoopShapePlan.kt`(纯函数形态决策:NOOP/ENTER/PRE_ROLL/EXIT/EXIT_SEEK)、`LoopSessionPlayer.kt`(投影)、`LoopPlaybackCoordinator.kt`、`LoopSessionProjection.kt`。
+> 4. 投影的窗口来源:`runtime.window` 优先;**重放期 `runtime.window` 不可用(异步未落值/属于别的歌)时回退 `audio.window`**(否则 display 会跟着原始位置冲出 B,实测 +1.4s~2.7s)。
+>
+> 下文 §2~§5 保留作设计过程记录,凡与上述冲突处以本节为准。
+
 > 依赖:①`loop/audio/LoopAudioController`(音频层)②`LoopRuntime`(已交付)③`song_loop` 数据层(已交付)。
 > 前置事实(P0 实测):引擎侧 sink 位置持续前进,但 **ExoPlayer 对外的 `currentPosition`/`duration` 被 clip 钳住**,
 > 所以位置/时长必须由会话层投影 —— 这是本层的核心职责。
