@@ -269,3 +269,49 @@
 - Media3 1.8.0 本地 AAR 内已确认存在:`DefaultRenderersFactory.buildAudioSink`、`ForwardingAudioSink`(含 `handleBuffer/handleDiscontinuity/playToEndOfStream/isEnded/getCurrentPositionUs`)、`LoopingMediaSource`(含 `loopCount`)、`ConcatenatingMediaSource2`、`SimpleBasePlayer`。
 - 现有单测 16 个文件,无 instrumented 测试;现有工具 `tools/hesimusic-adb.ps1`、debug 源集 `AdbDatabaseReceiver`。
 - 数据库:基线 v7;备份的 v8(建 `song_loop` 表)+ v9(加 `confirmed`)迁移可直接沿用。
+
+---
+
+## 11. P0 实测结论(2026-11-15,真机 OnePlus 8T / Android 14 / 44.1k)
+
+> 取证方式:`:spike` 模块把真正喂给 AudioTrack 的 PCM 落 WAV + sink 每次调用落 JSONL,
+> 再由 `tools/spike-analyze.ts` 按 §6.2 判据离线判定。证据目录 `spike/out/`。
+
+### 11.1 对 §1 R1 的修正(实测推翻了推断,方向性结论不变)
+
+**实测**:REPEAT_ONE 与窗口推进**都不调用 AudioSink.flush()、也不产生 EOS**。真实机理是:
+
+```
+项/窗口边界 → renderer 重新 configure(同格式,AudioTrack 未重建)
+           → output_stream_offset(offsetUs += L)
+           → handleDiscontinuity(lastPtsUs ≠ posUs)
+           → AudioSink 按时间戳 offset 差**补静音**
+```
+
+- baseline(两项 clip + REPEAT_ONE,MP3 L=10s):每个接缝 **1224 帧全零(27.8ms)**,每轮还多 **216 帧(4.9ms)**;
+  接缝后新轮首样本 pts = offset + A + 15.5ms;`position_discontinuity(auto_transition)` 在 ~390ms 后才到。
+- window(LoopingMediaSource + Clipping,loops=100):**与 baseline 逐事件同形**(MP3 同样 1224 零帧/216 帧);
+  FLAC 无零段但每轮 **+1368 帧(31ms)**。
+
+**结论**:间隙的根因不是 "seek → flush",而是**period/窗口边界必然触发的流重配置 + 时间戳 offset 跳变后被 sink 补静音**。
+因此 §0 的结论不变,反而更强:**任何"在时间线/窗口层面切边界"的方案在物理上不可能真无缝**,环回必须发生在样本流或 PCM 输出层内部。
+
+### 11.2 M3(AudioSink 层 PCM 重放)的实测结论
+
+- EOS 之后 renderer **0 次** `handleBuffer`(只 ~100Hz 轮询 `playToEndOfStream`/`isEnded`),player 保持 READY 不 ENDED;
+- 但 sink **自行续喂可行**:EOS 后不 flush、独立线程持续写同一 AudioTrack → 连续输出 13s,**underrun 全程 0**,
+  轮间 seam 帧距 **441000 帧(0 误差)**,逐轮 PCM 逐位相同;
+- 代价(必须由服务层消化):EOS 处 AudioTrack stop→play(playhead 归零、player 位置冻结 → 位置时钟归我们)、
+  EOS→首段 replay 墙钟 ~30ms(56KB 缓冲兜住)、首接缝含 529 帧源端 padding、renderer 100Hz 空转。
+
+### 11.3 选型
+
+| 机制 | 判定 | 结论 |
+|---|---|---|
+| baseline(两项 clip + REPEAT_ONE) | A1/A2/A4/B 全 FAIL | ❌ 淘汰(即上一版方案) |
+| window(LoopingMediaSource / 窗口推进) | A2 对 MP3/FLAC 均 FAIL | ❌ 淘汰(自带 gapless 路径对 clip 源不成立) |
+| **M1(单 period 无限样本流)** | 待验(spike 中实现) | ✅ **主线** |
+| M3(AudioSink 层 PCM 重放) | A2 PASS、underrun 0、逐位相同 | ✅ **兜底**(M1 不达标时启用) |
+
+> M1 之所以是主线:环回发生在样本流内部,不产生任何 period/窗口/EOS 边界,因此不会触发重配置与补静音;
+> 且位置单调增长、seek 原生可用,服务层只需一层折返映射(§5.2),不与播放器状态机争夺所有权。
