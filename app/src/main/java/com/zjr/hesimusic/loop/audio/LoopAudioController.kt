@@ -154,7 +154,20 @@ class LoopAudioController @Inject constructor() {
         get() = (window?.lengthUs ?: 0L) > 30_000_000L
 
     val seamActiveForWindow: Boolean
-        get() = seamBufferMode == SeamBufferMode.ON && seamWindowEligible
+        get() = seamBufferMode == SeamBufferMode.ON && seamWindowEligible &&
+            seamDecodeRange != null && seamSeekRequested != null
+
+    /** 服务层注入：按环内帧范围精确解码 PCM16（X/Y/defer）。失败返回 null。 */
+    @Volatile
+    var seamDecodeRange: ((startFrame: Long, endFrame: Long) -> ByteArray?)? = null
+
+    /** 服务层注入：请求 seek 到展示位置（A+Δ）；允许跨 B 的刻意向后 seek。 */
+    @Volatile
+    var seamSeekRequested: ((displayUs: Long) -> Unit)? = null
+
+    /** 当前输出采样率（seam provider 帧→µs 换算）。 */
+    val outputSampleRate: Int
+        get() = currentFormat?.sampleRate ?: 0
 
     /** 当前 ring 是否由解码预填（[seedRing]）安装而非播放捕获。 */
     val isRingPrefilled: Boolean

@@ -102,7 +102,7 @@ SwitchMode(SEAM)/SwitchMode(FULL),所以矩阵事件夹具为 28 个。
 |---|---|---|
 | Enter(hasSavedResult) | Loading | 无行 -> Analyzing(DECODING,0) + RestartAnalysis;有行 -> 保持 Loading 等 VM 加载后派发 AnalysisDone |
 | AnalysisProgress(phase, progress) | Loading, Analyzing | -> Analyzing(phase, clamp(progress)) |
-| AnalysisDone(...) | Loading, Analyzing | -> Ready;有候选时 A/B 取 top1 并 StartPrefill |
+| AnalysisDone(...) | Loading, Analyzing | -> Ready;A/B 取**选中候选**(selectedCandidate,默认 0 = top1)并 StartPrefill;选中断下标夹到 `0..size-1`(00016) |
 | AnalysisFailed(message) | Loading, Analyzing | -> Failed(message) |
 | Retry | Failed | -> Analyzing(DECODING,0) + RestartAnalysis |
 | ManualReanalyze | Loading / Ready / Failed | -> Analyzing(DECODING,0) + RestartAnalysis;Analyzing 时 no-op(第二轮新增) |
@@ -604,3 +604,41 @@ seedRingRange 在音频 sink 未 configure 时恒返回 PENDING;而 sink 只有�
   - PrefillReady/PrefillPartialReady -> Play。
 
 结果:ui.loop 361 个测试全绿;全量 955 个测试,0 failed / 0 errors。
+
+## 14. 结果页重进恢复:候选列表落库(00016)
+
+### 14.1 数据层
+
+- `song_loop.candidatesJson TEXT`(可空、**无 SQL 默认值**),Database **v9 -> v10**,
+  `MIGRATION_9_10` 只有一条 `ALTER TABLE song_loop ADD COLUMN candidatesJson TEXT`(纯增量;
+  存量行该列 = NULL → 退回单候选,老数据行为不变);
+- 编码:手写 JSON(无新依赖),`loop.analysis.LoopCandidatesJson`,字段
+  startSamples/endSamples/score/noteDistance/loudnessDifference,顺序 = 引擎 score 降序;
+- 写入:分析完成落库时 top1 窗口 + 完整候选 JSON **同一次 upsert**;确认保存时若结果页有内存候选列表
+  则一并刷新,无内存列表(legacy / debug 路径)则**回读并保留**已有 JSON,绝不清空;
+- 删除随行删除;取消确认(`row.copy(confirmed=false)`)天然保留。
+
+### 14.2 恢复优先级(硬约束)
+
+**用户保存的窗口永远优先于候选排序。** `LoopCandidateRestore.fromRow` 的决策序:
+
+1. `candidatesJson` 为 null / 损坏 / 空数组 → 单候选 = 行内窗口,A/B = 行内窗口(改造前行为);
+2. 行内窗口(`loopStartSamples/loopEndSamples`)**命中**某候选 → 用落库列表,
+   `selectedCandidate` = 命中下标,列表不插入;
+3. 行内窗口**不命中**(用户拖过 A/B)→ 把行内窗口作为**第 0 个合成候选插入**(候选数 +1),
+   `selectedCandidate` = 0,A/B = 保存窗口;合成候选的 score/noteDistance/loudnessDifference
+   取行内已有值(即该窗口自己的分数),不造 0。
+
+不允许"把 A/B 改回候选 0",那等于吞掉用户的手动调整。
+
+### 14.3 单测
+
+- `LoopCandidatesJsonTest`:JSON 往返 / 10 候选顺序 / 损坏兜底 / 精度;
+- `LoopCandidateRestoreTest`:命中不插入、不命中插入合成候选(11 且 A/B=保存窗口)、legacy null、
+  空数组、二次恢复不重复插入;
+- `AppDatabaseMigration9To10Test`:proxy 真实执行 `migrate()`,断言唯一 ADD COLUMN、无破坏性语句、
+  与 Room 生成建表 SQL 逐字一致;
+- `SongLoopCandidatesPersistenceTest`:写 10 读回 10 且顺序一致、demote 不丢、Room 生成的
+  INSERT/UPDATE/SELECT 列清单都含新列;
+- `LoopPageAnalysisDoneSelectedTest`:选中项驱动 A/B、越界夹取、拖过 A/B 重进后 A/B 不变;
+- 仓库外 sqlite-jdbc 脚本实测:v9 建库 → 迁移 → 旧行可读 → schema 与 v10 建表完全一致(全 PASS)。

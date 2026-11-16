@@ -98,6 +98,88 @@ class LoopPageAnalysisDoneSelectedTest {
     }
 
     @Test
+    fun `拖过AB再确认_重进后A_B仍是保存窗口且候选数11`() {
+        val savedStart = 12_345L
+        val savedEnd = 678_900L
+        val restored = LoopCandidateRestore.fromRow(
+            songLoopRow(
+                startSamples = savedStart,
+                endSamples = savedEnd,
+                score = 0.77,
+                noteDistance = 0.05,
+                loudnessDifference = 0.06,
+                candidatesJson = com.zjr.hesimusic.loop.analysis.LoopCandidatesJson.encode(candidates()),
+            ),
+        )
+        val (state, _) = LoopPageReducer.reduce(
+            LoopPageState.Loading,
+            LoopPageEvent.AnalysisDone(
+                songId = 1L,
+                candidates = restored.candidates,
+                sampleRate = sampleRate,
+                durationMs = 600_000L,
+                confirmed = true,
+                selectedCandidate = restored.selectedIndex,
+            ),
+        )
+
+        val ready = state as LoopPageState.Ready
+        assertEquals("候选数 = 10 + 合成候选", 11, ready.candidates.size)
+        assertEquals(0, ready.selectedCandidate)
+        assertEquals("A 必须仍是用户拖到的位置", expectMs(savedStart), ready.aMs)
+        assertEquals("B 必须仍是用户拖到的位置", expectMs(savedEnd), ready.bMs)
+    }
+
+    @Test
+    fun `老数据重进_A_B等于行内窗口`() {
+        val restored = LoopCandidateRestore.fromRow(
+            songLoopRow(
+                startSamples = 88_200L,
+                endSamples = 441_000L,
+                candidatesJson = null,
+            ),
+        )
+        assertEquals(1, restored.candidates.size)
+
+        val (state, _) = LoopPageReducer.reduce(
+            LoopPageState.Loading,
+            LoopPageEvent.AnalysisDone(
+                songId = 1L,
+                candidates = restored.candidates,
+                sampleRate = sampleRate,
+                durationMs = 600_000L,
+                confirmed = true,
+                selectedCandidate = restored.selectedIndex,
+            ),
+        )
+        val ready = state as LoopPageState.Ready
+        assertEquals(expectMs(88_200L), ready.aMs)
+        assertEquals(expectMs(441_000L), ready.bMs)
+    }
+
+    private fun songLoopRow(
+        startSamples: Long,
+        endSamples: Long,
+        score: Double = 0.9,
+        noteDistance: Double = 0.12,
+        loudnessDifference: Double = 0.34,
+        candidatesJson: String?,
+    ) = com.zjr.hesimusic.data.model.SongLoop(
+        songId = 1L,
+        loopStartSamples = startSamples,
+        loopEndSamples = endSamples,
+        sampleRate = sampleRate,
+        loopStartMs = expectMs(startSamples),
+        loopEndMs = expectMs(endSamples),
+        score = score,
+        noteDistance = noteDistance,
+        loudnessDifference = loudnessDifference,
+        createdAt = 1_700_000_000_000L,
+        confirmed = true,
+        candidatesJson = candidatesJson,
+    )
+
+    @Test
     fun `空候选保持旧语义_不越界不预填`() {
         val (state, effects) = LoopPageReducer.reduce(
             LoopPageState.Analyzing(com.zjr.hesimusic.ui.loop.state.AnalysisPhase.DECODING, 0.5f),

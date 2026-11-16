@@ -13,6 +13,7 @@ import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.analysis.PcmDecoder
 import com.zjr.hesimusic.loop.audio.LoopAudioController
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -110,9 +111,81 @@ class LoopPlaybackCoordinator @Inject constructor(
         resolvePath = { songId -> songRepository.getSongsByIds(listOf(songId)).firstOrNull()?.filePath },
     )
 
+    private data class SeamDecodeKey(
+        val songId: Long,
+        val startFrame: Long,
+        val endFrame: Long,
+    )
+    private val seamCache = HashMap<SeamDecodeKey, ByteArray>()
+    private val seamInFlight = HashSet<SeamDecodeKey>()
+
     init {
         installDegradeHandler()
+        installSeamProviders()
         observeLoopIntent()
+    }
+
+    /**
+     * 00017 接缝缓冲 provider（仅注入，不改播放决策）：
+     * - decodeRange：同步返回缓存；未命中时后台按帧范围精确解码，下一帧重试；
+     * - seekRequested：展示位置 A+Δ → 当前轮 raw（刻意跨 B 回跳，绕过降级 backward 拦截）。
+     */
+    private fun installSeamProviders() {
+        audio.seamDecodeRange = { startFrame, endFrame ->
+            val w = audio.window
+            val sr = audio.outputSampleRate
+            if (w == null || sr <= 0 || endFrame <= startFrame) {
+                null
+            } else {
+                val key = SeamDecodeKey(w.songId, startFrame, endFrame)
+                val cached = synchronized(seamCache) { seamCache[key] }
+                if (cached != null) {
+                    cached
+                } else {
+                    val first = synchronized(seamCache) {
+                        if (seamCache.size > 8) seamCache.clear()
+                        seamInFlight.add(key)
+                    }
+                    if (first) {
+                        scope.launch(Dispatchers.Default) {
+                            try {
+                                val path = songRepository
+                                    .getSongsByIds(listOf(w.songId))
+                                    .firstOrNull()?.filePath
+                                if (path != null) {
+                                    val startUs = startFrame * 1_000_000L / sr
+                                    val endUs = endFrame * 1_000_000L / sr
+                                    val seg = pcmDecoder.decodePcm16Range(path, startUs, endUs)
+                                    synchronized(seamCache) { seamCache[key] = seg.data }
+                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                Log.w(TAG_PERF, "seam decode failed " + key, e)
+                            } finally {
+                                synchronized(seamCache) { seamInFlight.remove(key) }
+                            }
+                        }
+                    }
+                    null
+                }
+            }
+        }
+        audio.seamSeekRequested = { displayUs ->
+            scope.launch {
+                val player = playerRef ?: return@launch
+                val w = audio.window ?: return@launch
+                val raw = LoopSessionProjection.seekUs(
+                    displayUs,
+                    w,
+                    player.currentPosition * LoopSessionProjection.US_PER_MS,
+                    audio.isRingComplete,
+                )
+                // 独立于 degrade 通道：这里允许刻意的跨 B 回跳。
+                player.seekTo(raw / LoopSessionProjection.US_PER_MS)
+                Log.d(TAG_PERF, "seam seek displayUs=" + displayUs + " rawUs=" + raw)
+            }
+        }
     }
 
     // ------------------------------------------------------------------ 事件入口
