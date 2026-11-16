@@ -482,12 +482,9 @@ object LoopPageReducer {
         // 拖拽中的模式点击非法:先松手再切模式,避免丢拖拽状态。
         if (state.drag != DragState.Idle) return noEffects(state)
 
-        // 00008:同一模式重复点击是幂等操作 —— 已经在该模式播放/等待预填时,
-        // 不再产生 SeekTo/Play。否则 B−5s 会被再次映射到当前轮次,落点漂到区段中间。
-        val active = state.playback is PlaybackState.Playing ||
-            state.playback is PlaybackState.AwaitingPrefill
-        if (mode == state.mode && active) return noEffects(state)
-
+        // 00008(用户口径):重复点击「接缝检查」必须每次都回到 B−5s 重新起播。
+        // 同模式也统一产出 SeekTo + Play;由 effect runner 保证同批 SeekTo 后
+        // Play 不再二次 raw seek(只 seekToDisplayMs 一次并继续播放,不 release)。
         val startMs = modeStartMs(mode, state.aMs, state.bMs)
         val next = state.copy(
             mode = mode,
@@ -644,7 +641,8 @@ object LoopPageReducer {
     private fun modeStartMs(mode: LoopPageMode, aMs: Long, bMs: Long): Long = when (mode) {
         LoopPageMode.FULL -> 0L
         LoopPageMode.LOOP_ONLY -> (aMs - LOOP_PREROLL_MS).coerceAtLeast(0L)
-        LoopPageMode.SEAM -> (bMs - SEAM_LEAD_MS).coerceAtLeast(0L)
+        // 极短循环段 B−5s < A 时取 A,保证落点仍在循环区内。
+        LoopPageMode.SEAM -> maxOf(aMs, bMs - SEAM_LEAD_MS)
         LoopPageMode.FREE -> 0L
     }
 

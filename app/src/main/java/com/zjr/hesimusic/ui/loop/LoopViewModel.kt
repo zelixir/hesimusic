@@ -674,7 +674,8 @@ class LoopViewModel @Inject constructor(
     private fun modeStartMs(mode: LoopPageMode, aMs: Long, bMs: Long): Long = when (mode) {
         LoopPageMode.FULL -> 0L
         LoopPageMode.LOOP_ONLY -> (aMs - PreviewPlayer.LOOP_PREROLL_MS).coerceAtLeast(0L)
-        LoopPageMode.SEAM -> (bMs - PreviewPlayer.SEAM_LEAD_MS).coerceAtLeast(0L)
+        // 极短循环段 B−5s < A 时取 A,与 reducer/PreviewPlayer 保持一致。
+        LoopPageMode.SEAM -> maxOf(aMs, bMs - PreviewPlayer.SEAM_LEAD_MS)
         LoopPageMode.FREE -> 0L
     }
 
@@ -730,7 +731,9 @@ class LoopViewModel @Inject constructor(
     fun seekToSeam() {
         val ready = _pageState.value as? LoopPageState.Ready ?: return
         dispatch(
-            LoopPageEvent.Seek((ready.bMs - PreviewPlayer.SEAM_LEAD_MS).coerceAtLeast(0L)),
+            LoopPageEvent.Seek(
+                maxOf(ready.aMs, ready.bMs - PreviewPlayer.SEAM_LEAD_MS),
+            ),
         )
     }
 

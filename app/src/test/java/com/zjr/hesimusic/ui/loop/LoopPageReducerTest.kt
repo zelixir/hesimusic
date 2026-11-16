@@ -133,36 +133,79 @@ class LoopPageReducerRegressionTest {
     // ------------------------------------------------------------------ 00008
 
     @Test
-    fun issue00008_repeatedSeamSwitchSeeksOnlyOnceToBMinusFiveSeconds() {
+    fun issue00008_repeatedSeamSwitchAlwaysReturnsToBMinusFiveSeconds() {
         val (afterFirst, firstEffects) = LoopPageReducer.reduce(
             base,
             LoopPageEvent.SwitchMode(LoopPageMode.SEAM),
         )
-        assertEquals("首次切接缝检查只 seek 到 B−5s", listOf(55_000L), seekTargets(firstEffects))
         assertEquals(
-            "首次切接缝检查必须起播 SEAM@B−5s",
-            listOf(LoopPageEffect.Play(LoopPageMode.SEAM, 55_000L)),
-            playEffects(firstEffects),
+            "首次切接缝检查:一次 SeekTo(B−5s) + Play(SEAM,B−5s)",
+            listOf(
+                LoopPageEffect.SeekTo(55_000L),
+                LoopPageEffect.Play(LoopPageMode.SEAM, 55_000L),
+            ),
+            firstEffects,
         )
         assertTrue("不得 seek 到区段中间(45s)", 45_000L !in seekTargets(firstEffects))
 
+        // 用户口径:重复点击必须每次回到 B−5s 重新起播,不是 no-op。
         val (afterSecond, secondEffects) = LoopPageReducer.reduce(
             afterFirst,
             LoopPageEvent.SwitchMode(LoopPageMode.SEAM),
         )
-        assertSame("重复点击接缝检查必须恒等（不得重置播放/位置）", afterFirst, afterSecond)
-        assertEquals("重复点击接缝检查不得产生任何 effect（尤其不得再 seek）", emptyList<LoopPageEffect>(), secondEffects)
-        assertTrue("重复点击不得 seek 到区段中间(45s)", 45_000L !in seekTargets(secondEffects))
+        assertEquals(
+            "第二次点接缝检查也必须 SeekTo(B−5s) + Play(SEAM,B−5s)",
+            listOf(
+                LoopPageEffect.SeekTo(55_000L),
+                LoopPageEffect.Play(LoopPageMode.SEAM, 55_000L),
+            ),
+            secondEffects,
+        )
+        assertTrue("第二次不得 seek 到区段中间(45s)", 45_000L !in seekTargets(secondEffects))
+        val secondReady = afterSecond as LoopPageState.Ready
+        assertEquals("第二次点击后位置回到 B−5s", 55_000L, secondReady.positionMs)
+        assertEquals(PlaybackState.Playing, secondReady.playback)
 
-        // 播放位置 tick 之后再次点「接缝检查」：仍不得重新 seek。
+        // 播放位置 tick 之后再次点「接缝检查」:仍然回到 B−5s。
         val (afterTick, tickEffects) = LoopPageReducer.reduce(afterSecond, LoopPageEvent.Tick(56_000L))
         assertEquals(emptyList<LoopPageEffect>(), tickEffects)
+        assertEquals(56_000L, (afterTick as LoopPageState.Ready).positionMs)
         val (afterThird, thirdEffects) = LoopPageReducer.reduce(
             afterTick,
             LoopPageEvent.SwitchMode(LoopPageMode.SEAM),
         )
-        assertSame(afterTick, afterThird)
-        assertEquals(emptyList<LoopPageEffect>(), thirdEffects)
+        assertEquals(
+            "第三次点接缝检查仍回到 B−5s",
+            listOf(
+                LoopPageEffect.SeekTo(55_000L),
+                LoopPageEffect.Play(LoopPageMode.SEAM, 55_000L),
+            ),
+            thirdEffects,
+        )
+        assertEquals(55_000L, (afterThird as LoopPageState.Ready).positionMs)
+    }
+
+    @Test
+    fun seamStartClampsToAWhenLoopShorterThanFiveSeconds() {
+        val shortLoop = LoopPageMatrix.ready(
+            aMs = 30_000L,
+            bMs = 32_000L,
+            positionMs = 30_000L,
+        )
+        val (next, effects) = LoopPageReducer.reduce(
+            shortLoop,
+            LoopPageEvent.SwitchMode(LoopPageMode.SEAM),
+        )
+        assertEquals(
+            "B−5s < A 时取 A",
+            listOf(LoopPageEffect.SeekTo(30_000L)),
+            effects.filterIsInstance<LoopPageEffect.SeekTo>(),
+        )
+        assertEquals(
+            listOf(LoopPageEffect.Play(LoopPageMode.SEAM, 30_000L)),
+            effects.filterIsInstance<LoopPageEffect.Play>(),
+        )
+        assertEquals(30_000L, (next as LoopPageState.Ready).positionMs)
     }
 
     @Test
@@ -577,7 +620,8 @@ object LoopPageMatrix {
     private fun modeStart(mode: LoopPageMode, aMs: Long, bMs: Long): Long = when (mode) {
         LoopPageMode.FULL -> 0L
         LoopPageMode.LOOP_ONLY -> (aMs - 300L).coerceAtLeast(0L)
-        LoopPageMode.SEAM -> (bMs - 5_000L).coerceAtLeast(0L)
+        // 极短循环段 B−5s < A 时取 A。
+        LoopPageMode.SEAM -> maxOf(aMs, bMs - 5_000L)
         LoopPageMode.FREE -> 0L
     }
 
@@ -822,14 +866,12 @@ object LoopPageMatrix {
                 )
             }
 
-            val active = ready.playback is PlaybackState.Playing ||
-                ready.playback is PlaybackState.AwaitingPrefill
             val dragIdle = ready.drag == DragState.Idle
 
-            if (dragIdle && !(ready.mode == LoopPageMode.SEAM && active)) {
+            // 00008(用户口径):同模式重复点击也必须重新 SeekTo + Play;
+            // 只有拖拽中的模式点击是 no-op。
+            if (dragIdle) {
                 expect(stateKey, "SwitchMode(SEAM)", switchExpected(ready, LoopPageMode.SEAM))
-            }
-            if (dragIdle && !(ready.mode == LoopPageMode.FULL && active)) {
                 expect(stateKey, "SwitchMode(FULL)", switchExpected(ready, LoopPageMode.FULL))
             }
 

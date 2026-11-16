@@ -11,6 +11,7 @@ import com.zjr.hesimusic.ui.loop.state.LoopPageState
 import com.zjr.hesimusic.ui.loop.state.PlaybackState
 import com.zjr.hesimusic.ui.loop.state.PrefillState
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -160,6 +161,38 @@ class LoopPageEffectRunnerTest {
             listOf("seek:1000", "play:FULL:2000:true"),
             host.calls,
         )
+    }
+
+    @Test
+    fun repeatedSeamSwitchSeeksEachTimeAndNeverPausesOrReleases() {
+        val host = FakeLoopPageHost()
+        val runner = LoopPageEffectRunner(host)
+        var state: LoopPageState = ready(
+            playback = PlaybackState.Playing,
+            prefill = PrefillState.Ready,
+        )
+        repeat(2) {
+            val (next, effects) = LoopPageReducer.reduce(
+                state,
+                LoopPageEvent.SwitchMode(LoopPageMode.SEAM),
+            )
+            runner.run(effects)
+            state = next
+        }
+
+        // 每次点击:一次 SeekTo(B−5s) + 一次 Play(同批 SeekTo 后 seek=false,不二次 raw seek)
+        assertEquals(
+            listOf(
+                "seek:45000",
+                "play:SEAM:45000:false",
+                "seek:45000",
+                "play:SEAM:45000:false",
+            ),
+            host.calls,
+        )
+        assertTrue("重复点击不得 pause/release 播放器", "pause" !in host.calls)
+        assertEquals(45_000L, (state as LoopPageState.Ready).positionMs)
+        assertEquals(PlaybackState.Playing, (state as LoopPageState.Ready).playback)
     }
 
     @Test

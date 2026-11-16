@@ -422,7 +422,8 @@ class PreviewPlayer @Inject constructor(
     private fun modeStartMs(): Long = when (mode) {
         PreviewMode.FULL -> 0L
         PreviewMode.LOOP_ONLY -> (aMs - LOOP_PREROLL_MS).coerceAtLeast(0L)
-        PreviewMode.SEAM -> (bMs - SEAM_LEAD_MS).coerceAtLeast(0L)
+        // 极短循环段 B−5s < A 时取 A。
+        PreviewMode.SEAM -> maxOf(aMs, bMs - SEAM_LEAD_MS)
         PreviewMode.FREE -> 0L
     }
 

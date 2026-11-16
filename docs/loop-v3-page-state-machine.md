@@ -110,7 +110,7 @@ SwitchMode(SEAM)/SwitchMode(FULL),所以矩阵事件夹具为 28 个。
 | DragAStart/DragAMove/DragAEnd | Ready | 只改视觉 A;Start 要求 drag=Idle,Move/End 要求正在拖 A;End 回到 Idle,不发副作用 |
 | DragBStart/DragBMove/DragBEnd | Ready | 同上,手柄 B |
 | CommitWindow | Ready | 应用当前 A/B;播放中/等待预填 -> AwaitingPrefill;effects=[CancelPrefill, StartPrefill(新窗口), SeekTo(模式起点)] |
-| SwitchMode(mode) | Ready | 拖拽中 no-op;同模式且正在播放/等待预填 -> no-op(00008);否则 -> Playing + [SeekTo(目标), Play(mode,目标)] |
+| SwitchMode(mode) | Ready | 拖拽中 no-op;其余情况(含同模式重复点击)统一 -> Playing + [SeekTo(目标), Play(mode,目标)]。SEAM 目标 = max(A, B−5s);重复点接缝检查每次都回到 B−5s 重新起播(00008 用户口径) |
 | TogglePlay | Ready | Playing/AwaitingPrefill -> Paused + Pause;Paused/Stopped -> Playing + Play(mode,当前位置) |
 | Tick(positionMs) | Ready | 更新展示位置(clamp);不改播放状态、不发 effect |
 | PrefillStarted | Ready | NotStarted/Failed -> InProgress(0);已在 InProgress/Ready -> no-op |
@@ -152,7 +152,8 @@ CancelPrefill -> StartPrefill(新窗口) -> SeekTo(起点);预填完成后由 Pr
 5. drag = Dragging(A, ms) 时 aMs == ms,Dragging(B, ms) 时 bMs == ms;
 6. playback is AwaitingPrefill => prefill is InProgress。因此一定存在后续
    PrefillReady/PrefillFailed 把状态带回 Playing 并补发 Play;不允许"位置在动但无输出";
-7. 同一模式重复 SwitchMode 在播放/等待预填时是恒等 no-op,不产生任何 SeekTo(00008);
+7. 同一模式重复 SwitchMode 不是 no-op:每次都重新 SeekTo 到模式起点并 Play;
+   SEAM 起点 = max(A, B−5s);同批 SeekTo 后的 Play 必须 seek=false(一次点击只 seek 一次,00008);
 8. ConfirmAndSave 不检查 prefill,预填未开始/进行中/AwaitingPrefill 都能保存;
 9. 所有非法/过期/重复事件返回同一个 state 实例 + 空 effect。
 
@@ -173,8 +174,8 @@ CancelPrefill -> StartPrefill(新窗口) -> SeekTo(起点);预填完成后由 Pr
   10. Ready.Seam.Playing
 - 事件夹具:28 个(26 种事件类型;Enter 2 个、SwitchMode 2 个)
 - 参数化矩阵:10 x 28 = 280 个用例
-- 额外测试:矩阵完整性 1、全局不变量 1、bug/非法操作回归 12、effect runner 12
-- 本轮新增测试执行数:306,全部通过
+- 额外测试:矩阵完整性 1、全局不变量 1、bug/非法操作回归 13、effect runner 13
+- 本轮新增测试执行数:308,全部通过
 
 ### 6.2 覆盖策略
 
@@ -188,8 +189,9 @@ CancelPrefill -> StartPrefill(新窗口) -> SeekTo(起点);预填完成后由 Pr
 
 | 用例 | 断言 |
 |---|---|
-| issue00008_repeatedSeamSwitchSeeksOnlyOnceToBMinusFiveSeconds | 第一次 SwitchMode(SEAM) 只 seek 到 55_000ms(B-5s);第二次恒等 no-op、零 effect;tick 后再点仍 no-op;任何一次都不得 seek 到 45_000ms(区段中间) |
+| issue00008_repeatedSeamSwitchAlwaysReturnsToBMinusFiveSeconds | 每次 SwitchMode(SEAM)(第一次、第二次、tick 后第三次)都产生 SeekTo(55_000ms) + Play(SEAM,55_000ms),位置回到 B−5s;任何一次都不得 seek 到 45_000ms(区段中间) |
 | issue00008_pausedSeamSwitchRestartsAtBMinusFiveSeconds | 暂停后重新点接缝检查,仍从 B-5s 起,且只 seek 一次 |
+| seamStartClampsToAWhenLoopShorterThanFiveSeconds | 极短循环段(A=30s,B=32s)点接缝检查,目标取 max(A,B−5s)=A |
 | issue00009_selectCandidateWhilePlayingNeverPausesAndPlaysAfterPrefillReady | 播放中换候选:effects 不含 Pause,含 CancelPrefill + StartPrefill(新窗口) + SeekTo;状态 AwaitingPrefill;tick 后仍 AwaitingPrefill;PrefillReady 必然产出 Play(mode, resumeAt) |
 | issue00009_commitWindowWhilePlayingNeverPausesAndPlaysAfterPrefillReady | 播放中拖 A 松手并提交:effects 不含 Pause;状态 AwaitingPrefill;PrefillReady 必然 Play |
 | prefillFailureWhileAwaitingFallsBackToPlayInsteadOfStayingSilent | 预填失败也不能静默:补发 Play + Toast,状态回 Playing |
@@ -217,12 +219,12 @@ seekRaw 会把展示口径的 B-5s 经 LoopPosition.rawSeekUs(targetUs, window, 
 会让落点漂到区段中间,而不是 B-5s。同时 degradeRetryUsed = false 把一次性降级补环
 也重置了,进一步放大"每次点击都重新 seek"的行为。
 
-模型层修正:
+模型层修正(用户口径:重复点击必须每次都回到 B−5s):
 
-- 同模式 + Playing/AwaitingPrefill -> 恒等 no-op,连 SeekTo 都不发;
-- 只有真正的模式变化,或从 Paused/Stopped 重新起播,才发一次
-  SeekTo(B-5s) + Play(SEAM, B-5s);
-- 模型从不产生"区段中间"的 seek 目标。
+- 每次 SwitchMode(SEAM) 都产生 SeekTo(max(A, B−5s)) + Play(SEAM, max(A, B−5s));
+- effect runner 执行同批 SeekTo 后,Play 以 seek=false 调用 playFromCurrent,不再走
+  rawSeekUs 的第二次映射;一次点击只 seek 一次,不 release 播放器;
+- 模型从不产生"区段中间"的 seek 目标;极短循环段 B−5s < A 时取 A。
 
 ### 7.2 00009:播放中改候选/重准备缓冲后完全没有声音
 
@@ -312,8 +314,8 @@ PreviewPlayer.kt 保持不变;模式映射放在 UI 层:
 
 - StartPrefill 异步;其回调必须带 token(窗口/候选版本),过期结果丢弃,与现有
   prefillToken 逻辑一致;
-- Play 只在 effect 列表里出现一次时执行一次;重复同模式点击在 reducer 层就是 no-op,
-  runner 不会被调用;
+- 每次同模式点击 reducer 都会产出一个 Play;runner 按同批 SeekTo 把它降为
+  seek=false(只恢复播放),避免一次点击 seek 两次;
 - **避免 Play 二次 seek**:同一批 effect 里若已有 SeekTo 到相同位置,Play 应实现为
   "从当前位置起播/仅恢复播放",不要再走 PreviewPlayer.play(mode,start) 内部的
   rawSeekUs 映射;否则 00008 的映射会被重新触发。第二轮可给 PreviewPlayer 增加
@@ -355,16 +357,18 @@ PreviewPlayer.kt 保持不变;模式映射放在 UI 层:
 结果:
 
 - 第二轮改动后的 :app:compileDebugKotlin 通过;
-- 新增 ui.loop 4 个测试类:LoopPageReducerTest 280 + MatrixCoverage 2 + Regression 12 +
-  LoopPageEffectRunnerTest 12 = 306 个测试全部通过;
-- 全量单测 656 个:0 failed / 0 errors,BUILD SUCCESSFUL。
+- 新增 ui.loop 4 个测试类:LoopPageReducerTest 280 + MatrixCoverage 2 + Regression 13 +
+  LoopPageEffectRunnerTest 13 = 308 个测试全部通过;
+- 全量单测在并发 audio/service 改动期间不稳定:失败集中在 LoopRingSeedTest /
+  LoopRingPrefillerTest(loop/audio、service;这些文件正被另一个 agent 修改,单跑也失败),
+  不属于本轮 ui/loop 写域;待其收口后重跑全量。ui.loop 的 308 个测试始终全绿。
   并发开发期间一度受另一个 agent 的 LoopIntent.arm debug 调用点影响,已由 lead 修复;
   loop/audio、service 测试的临时失败也已随并发改动收口消失。
 
 ## 10. 结论
 
 - 页面状态从 N 个可变字段收敛为 1 个不可变状态 + 1 个纯函数 + 1 组声明式 effect;
-- 280 个状态 x 事件组合 + 306 个测试执行,把"所有状态都在预期中"变成可执行断言;
+- 280 个状态 x 事件组合 + 308 个测试执行,把"所有状态都在预期中"变成可执行断言;
 - 00008/00009 已各自变成可复现的模型断言,并在 reducer/effect runner 层给出修复语义;
 - 第二轮已把状态机接进 LoopViewModel/LoopScreen,并修复 00012 的候选清单/选中项/占比遮挡
   (行内宽度竞争 + sheet/导航栏底部留白,见 §11.4)。
@@ -423,10 +427,12 @@ LoopScreen 现在只 collect 一次 pageState + peaks + song + notice;播放器�
 
 ### 11.3 00008 / 00009 真机应看到的行为
 
-00008(重复点接缝检查):
+00008(重复点接缝检查,用户口径:每次都回 B−5s):
 - 第一次点「接缝检查」:从 B−5s 起播;
-- 第二次及之后点同一模式:reducer 恒等 no-op,不产生 SeekTo/Play,播放位置不再被重置;
-- logcat 里不应再出现第二次 raw seek / degradeRetryUsed 重置。
+- 第二次及之后点同一模式:仍然 SeekTo(B−5s) + Play,播放位置回到 B−5s;
+- 每次点击只 seek 一次:runner 的 Play 以 seek=false 执行,不会二次 raw seek,也不 release 播放器;
+- 极短循环段 B−5s < A 时落点取 A;
+- logcat 不应出现"第二次 seek 到区段中间"的落点。
 
 00009(播放中改候选):
 - 点候选后:候选 A/B 立即更新,界面显示「正在准备环缓冲…」,播放头冻结在模式起点
@@ -471,8 +477,9 @@ LoopScreen 现在只 collect 一次 pageState + peaks + song + notice;播放器�
 
 ### 11.5 本轮验证
 
-- 新增/更新测试:LoopPageReducerTest 280、MatrixCoverage 2、Regression 12、
-  LoopPageEffectRunnerTest 12,合计 306,全部通过;
+- 新增/更新测试:LoopPageReducerTest 280、MatrixCoverage 2、Regression 13、
+  LoopPageEffectRunnerTest 13,合计 308,全部通过;
 - :app:compileDebugKotlin 在本轮改动后通过;
-- 全量单测 656 个,0 failed / 0 errors,BUILD SUCCESSFUL(lead 已同步修复
-  LoopIntent.arm 的 debug 调用点)。
+- 全量单测在并发 audio/service 改动期间不稳定:失败集中在 LoopRingSeedTest /
+  LoopRingPrefillerTest(loop/audio、service,另一个 agent 修改中,单跑也失败);
+  ui.loop 308 全绿,待其收口后重跑全量。

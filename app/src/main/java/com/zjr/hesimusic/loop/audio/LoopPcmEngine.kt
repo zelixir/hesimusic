@@ -200,6 +200,10 @@ class LoopPcmEngine {
     /** 重放写失败/倒退/卡死后的封锁：直到 flush 前不再进入 REPLAYING，源输入直通。 */
     private var replayBlocked = false
 
+    /** 覆盖耗尽已请求 seek：等 flush/目标输入落地前不要自动重进 REPLAYING。 */
+    private var coverageResumePending = false
+    private var coverageResumeTargetUs = Long.MIN_VALUE
+
     /** 重放中覆盖耗尽、原地等待分片的次数（不 seek、不降级）。 */
     @Volatile
     var stallCount: Long = 0L
@@ -261,6 +265,8 @@ class LoopPcmEngine {
             cursorFrames = 0L
             round = 1L
             replayBlocked = false
+            coverageResumePending = false
+            coverageResumeTargetUs = Long.MIN_VALUE
             degradeCallbackArmed = true
             state = if (region != null) State.CAPTURING else State.PASS_THROUGH
             return
@@ -812,6 +818,14 @@ class LoopPcmEngine {
         lastInputStartFrameAbs = startFrameAbs
         lastInputEndFrameAbs = endFrameAbs
         lastInputPtsUs = frameTimeUs
+        if (coverageResumePending &&
+            coverageResumeTargetUs != Long.MIN_VALUE &&
+            kotlin.math.abs(frameTimeUs - coverageResumeTargetUs) <= 100_000L
+        ) {
+            // seek 已落到请求的 A+cursor：解除“等待续播”门槛。
+            coverageResumePending = false
+            coverageResumeTargetUs = Long.MIN_VALUE
+        }
 
         if (replayBlocked) {
             // 重放已判定不可用：直到 flush 前整段直通，让播放头跟随源输入，绝不再次进重放。
@@ -976,7 +990,26 @@ class LoopPcmEngine {
         }
         val availableAhead = coveredFrames - cursorFrames
         if (!isRingComplete && availableAhead <= 0L) {
-            stallForCoverageLocked()
+            // 覆盖耗尽：请求协调器 seek 到展示位置 A+cursor，切成源输入续播。
+            // 目标用第 0 轮坐标 A+cursor；显示位置与当前相位相同，不是向后跳。
+            val cursor = cursorFrames
+            val targetUs = r.window.loopStartUs +
+                cursor * US_PER_SECOND / fmt.sampleRate
+            degradeCount += 1L
+            degradeCallbackArmed = false
+            state = State.CAPTURING
+            pendingPostFlushPhase = true
+            cursorFrames = 0L
+            round = 1L
+            pendingChunk = null
+            pendingConsumedBytes = 0
+            pendingAdvancedFrames = 0L
+            stalled = false
+            // 覆盖续播不是失败封锁；下一个 B 点仍允许重放。
+            replayBlocked = false
+            coverageResumePending = true
+            coverageResumeTargetUs = targetUs
+            onDegrade?.invoke(targetUs)
             return null
         }
         stalled = false
@@ -1054,6 +1087,8 @@ class LoopPcmEngine {
         seamIteration = 0L
         stalled = false
         replayBlocked = false
+        coverageResumePending = false
+        coverageResumeTargetUs = Long.MIN_VALUE
         pendingChunk = null
         pendingConsumedBytes = 0
         pendingAdvancedFrames = 0L
@@ -1131,6 +1166,7 @@ class LoopPcmEngine {
             " pos=" + currentPositionUs() +
             " ring=" + isRingComplete +
             " blocked=" + replayBlocked +
+            " coverageResume=" + coverageResumePending +
             " lastInPts=" + lastInputPtsUs +
             " pendingChunk=" + (pendingChunk != null) +
             " stall=" + stallCount +
@@ -1314,6 +1350,8 @@ class LoopPcmEngine {
         degradeCallbackArmed = true
         pendingPostFlushPhase = false
         replayBlocked = false
+        coverageResumePending = false
+        coverageResumeTargetUs = Long.MIN_VALUE
         seamIteration = 0L
         cursorFrames = 0L
         round = 1L
@@ -1432,7 +1470,7 @@ class LoopPcmEngine {
 
     /** 分片模式下只要前缀覆盖到 cursor 之后就有可播数据；完整 ring 当然可以。 */
     private fun canStartReplayAt(cursor: Long, r: Region): Boolean {
-        if (replayBlocked) return false
+        if (replayBlocked || coverageResumePending) return false
         if (isRingComplete) return true
         return coveredFrames > cursor
     }

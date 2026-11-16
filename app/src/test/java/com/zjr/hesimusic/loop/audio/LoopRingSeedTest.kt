@@ -321,63 +321,94 @@ class LoopRingSeedTest {
     }
 
     @Test
-    fun `seek 到区间内且前缀不足时不向后降级`() {
+    fun `覆盖耗尽请求 A+cursor 的向前续播`() {
         val engine = newEngine()
         val w = window(1000, 4000)
         engine.setWindow(w)
         val targets = mutableListOf<Long>()
         engine.onDegrade = { targets.add(it) }
-        // 第一片只有 0.6s，覆盖不到 seek 目标 2.5s
         engine.seedRingRange(w, 0L, seedBytes(1000, 600), 1000, 1)
 
         val plan = engine.onBuffer(2_500_000L, 1500, PcmTestSupport.pcm16Buffer(2500, 1500))
         assertEquals("应转发到 B", 1_500, plan.forwardFrames)
         engine.onInputDrained(plan)
+        assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
 
-        assertEquals("必须进入重放而不是向后 seek", LoopPcmEngine.State.REPLAYING, engine.state)
-        assertEquals("不得触发降级回调", 0, targets.size)
-        assertEquals("不得累计降级", 0L, engine.degradeCount)
-
-        // 从 A 播到当前前缀尽头后原地等待
+        // 从 A 播到前缀尽头：请求 seek 到 A+600ms 续播
         val chunk = engine.pumpChunk(1 shl 20)!!
         assertEquals(600, chunk.frames)
         engine.onReplayChunkConsumed(chunk.byteLength)
         assertEquals(null, engine.pumpChunk(1 shl 20))
-        assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
-        assertEquals(1L, engine.stallCount)
-        assertEquals(0L, engine.degradeCount)
-        assertEquals(0, targets.size)
+
+        assertEquals(LoopPcmEngine.State.CAPTURING, engine.state)
+        assertEquals("目标 = A + cursor", 1_600_000L, targets.single())
+        assertEquals(1L, engine.degradeCount)
+        assertEquals("续播路径不得永久封锁", false, engine.debugStateString().contains("blocked=true"))
     }
 
     @Test
-    fun `覆盖耗尽原地等待并补片后继续`() {
+    fun `覆盖耗尽续播后 flush 可重新进入重放`() {
         val engine = newEngine()
         val w = window(1000, 2000)
         engine.setWindow(w)
+        val targets = mutableListOf<Long>()
+        engine.onDegrade = { targets.add(it) }
         engine.seedRingRange(w, 0L, seedBytes(1000, 600), 1000, 1)
         val plan = engine.onBuffer(1_990_000L, 10, PcmTestSupport.pcm16Buffer(1990, 10))
         engine.onInputDrained(plan)
         assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
 
-        // 只覆盖了 600 帧：输出到 coveredFrames 后必须回退，不得输出未覆盖静音
         val chunk = engine.pumpChunk(1 shl 20)!!
-        assertEquals(600, chunk.frames)
         engine.onReplayChunkConsumed(chunk.byteLength)
-        assertEquals(600L, engine.totalReplayFrames)
-
         assertEquals(null, engine.pumpChunk(1 shl 20))
-        assertEquals("覆盖耗尽必须保持重放等待", LoopPcmEngine.State.REPLAYING, engine.state)
-        assertEquals("等待不得降级/seek", 0L, engine.degradeCount)
-        assertEquals("等待应记 stallCount", 1L, engine.stallCount)
+        assertEquals(LoopPcmEngine.State.CAPTURING, engine.state)
+        assertEquals(1_600_000L, targets.single())
+        assertEquals(1L, engine.degradeCount)
 
+        // 模拟协调器 seek 落地后的 flush + 补片
+        engine.onFlush()
         engine.seedRingRange(w, 600L, seedBytes(1600, 400), 1000, 1)
         assertTrue(engine.isRingComplete)
-        assertEquals("补片后仍在重放", LoopPcmEngine.State.REPLAYING, engine.state)
-        assertEquals("等待不累计降级", 0L, engine.degradeCount)
-        val next = engine.pumpChunk(1 shl 20)!!
-        assertEquals(400, next.frames)
-        assertEquals(2_600_000L, next.ptsUs)
-        assertEquals("补片后不应再新增等待", 1L, engine.stallCount)
+        val atB = engine.onBuffer(2_000_000L, 10, PcmTestSupport.pcm16Buffer(2000, 10))
+        engine.onInputDrained(atB)
+        assertEquals("flush 后应可重新进入重放", LoopPcmEngine.State.REPLAYING, engine.state)
+        assertEquals("续播不触发永久封锁", 1L, engine.degradeCount)
+    }
+
+    @Test
+    fun `连续两次覆盖耗尽请求的续播目标单调向前`() {
+        val engine = newEngine()
+        val w = window(1000, 31000)
+        engine.setWindow(w)
+        val targets = mutableListOf<Long>()
+        engine.onDegrade = { targets.add(it) }
+        engine.seedRingRange(w, 0L, seedBytes(1000, 2000), 1000, 1)
+
+        // 进入 round0 的 A 相位重放，播到前缀尽头
+        engine.onInputDiscontinuity()
+        assertTrue(engine.tryRephaseFromInput(1_000_000L))
+        assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
+        var chunk = engine.pumpChunk(1 shl 20)!!
+        assertEquals(2000, chunk.frames)
+        engine.onReplayChunkConsumed(chunk.byteLength)
+        assertEquals(null, engine.pumpChunk(1 shl 20))
+        assertEquals(3_000_000L, targets[0])
+        assertEquals(LoopPcmEngine.State.CAPTURING, engine.state)
+
+        // seek/flush 后补充前缀，再次 round0 耗尽
+        engine.onFlush()
+        engine.seedRingRange(w, 2000L, seedBytes(3000, 2000), 1000, 1)
+        engine.onInputDiscontinuity()
+        assertTrue(engine.tryRephaseFromInput(1_000_000L))
+        chunk = engine.pumpChunk(1 shl 20)!!
+        assertEquals(4000, chunk.frames)
+        engine.onReplayChunkConsumed(chunk.byteLength)
+        assertEquals(null, engine.pumpChunk(1 shl 20))
+
+        assertEquals(listOf(3_000_000L, 5_000_000L), targets)
+        assertEquals(2L, engine.degradeCount)
+        assertTrue("目标必须单调向前", targets[1] > targets[0])
+        assertFalse("不得进入永久封锁", engine.debugStateString().contains("blocked=true"))
     }
 
     @Test
