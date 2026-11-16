@@ -13,7 +13,8 @@ import java.util.concurrent.ConcurrentHashMap
  * - 预算比例:解码/分析按 decode:analyze 时间比例分配(默认 [DEFAULT_DECODE_WEIGHT] /
  *   [DEFAULT_ANALYZE_WEIGHT],真机实测 5.3s : 2.7s;实际比例由 [AnalysisTiming] 校准);
  * - 单调 + 平滑:输出永不回退,EMA(alpha)平滑,单次更新台阶不超过 [MAX_STEP];
- * - 端点:开始即 [START](>0);最后 5% 留给收尾([WORK_END]..1.0),终态 [Phase.DONE] 立即 1.0。
+ * - 端点:开始即 [START](>0);最后 5% 留给收尾([WORK_END]..1.0);终态 [Phase.DONE] 同样受
+ *   [MAX_STEP] 约束,正常路径经 FINALIZING(0.95)再用 1~2 次更新到 1.0。
  *
  * 纯函数:无 Android/协程/IO 依赖,可 JVM 单测。
  */
@@ -33,7 +34,7 @@ object AnalysisProgress {
         /** 收尾(解析候选/落库):进度停在 [WORK_END],等终态。 */
         FINALIZING,
 
-        /** 终态:直接 1.0。 */
+        /** 终态:同样按 [MAX_STEP] 逼近 1.0(通常经 FINALIZING 后 1 次即可)。 */
         DONE,
     }
 
@@ -50,8 +51,8 @@ object AnalysisProgress {
     /** EMA 平滑系数(0.25 ≈ 4 个更新周期收敛 63%)。 */
     const val DEFAULT_ALPHA = 0.25f
 
-    /** 单次更新允许的最大进度台阶(阶段切换也在内)。 */
-    const val MAX_STEP = 0.05f
+    /** 单次更新允许的最大进度台阶(阶段切换与 DONE 也在内)。 */
+    const val MAX_STEP = 0.04f
 
     /**
      * 只计算**未平滑**的工作量目标(供落库/心跳逻辑复用),返回值 ∈ [0,1]。
@@ -114,8 +115,13 @@ object AnalysisProgress {
         maxStep: Float = MAX_STEP,
     ): Float {
         val prev = sanitizeProgress(smoothedPrev)
-        // 终态立即 1.0。正常路径先经 FINALIZING(0.95),所以最后一步恰好是 MAX_STEP。
-        if (phase == Phase.DONE) return 1f
+        val stepLimit = finiteOrDefault(maxStep, MAX_STEP).coerceIn(0f, 1f)
+
+        // 终态同样走台阶上限(不一次跳到 1.0):正常路径先经 FINALIZING 停在 0.95,
+        // 最后一个 DONE 更新恰好 +MAX_STEP → 1.0。
+        if (phase == Phase.DONE) {
+            return maxOf(prev, if (stepLimit > 0f) minOf(1f, prev + stepLimit) else prev)
+        }
 
         val target = workTarget(
             phase = phase,
@@ -126,7 +132,6 @@ object AnalysisProgress {
             decodeWeight = decodeWeight,
             analyzeWeight = analyzeWeight,
         )
-        val stepLimit = finiteOrDefault(maxStep, MAX_STEP).coerceIn(0f, 1f)
 
         val out = when (phase) {
             // 收尾段很短且紧接着 DONE:直接以台阶上限逼近 WORK_END,

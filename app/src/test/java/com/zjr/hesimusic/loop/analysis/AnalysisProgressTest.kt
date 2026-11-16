@@ -33,17 +33,35 @@ class AnalysisProgressTest {
     }
 
     @Test
-    fun `收尾停在百分之九十五而结束立刻为一`() {
-        val finalizing = progress(
+    fun `收尾停在百分之九十五且结束分步走台阶到一`() {
+        // 收尾按 MAX_STEP 逐步逼近 0.95(不会一次从 0.9 跳到 1.0)。
+        var finalizing = progress(
             AnalysisProgress.Phase.FINALIZING,
             decoded = TOTAL_FRAMES,
             blocks = TOTAL_BLOCKS,
             prev = 0.90f,
         )
+        assertEquals(0.94f, finalizing, 1e-6f)
+        repeat(4) {
+            finalizing = progress(
+                AnalysisProgress.Phase.FINALIZING,
+                decoded = TOTAL_FRAMES,
+                blocks = TOTAL_BLOCKS,
+                prev = finalizing,
+            )
+        }
         assertEquals(AnalysisProgress.WORK_END, finalizing, 1e-6f)
-        assertEquals(1f, progress(AnalysisProgress.Phase.DONE, prev = finalizing), 0f)
-        // 收尾→结束恰好是一个上限台阶。
-        assertEquals(AnalysisProgress.MAX_STEP, 1f - finalizing, 1e-6f)
+
+        // DONE 也受 MAX_STEP 约束:0.95 → 0.99 → 1.0(两次更新),而不是直接 1.0。
+        val nearlyDone = progress(AnalysisProgress.Phase.DONE, prev = finalizing)
+        assertEquals(
+            finalizing + AnalysisProgress.MAX_STEP,
+            nearlyDone,
+            1e-6f,
+        )
+        val done = progress(AnalysisProgress.Phase.DONE, prev = nearlyDone)
+        assertEquals(1f, done, 0f)
+        assertTrue(done - finalizing <= AnalysisProgress.MAX_STEP * 2 + 1e-6f)
     }
 
     // -----------------------------------------------------------------------
@@ -124,8 +142,10 @@ class AnalysisProgressTest {
             progress(AnalysisProgress.Phase.DECODING, prev = 0.5f, alpha = Float.POSITIVE_INFINITY),
         )
         values.forEach { value -> assertTrue("越界:$value", value >= 0f && value <= 1f) }
-        assertEquals(1f, progress(AnalysisProgress.Phase.DONE, prev = 0f), 0f)
-        assertEquals(1f, progress(AnalysisProgress.Phase.DONE, prev = 0.9f), 0f)
+        // DONE 也走台阶上限:从 0 开始只前进一个 MAX_STEP。
+        assertEquals(AnalysisProgress.MAX_STEP, progress(AnalysisProgress.Phase.DONE, prev = 0f), 1e-6f)
+        assertEquals(1f, progress(AnalysisProgress.Phase.DONE, prev = 1f), 0f)
+        assertEquals(1f, progress(AnalysisProgress.Phase.DONE, prev = 0.99f), 0f)
     }
 
     // -----------------------------------------------------------------------
@@ -402,27 +422,36 @@ class AnalysisProgressTest {
             values += prev
             phases += AnalysisProgress.Phase.ANALYZING
         }
-        prev = progress(
-            AnalysisProgress.Phase.FINALIZING,
-            decoded = TOTAL_FRAMES,
-            blocks = TOTAL_BLOCKS,
-            prev = prev,
-            decodeWeight = decodeWeight,
-            analyzeWeight = analyzeWeight,
-        )
-        values += prev
-        phases += AnalysisProgress.Phase.FINALIZING
-
-        prev = progress(
-            AnalysisProgress.Phase.DONE,
-            decoded = TOTAL_FRAMES,
-            blocks = TOTAL_BLOCKS,
-            prev = prev,
-            decodeWeight = decodeWeight,
-            analyzeWeight = analyzeWeight,
-        )
-        values += prev
-        phases += AnalysisProgress.Phase.DONE
+        // 收尾:DONE 前按 MAX_STEP 逐步补齐到 0.95(最多 10 次)。
+        var settle = 0
+        while (prev < AnalysisProgress.WORK_END && settle < 10) {
+            prev = progress(
+                AnalysisProgress.Phase.FINALIZING,
+                decoded = TOTAL_FRAMES,
+                blocks = TOTAL_BLOCKS,
+                prev = prev,
+                decodeWeight = decodeWeight,
+                analyzeWeight = analyzeWeight,
+            )
+            values += prev
+            phases += AnalysisProgress.Phase.FINALIZING
+            settle++
+        }
+        // 终态:DONE 同样受台阶约束,分 1~2 次到 1.0。
+        var doneSteps = 0
+        while (prev < 1f && doneSteps < 4) {
+            prev = progress(
+                AnalysisProgress.Phase.DONE,
+                decoded = TOTAL_FRAMES,
+                blocks = TOTAL_BLOCKS,
+                prev = prev,
+                decodeWeight = decodeWeight,
+                analyzeWeight = analyzeWeight,
+            )
+            values += prev
+            phases += AnalysisProgress.Phase.DONE
+            doneSteps++
+        }
         return Timeline(values, phases)
     }
 

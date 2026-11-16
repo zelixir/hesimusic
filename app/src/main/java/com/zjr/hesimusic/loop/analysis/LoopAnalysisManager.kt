@@ -228,13 +228,16 @@ class LoopAnalysisManager @Inject constructor(
                 Log.w(TAG, "temporary result save failed", e)
             }
 
-            // 收尾进度停在 0.95;若 EMA 还没跟上,最多再等一个刷新周期让 0.95 可见,
-            // 保证 Done 的 1.0 只比它高一个 MAX_STEP(见 issue 00018 的真机指标)。
+            // 收尾必须**走台阶到 1.0**,不能从 0.7x 直接跳到 100%(issue 00018 真机实测 0.79 -> 1.00)。
+            // 心跳依赖采集循环是否还在跑,这里改为在完成路径里自己按 MAX_STEP 推,
+            // 最多等 PROGRESS_FINALIZE_MAX_WAIT_MS(每步 100ms)。
             var settleWaitedMs = 0L
-            while (!tracker.finalizingSettled() && settleWaitedMs < PROGRESS_FINALIZE_MAX_WAIT_MS) {
+            while (!tracker.rampToDone() && settleWaitedMs < PROGRESS_FINALIZE_MAX_WAIT_MS) {
                 delay(PROGRESS_UPDATE_INTERVAL_MS)
                 settleWaitedMs += PROGRESS_UPDATE_INTERVAL_MS
             }
+            // 让 0.95 至少存活一个采样周期,收尾的 0.95 → 1.0 才能被观测成两次更新。
+            if (tracker.finalizingSettled()) delay(PROGRESS_FINALIZE_HOLD_MS)
             tracker.finish()
             _state.value = AnalysisState.Done(
                 songId = song.id,
@@ -326,15 +329,19 @@ class LoopAnalysisManager @Inject constructor(
             )
         }
 
+        /**
+         * 进入收尾段:只切换阶段,不在这里迈台阶。
+         *
+         * 引擎最后几次回调可能和收尾落在同一个 100ms 采样窗口里;若这里再推一步,
+         * 外部 100ms 采样会看到「最后回调 + 收尾」叠加成一个大台阶。台阶统一交给
+         * [heartbeat] 按 100ms 节拍推进(0.95 之前每次 +[AnalysisProgress.MAX_STEP])。
+         */
         @Synchronized
         fun onFinalizing() {
+            if (finished) return
+            phase = AnalysisProgress.Phase.FINALIZING
+            lastWorkTarget = AnalysisProgress.WORK_END
             lastWorkMs = System.currentTimeMillis()
-            update(
-                phase = AnalysisProgress.Phase.FINALIZING,
-                decodedFrames = totalFrames,
-                analyzedBlocks = PROGRESS_BLOCKS,
-                force = true,
-            )
         }
 
         /**
@@ -348,13 +355,14 @@ class LoopAnalysisManager @Inject constructor(
         fun heartbeat() {
             if (finished) return
             val now = System.currentTimeMillis()
-            if (now - lastEmitMs < PROGRESS_UPDATE_INTERVAL_MS) return
             if (phase == AnalysisProgress.Phase.FINALIZING) {
-                if (smoothed >= AnalysisProgress.WORK_END) return
+                // 心跳本身就是 100ms 节拍,收尾段不再叠加节流(尽快补齐到 0.95)。
+                if (lastEmitted >= AnalysisProgress.WORK_END - EMIT_EPSILON) return
                 smoothed = minOf(AnalysisProgress.WORK_END, smoothed + AnalysisProgress.MAX_STEP)
                 emit()
                 return
             }
+            if (now - lastEmitMs < PROGRESS_UPDATE_INTERVAL_MS) return
             val stalled = now - lastWorkMs >= PROGRESS_STALL_FILL_AFTER_MS
             val aheadOfWork = smoothed > lastWorkTarget
             if (!stalled && !aheadOfWork) return
@@ -364,16 +372,49 @@ class LoopAnalysisManager @Inject constructor(
             emit()
         }
 
-        /** 收尾是否已经到 0.95(没到的话 Done 前多等一个刷新周期,避免最后一次台阶过大)。 */
+        /** 收尾是否**已上报**到 0.95(内部值到 0.95 但还没发出去不算)。 */
         @Synchronized
         fun finalizingSettled(): Boolean =
-            phase == AnalysisProgress.Phase.FINALIZING && smoothed >= AnalysisProgress.WORK_END
+            phase == AnalysisProgress.Phase.FINALIZING && lastEmitted >= AnalysisProgress.WORK_END - EMIT_EPSILON
 
-        /** 分析成功:标记结束(下一个状态就是 Done,不再上报进度)。 */
+        /**
+         * 把进度按 [AnalysisProgress.MAX_STEP] 推到 1.0 并上报;到达后返回 true。
+         *
+         * 完成路径用它代替"直接 finish() 置 1",避免最后一次出现 0.2 级别的跳变。
+         */
+        @Synchronized
+        fun rampToDone(): Boolean {
+            if (finished) return true
+            if (smoothed >= 1f) {
+                finished = true
+                return true
+            }
+            smoothed = minOf(1f, smoothed + AnalysisProgress.MAX_STEP)
+            phase = AnalysisProgress.Phase.FINALIZING
+            emit()
+            if (smoothed >= 1f) finished = true
+            return smoothed >= 1f
+        }
+
+        /**
+         * 分析成功:按 DONE 台阶再推进一步(通常 0.95 → 0.99),随后由状态机发 Done(1.0)。
+         * 下一次 Done 状态本身是终态,不再产生进度回调。
+         */
         @Synchronized
         fun finish() {
+            if (finished) return
+            smoothed = AnalysisProgress.compute(
+                phase = AnalysisProgress.Phase.DONE,
+                decodedFrames = totalFrames,
+                totalFrames = totalFrames,
+                analyzedBlocks = PROGRESS_BLOCKS,
+                totalBlocks = PROGRESS_BLOCKS,
+                smoothedPrev = smoothed,
+                decodeWeight = decodeWeight,
+                analyzeWeight = 1f - decodeWeight,
+            )
+            if (smoothed > lastEmitted + EMIT_EPSILON) emit()
             finished = true
-            smoothed = 1f
         }
 
         private fun update(
@@ -413,14 +454,21 @@ class LoopAnalysisManager @Inject constructor(
         }
 
         private fun emit() {
+            // 台阶上限作用在**真正上报的值**上:被节流吞掉的更新会在下一次上报时累积,
+            // 若只约束内部值,外部 100ms 采样仍可能一次看到两个台阶叠加。
+            val reported = if (lastEmitted < 0f) {
+                smoothed
+            } else {
+                minOf(smoothed, lastEmitted + AnalysisProgress.MAX_STEP)
+            }
             lastEmitMs = System.currentTimeMillis()
-            lastEmitted = smoothed
+            lastEmitted = reported
             _state.value = when (phase) {
                 AnalysisProgress.Phase.STARTING,
-                AnalysisProgress.Phase.DECODING -> AnalysisState.Decoding(smoothed)
+                AnalysisProgress.Phase.DECODING -> AnalysisState.Decoding(reported)
 
                 AnalysisProgress.Phase.ANALYZING,
-                AnalysisProgress.Phase.FINALIZING -> AnalysisState.Analyzing(smoothed)
+                AnalysisProgress.Phase.FINALIZING -> AnalysisState.Analyzing(reported)
 
                 AnalysisProgress.Phase.DONE -> AnalysisState.Analyzing(1f)
             }
@@ -544,7 +592,10 @@ class LoopAnalysisManager @Inject constructor(
         const val PROGRESS_CREEP_STEP = 0.002f
 
         /** 收尾进度还没到 0.95 时,Done 前最多等这么久(每个 100ms tick 推进一个 MAX_STEP)。 */
-        const val PROGRESS_FINALIZE_MAX_WAIT_MS = 500L
+        const val PROGRESS_FINALIZE_MAX_WAIT_MS = 1_200L
+
+        /** 到达 0.95 后保持一小段时间,保证 0.95 → 1.0 能被 100ms 采样看到两次。 */
+        const val PROGRESS_FINALIZE_HOLD_MS = 150L
 
         /** 低于该增量不重复上报。 */
         const val EMIT_EPSILON = 1e-4f

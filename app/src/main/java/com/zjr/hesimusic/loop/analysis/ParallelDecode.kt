@@ -249,6 +249,13 @@ internal object ParallelMonoDecode {
         }
 
         val parts = arrayOfNulls<DecodedSegment>(plan.segmentCount)
+        // issue 00018:进度按**已解码帧数之和 / 预计总帧数**计算。
+        // 旧实现用 (segment.index + frac) / segmentCount,并行段完成顺序不受控时,
+        // 高 index 段的一点进度就会把全局进度推到 0.75+(开局虚高的根因)。
+        val expectedTotalFrames = plan.segments
+            .sumOf { plan.expectedFrames(it) }
+            .coerceAtLeast(1L)
+        val doneFrames = java.util.concurrent.atomic.AtomicLongArray(plan.segmentCount)
         val progressLock = Any()
         var lastFraction = -1f
         var lastReportMs = 0L
@@ -269,10 +276,11 @@ internal object ParallelMonoDecode {
         val jobs = plan.segments.map { segment ->
             launch(Dispatchers.Default) {
                 coroutineContext.ensureActive()
-                val expected = plan.expectedFrames(segment)
                 val part = decoder.decode(segment) { done ->
-                    val frac = (done.toDouble() / expected.toDouble()).coerceIn(0.0, 1.0).toFloat()
-                    report((segment.index + frac) / plan.segmentCount)
+                    doneFrames.set(segment.index, done.coerceAtLeast(0L))
+                    var sum = 0L
+                    for (i in 0 until plan.segmentCount) sum += doneFrames.get(i)
+                    report((sum.toDouble() / expectedTotalFrames.toDouble()).coerceIn(0.0, 1.0).toFloat())
                 }
                 parts[segment.index] = part
             }
