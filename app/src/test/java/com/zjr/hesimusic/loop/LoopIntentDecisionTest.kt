@@ -13,8 +13,9 @@ import org.junit.Test
  * 语义来源:
  * - 进入:记录 repeat + shuffle 两个原值,播放层唯一写点强制 ONE/false;
  * - 切到别的歌 → 两个都恢复;
- * - 用户改 repeat → repeat 保留用户新值,只恢复 shuffle;
- * - 用户改 shuffle → shuffle 保留用户新值,只恢复 repeat;
+ * - 用户改 repeat → **不写任何模式**(repeat 保留用户新值,shuffle 保持 false);
+ * - 用户改 shuffle → shuffle 保留用户新值,repeat 恢复 prevRepeat,
+ *   且强制不变量 shuffle=true ⇒ repeat != ONE(prevRepeat==ONE 时改用 ALL);
  * - 进入前的值 == 当前值 → 对应字段为 null(不写,避免多余事件);
  * - 未武装 / 仍在武装歌 → 不退出。
  */
@@ -46,7 +47,7 @@ class LoopIntentDecisionTest {
         )
         assertNull(
             "未武装:repeat 事件不退出",
-            LoopIntentDecision.modeToRestoreOnRepeatChange(null, current = seamlessMode)
+            LoopIntentDecision.modeToRestoreOnRepeatChange(null)
         )
         assertNull(
             "未武装:shuffle 事件不退出",
@@ -185,25 +186,12 @@ class LoopIntentDecisionTest {
     }
 
     @Test
-    fun `用户改 repeat 退出时保留新 repeat 只恢复 shuffle`() {
+    fun `用户改 repeat 退出时不写任何模式(不恢复 shuffle)`() {
+        // 3 态按钮「单曲循环 → 列表循环」:用户刚选了列表循环,shuffle 必须保持 false。
+        // 若恢复 prevShuffle=true,显示会跳成「随机播放」,与用户刚按下的操作打架。
+        val restore = LoopIntentDecision.modeToRestoreOnRepeatChange(armed)
         assertEquals(
-            "repeat 保持用户新选的 ALL;shuffle 恢复进入前的 true",
-            LoopIntentDecision.ModeRestore(repeatMode = null, shuffleEnabled = true),
-            LoopIntentDecision.modeToRestoreOnRepeatChange(
-                armed,
-                current = LoopIntentDecision.Mode(Player.REPEAT_MODE_ALL, shuffleEnabled = false),
-            )
-        )
-    }
-
-    @Test
-    fun `用户改 repeat 时 shuffle 已等于进入前的值则不写`() {
-        val restore = LoopIntentDecision.modeToRestoreOnRepeatChange(
-            armed,
-            current = LoopIntentDecision.Mode(Player.REPEAT_MODE_OFF, shuffleEnabled = true),
-        )
-        assertEquals(
-            "shuffle 已是 true → 无需写",
+            "两个字段都不写:repeat 保留用户新值,shuffle 保持 false",
             LoopIntentDecision.ModeRestore(repeatMode = null, shuffleEnabled = null),
             restore
         )
@@ -257,6 +245,43 @@ class LoopIntentDecisionTest {
                 armed,
                 current = LoopIntentDecision.Mode(Player.REPEAT_MODE_ONE, shuffleEnabled = true),
             )
+        )
+    }
+
+    @Test
+    fun `用户开 shuffle 且 prevRepeat==ONE 时按不变量置 ALL`() {
+        // 不变量:shuffle=true ⇒ repeat != ONE。prevRepeat 恰好是 ONE 时不能原样恢复。
+        val armedOne = LoopIntent.Armed(
+            songId = 1L,
+            previousRepeatMode = Player.REPEAT_MODE_ONE,
+            previousShuffleEnabled = false,
+        )
+        assertEquals(
+            "prevRepeat=ONE 且 shuffle=true → repeat 强制改为 ALL",
+            LoopIntentDecision.ModeRestore(repeatMode = Player.REPEAT_MODE_ALL, shuffleEnabled = null),
+            LoopIntentDecision.modeToRestoreOnShuffleChange(
+                armedOne,
+                current = LoopIntentDecision.Mode(Player.REPEAT_MODE_ONE, shuffleEnabled = true),
+            )
+        )
+    }
+
+    @Test
+    fun `用户关闭 shuffle 时不触发不变量强制`() {
+        // 用户把 shuffle 关掉时,repeat 恢复成 ONE 是合法的(shuffle=false)。
+        val armedOne = LoopIntent.Armed(
+            songId = 1L,
+            previousRepeatMode = Player.REPEAT_MODE_ONE,
+            previousShuffleEnabled = false,
+        )
+        val restore = LoopIntentDecision.modeToRestoreOnShuffleChange(
+            armedOne,
+            current = LoopIntentDecision.Mode(Player.REPEAT_MODE_ALL, shuffleEnabled = false),
+        )
+        assertEquals(
+            "shuffle=false 时 repeat 恢复 prevRepeat=ONE",
+            LoopIntentDecision.ModeRestore(repeatMode = Player.REPEAT_MODE_ONE, shuffleEnabled = null),
+            restore
         )
     }
 

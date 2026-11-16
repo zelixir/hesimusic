@@ -864,11 +864,40 @@ class LoopAudioSinkTest {
                 },
             )
             val endLine = lines.last { it.contains("\"ev\":\"end\"") }
-            assertTrue("end 应带 degradeCount=1", endLine.contains("\"degradeCount\":1"))
+            assertTrue("end 应带 degradeCount=0（直接注入事件不改引擎计数）", endLine.contains("\"degradeCount\":0"))
         } finally {
             file.delete()
             sidecar.delete()
         }
+    }
+
+    @Test
+    fun `pendingReplay 连续零消费时自愈不冻结`() {
+        val (controller, sink, fake) = rig()
+        val w = window(100, 200)
+        assertTrue(
+            controller.seedRing(
+                w,
+                PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(100, 100)),
+                PcmTestSupport.SAMPLE_RATE,
+                1,
+            ).isInstalled,
+        )
+        // delegate 永远消费 0 帧：制造 pendingReplay=true / lastPump=0 的死锁
+        fake.maxFramesPerCall = 0
+        sink.playToEndOfStream()
+        assertTrue(controller.isReplaying)
+
+        repeat(25) { sink.isEnded() }
+
+        assertFalse("零消费必须自愈退出 REPLAYING", controller.isReplaying)
+        assertTrue("应记一次自愈", controller.engine.replaySelfHealCount >= 1L)
+
+        // 恢复 delegate 后必须还能继续输出
+        fake.maxFramesPerCall = Int.MAX_VALUE
+        val before = fake.feeds.size
+        assertTrue(sink.handleBuffer(PcmTestSupport.pcm16Buffer(100, 10), 100_000L, 1))
+        assertTrue("自愈后必须恢复输出", fake.feeds.size > before)
     }
 
     @Test

@@ -32,8 +32,9 @@ import javax.inject.Singleton
  *
  * 1. **显式意图的进入/退出**（[applyIntentMode]）：arm 后同时应用 repeat=ONE 且
  *    shuffle=false（唯一写点，保证「显示单曲循环」与实际一致）；切到别的歌 → 清意图 +
- *    恢复 prevRepeat/prevShuffle；用户改 repeat 或 shuffle → 清意图（被改的属性保留用户新值，
- *    另一个恢复进入前的值）。这是引擎唯一会写这两个属性的地方；
+ *    恢复 prevRepeat/prevShuffle；用户改 repeat → 只清意图（用户刚选的模式原样保留，
+ *    不写 shuffle）；用户改 shuffle → 清意图 + repeat 恢复 prevRepeat，且强制不变量
+ *    `shuffle=true ⇒ repeat != ONE`。这是引擎唯一会写这两个属性的地方；
  * 2. 查行（[SongLoopDao.getBySongId]）；
  * 3. 预判资格只为先写整曲时长（[LoopAudioController.fullDurationUs]）；
  * 4. [LoopRuntime.refresh] 重算窗口（纯函数、幂等、唯一窗口来源；显式意图是输入之一）；
@@ -161,10 +162,11 @@ class LoopPlaybackCoordinator @Inject constructor(
      *
      * **退出（三条规则，全部集中在这里）**：
      * - 切到别的歌（reason=transition 且目标歌 != 武装歌，含 null）→ 两个属性都恢复 prev；
-     * - 用户把 repeat 改成非 ONE（reason=repeat，且偏好已写成新值）→ repeat 保留用户新值，
-     *   只恢复 prevShuffle；
+     * - 用户把 repeat 改成非 ONE（reason=repeat，且偏好已写成新值）→ 只清意图，
+     *   **不写任何模式**（用户刚选的 repeat 原样保留，shuffle 保持 false，不与用户操作打架）；
      * - 用户改 shuffle（reason=shuffle，且偏好已写成新值）→ shuffle 保留用户新值，
-     *   只恢复 prevRepeat。
+     *   repeat 恢复 prevRepeat；若 prevRepeat == ONE 且用户打开了 shuffle，按不变量
+     *   `shuffle=true ⇒ repeat != ONE` 改写成 REPEAT_MODE_ALL 并打日志。
      * 用「持久化偏好 == 新值」区分「用户手动改」与「内部写入」（无缝进入、退出恢复、
      * 队列临时改写都不写偏好），避免把自己触发的回调当成用户操作。
      *
@@ -195,7 +197,7 @@ class LoopPlaybackCoordinator @Inject constructor(
                 LoopIntentDecision.shouldClearOnRepeatChange(
                     armed, repeatMode, playbackPreferences.getRepeatMode(),
                 ) ->
-                LoopIntentDecision.modeToRestoreOnRepeatChange(armed, current)
+                LoopIntentDecision.modeToRestoreOnRepeatChange(armed)
 
             reason == REASON_SHUFFLE &&
                 LoopIntentDecision.shouldClearOnShuffleChange(
@@ -218,6 +220,18 @@ class LoopPlaybackCoordinator @Inject constructor(
             }
             restore.repeatMode?.let { playbackPreferences.saveRepeatMode(it) }
             restore.shuffleEnabled?.let { playbackPreferences.saveShuffleModeEnabled(it) }
+            if (reason == REASON_SHUFFLE &&
+                armed.previousRepeatMode == Player.REPEAT_MODE_ONE &&
+                target.repeatMode == Player.REPEAT_MODE_ALL
+            ) {
+                // 不变量强制:用户打开了 shuffle,而进入前的 repeat 恰好是 ONE。
+                // shuffle=true ⇒ repeat != ONE,否则 UI 会同时显示「随机」与「单曲」。
+                Log.i(
+                    TAG,
+                    "loop intent exit: shuffle-on invariant prevRepeat=ONE -> ALL " +
+                        "(shuffle=true => repeat != ONE)",
+                )
+            }
             Log.i(
                 TAG,
                 "loop intent exit: reason=" + reason + " songId=" + songId +

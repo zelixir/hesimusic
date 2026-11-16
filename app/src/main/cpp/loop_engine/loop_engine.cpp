@@ -527,7 +527,7 @@ void powerDbColMax(const std::vector<float>& sWeighed, int T, std::vector<double
         parallelForRange(0, int64_t(sWeighed.size()), [&](int64_t lo, int64_t hi, int shard) {
             double local = -std::numeric_limits<double>::infinity();
             for (int64_t i = lo; i < hi; i++)
-                local = std::max(local, 10.0 * std::log10(std::max(1e-10, double(sWeighed[size_t(i)])))) ;
+                local = std::max(local, 10.0 * std::log10(std::max(1e-10, double(sWeighed[size_t(i)]))));
             part[size_t(shard)] = local;
         });
         for (double v : part) gmaxLog = std::max(gmaxLog, v);
@@ -674,7 +674,7 @@ void plpPulse(const std::vector<double>& env, int sr, std::vector<double>& pulse
     // v7 §10.4-3: IFFT runs in parallel per chunk, but the overlap-add itself
     // stays serial in ascending frame order, so every pulse[n] receives its
     // contributions in exactly the same order as before (bitwise identical).
-    const int kIstftChunk = 512;
+    const int kIstftChunk = 1024;
     std::vector<double> chunkRecon(size_t(kIstftChunk) * size_t(W));
     for (int c0 = startFrame; c0 < nFrames; c0 += kIstftChunk) {
         const int c1 = std::min(nFrames, c0 + kIstftChunk);
@@ -753,7 +753,7 @@ double estimateTempo(const std::vector<double>& oenv, int sr, std::vector<double
     // accumulation stays serial in ascending t, so the summation order and the
     // resulting bits are unchanged. Only lags < win are used downstream, so the
     // chunk buffer stores just those.
-    const int kTempoChunk = 128;
+    const int kTempoChunk = 1024;
     std::vector<double> chunkAc(size_t(kTempoChunk) * size_t(win), 0.0);
     std::vector<double> chunkLen(size_t(kTempoChunk), 0.0);
     for (int c0 = 0; c0 < N; c0 += kTempoChunk) {

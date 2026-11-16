@@ -330,6 +330,8 @@ class LoopAudioSink(
     }
 
     override fun handleDiscontinuity() {
+        // delegate 已被告知时间戳不连续：允许后续重放从更早的位置重新开始。
+        lastDelegatePtsUs = Long.MIN_VALUE
         engine.onInputDiscontinuity()
         super.handleDiscontinuity()
     }
@@ -504,7 +506,9 @@ class LoopAudioSink(
             }
             engine.onReplayFailure()
             pendingReplay = null
-            throw t
+            // 不把重放写异常抛给 renderer：退出重放后让下一段源输入继续，
+            // 避免一次坏 PTS 把整个音频 renderer 打死。
+            return false
         }
         val consumed = bb.position() - before
         if (consumed > 0) {

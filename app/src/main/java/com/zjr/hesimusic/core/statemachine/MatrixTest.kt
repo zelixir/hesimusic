@@ -89,8 +89,8 @@ class MatrixTest<S : SmState, E : SmEvent, F : SmEffect>(
                             if (!allowed) {
                                 problems += "allowed=false，但 reducer 返回了 Applied：未声明的组合必须 Rejected 且保持 state 实例不变"
                             }
-                            if (spec.states.none { it == transition.state }) {
-                                problems += "Applied 落出合法状态域：${transition.state} 不在 states 中（矩阵遗漏了一个状态？）"
+                            if (spec.states.none { it::class == transition.state::class }) {
+                                problems += "Applied 落出合法状态域：${transition.state}（类型 ${transition.state::class.simpleName}）不在 states 中（矩阵遗漏了一个状态？）"
                             }
                             problems += invariantProblems(transition.state)
                             if (spec.effectTypes.isNotEmpty()) {
@@ -128,9 +128,9 @@ class MatrixTest<S : SmState, E : SmEvent, F : SmEffect>(
             }
         }
 
-        val cellFailures = cells.flatMap { cell ->
+        val cellFailures: List<MatrixFailure<S, E, F>> = cells.flatMap { cell ->
             cell.problems.map { problem ->
-                MatrixFailure(
+                MatrixFailure<S, E, F>(
                     rowIndex = cell.rowIndex,
                     columnIndex = cell.columnIndex,
                     stateKey = cell.stateKey,
