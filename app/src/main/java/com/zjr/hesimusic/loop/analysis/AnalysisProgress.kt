@@ -52,7 +52,7 @@ object AnalysisProgress {
     const val DEFAULT_ALPHA = 0.25f
 
     /** 单次更新允许的最大进度台阶(阶段切换与 DONE 也在内)。 */
-    const val MAX_STEP = 0.04f
+    const val MAX_STEP = 0.05f
 
     /**
      * 只计算**未平滑**的工作量目标(供落库/心跳逻辑复用),返回值 ∈ [0,1]。

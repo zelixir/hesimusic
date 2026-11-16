@@ -26,7 +26,7 @@ import kotlin.math.roundToLong
  * 分析状态机(契约 docs/loop-v3-plan.md §3.1 / docs/loop-seamless-v2.md §1.2)。
  *
  * 进度口径(issue 00018):**已完成工作量 / 预计总工作量**,解码/分析按实测时间比例加权,
- * 单调 + EMA 平滑(见 [AnalysisProgress]);每 100ms 最多上报一次。
+ * 单调 + EMA 平滑(见 [AnalysisProgress] / [AnalysisProgressTracker]);每 100ms 最多上报一次。
  */
 sealed interface AnalysisState {
     data object Idle : AnalysisState
@@ -96,11 +96,20 @@ class LoopAnalysisManager @Inject constructor(
         var heartbeat: Job? = null
         try {
             cancelRequested = false
-            val tracker = ProgressTracker(song.duration)
+            val tracker = AnalysisProgressTracker(song.duration) { phase, progress ->
+                _state.value = when (phase) {
+                    AnalysisProgress.Phase.STARTING,
+                    AnalysisProgress.Phase.DECODING -> AnalysisState.Decoding(progress)
+
+                    AnalysisProgress.Phase.ANALYZING,
+                    AnalysisProgress.Phase.FINALIZING,
+                    AnalysisProgress.Phase.DONE -> AnalysisState.Analyzing(progress)
+                }
+            }
             tracker.start()
             heartbeat = CoroutineScope(coroutineContext + Dispatchers.Default).launch {
                 while (isActive) {
-                    delay(PROGRESS_UPDATE_INTERVAL_MS)
+                    delay(AnalysisProgressTracker.UPDATE_INTERVAL_MS)
                     tracker.heartbeat()
                 }
             }
@@ -192,7 +201,7 @@ class LoopAnalysisManager @Inject constructor(
                 analyzeMs = peaksMs + analyzeMs,
             )
 
-            // 收尾(解析候选/落库)只走最后 5%,进度停在 0.95 等 Done。
+            // 收尾(解析候选/落库)只走最后 5%;台阶由 100ms 心跳逐步补齐到 0.95。
             tracker.onFinalizing()
 
             val candidates = LoopCandidates.parse(flat)
@@ -228,13 +237,13 @@ class LoopAnalysisManager @Inject constructor(
                 Log.w(TAG, "temporary result save failed", e)
             }
 
-            // 收尾必须**走台阶到 1.0**,不能从 0.7x 直接跳到 100%(issue 00018 真机实测 0.79 -> 1.00)。
-            // 心跳依赖采集循环是否还在跑,这里改为在完成路径里自己按 MAX_STEP 推,
-            // 最多等 PROGRESS_FINALIZE_MAX_WAIT_MS(每步 100ms)。
+            // 收尾进度停在 0.95;若上报值还没跟上,最多等 budget 个 100ms 心跳补齐,
+            // 保证 Done 的 1.0 只比它高一个 MAX_STEP(见 issue 00018 的真机指标)。
+            val settleBudgetMs = tracker.finalizeWaitBudgetMs()
             var settleWaitedMs = 0L
-            while (!tracker.rampToDone() && settleWaitedMs < PROGRESS_FINALIZE_MAX_WAIT_MS) {
-                delay(PROGRESS_UPDATE_INTERVAL_MS)
-                settleWaitedMs += PROGRESS_UPDATE_INTERVAL_MS
+            while (!tracker.finalizingSettled() && settleWaitedMs < settleBudgetMs) {
+                delay(AnalysisProgressTracker.UPDATE_INTERVAL_MS)
+                settleWaitedMs += AnalysisProgressTracker.UPDATE_INTERVAL_MS
             }
             // 让 0.95 至少存活一个采样周期,收尾的 0.95 → 1.0 才能被观测成两次更新。
             if (tracker.finalizingSettled()) delay(PROGRESS_FINALIZE_HOLD_MS)
@@ -251,231 +260,6 @@ class LoopAnalysisManager @Inject constructor(
             heartbeat?.cancel()
             analyzeMutex.unlock()
         }
-    }
-
-    /**
-     * 单次分析的进度跟踪器(issue 00018)。
-     *
-     * - 工作单位:解码帧 / 分析块;解码/分析回调只给 fraction,这里按标称总量还原成工作量
-     *   (比例不变,避免为了拿帧号去改解码器/JNI 契约);
-     * - 预算:解码/分析按 [AnalysisTiming] 最近一次同档位实测比例加权(默认 0.66/0.34);
-     * - 输出:单调 + EMA 平滑 + 台阶上限(见 [AnalysisProgress.compute]);
-     * - 节流:常规更新 ≤10Hz(100ms),阶段切换/收尾强制立即上报;
-     * - 心跳:工作回调空档(或进度已追平工作量目标)时按 [PROGRESS_CREEP_STEP] 微步推进,
-     *   避免解码预热/引擎粗粒度回调造成 >1s 完全静止。
-     */
-    private inner class ProgressTracker(durationMs: Long) {
-
-        private val decodeWeight = AnalysisTiming.decodeWeightFor(durationMs)
-
-        /** 预计总帧:时长已知时按 44.1kHz 估算(只影响归一化比例),未知时用标称工作量。 */
-        private var totalFrames: Long = if (durationMs > 0L) {
-            durationMs * NOMINAL_SAMPLE_RATE / 1000L
-        } else {
-            NOMINAL_WORK_UNITS
-        }
-
-        private var phase = AnalysisProgress.Phase.STARTING
-        private var smoothed = 0f
-        private var lastWorkTarget = 0f
-        private var lastWorkMs = 0L
-        private var lastEmitMs = 0L
-        private var lastEmitted = -1f
-        private var finished = false
-
-        @Synchronized
-        fun start() {
-            lastWorkMs = System.currentTimeMillis()
-            update(
-                phase = AnalysisProgress.Phase.STARTING,
-                decodedFrames = 0L,
-                analyzedBlocks = 0L,
-                force = true,
-            )
-        }
-
-        @Synchronized
-        fun onDecode(fraction: Float) {
-            lastWorkMs = System.currentTimeMillis()
-            update(
-                phase = AnalysisProgress.Phase.DECODING,
-                decodedFrames = (sanitizeFraction(fraction) * totalFrames).roundToLong(),
-                analyzedBlocks = 0L,
-                force = false,
-            )
-        }
-
-        /** 解码完成:用真实帧数替换估算总量,并立即上报分析起点。 */
-        @Synchronized
-        fun onDecodeComplete(frames: Long) {
-            if (frames > 0L) totalFrames = frames
-            lastWorkMs = System.currentTimeMillis()
-            update(
-                phase = AnalysisProgress.Phase.ANALYZING,
-                decodedFrames = totalFrames,
-                analyzedBlocks = 0L,
-                force = true,
-            )
-        }
-
-        @Synchronized
-        fun onAnalyze(fraction: Float) {
-            lastWorkMs = System.currentTimeMillis()
-            update(
-                phase = AnalysisProgress.Phase.ANALYZING,
-                decodedFrames = totalFrames,
-                analyzedBlocks = (sanitizeFraction(fraction) * PROGRESS_BLOCKS).roundToLong(),
-                force = false,
-            )
-        }
-
-        /**
-         * 进入收尾段:只切换阶段,不在这里迈台阶。
-         *
-         * 引擎最后几次回调可能和收尾落在同一个 100ms 采样窗口里;若这里再推一步,
-         * 外部 100ms 采样会看到「最后回调 + 收尾」叠加成一个大台阶。台阶统一交给
-         * [heartbeat] 按 100ms 节拍推进(0.95 之前每次 +[AnalysisProgress.MAX_STEP])。
-         */
-        @Synchronized
-        fun onFinalizing() {
-            if (finished) return
-            phase = AnalysisProgress.Phase.FINALIZING
-            lastWorkTarget = AnalysisProgress.WORK_END
-            lastWorkMs = System.currentTimeMillis()
-        }
-
-        /**
-         * 心跳:
-         * - 收尾段:按 [AnalysisProgress.MAX_STEP] 逐步逼近 [AnalysisProgress.WORK_END],
-         *   让最后一次 0.95 → 1.0 的台阶只剩 [AnalysisProgress.MAX_STEP];
-         * - 其他阶段:工作回调空档 ≥ [PROGRESS_STALL_FILL_AFTER_MS],或进度已经追平/超过工作量目标
-         *   (例如并行解码失败后回退单线程、进度不再前进)时,做一次极小步进,保证持续可见。
-         */
-        @Synchronized
-        fun heartbeat() {
-            if (finished) return
-            val now = System.currentTimeMillis()
-            if (phase == AnalysisProgress.Phase.FINALIZING) {
-                // 心跳本身就是 100ms 节拍,收尾段不再叠加节流(尽快补齐到 0.95)。
-                if (lastEmitted >= AnalysisProgress.WORK_END - EMIT_EPSILON) return
-                smoothed = minOf(AnalysisProgress.WORK_END, smoothed + AnalysisProgress.MAX_STEP)
-                emit()
-                return
-            }
-            if (now - lastEmitMs < PROGRESS_UPDATE_INTERVAL_MS) return
-            val stalled = now - lastWorkMs >= PROGRESS_STALL_FILL_AFTER_MS
-            val aheadOfWork = smoothed > lastWorkTarget
-            if (!stalled && !aheadOfWork) return
-            val next = minOf(AnalysisProgress.WORK_END, smoothed + PROGRESS_CREEP_STEP)
-            if (next <= smoothed) return
-            smoothed = next
-            emit()
-        }
-
-        /** 收尾是否**已上报**到 0.95(内部值到 0.95 但还没发出去不算)。 */
-        @Synchronized
-        fun finalizingSettled(): Boolean =
-            phase == AnalysisProgress.Phase.FINALIZING && lastEmitted >= AnalysisProgress.WORK_END - EMIT_EPSILON
-
-        /**
-         * 把进度按 [AnalysisProgress.MAX_STEP] 推到 1.0 并上报;到达后返回 true。
-         *
-         * 完成路径用它代替"直接 finish() 置 1",避免最后一次出现 0.2 级别的跳变。
-         */
-        @Synchronized
-        fun rampToDone(): Boolean {
-            if (finished) return true
-            if (smoothed >= 1f) {
-                finished = true
-                return true
-            }
-            smoothed = minOf(1f, smoothed + AnalysisProgress.MAX_STEP)
-            phase = AnalysisProgress.Phase.FINALIZING
-            emit()
-            if (smoothed >= 1f) finished = true
-            return smoothed >= 1f
-        }
-
-        /**
-         * 分析成功:按 DONE 台阶再推进一步(通常 0.95 → 0.99),随后由状态机发 Done(1.0)。
-         * 下一次 Done 状态本身是终态,不再产生进度回调。
-         */
-        @Synchronized
-        fun finish() {
-            if (finished) return
-            smoothed = AnalysisProgress.compute(
-                phase = AnalysisProgress.Phase.DONE,
-                decodedFrames = totalFrames,
-                totalFrames = totalFrames,
-                analyzedBlocks = PROGRESS_BLOCKS,
-                totalBlocks = PROGRESS_BLOCKS,
-                smoothedPrev = smoothed,
-                decodeWeight = decodeWeight,
-                analyzeWeight = 1f - decodeWeight,
-            )
-            if (smoothed > lastEmitted + EMIT_EPSILON) emit()
-            finished = true
-        }
-
-        private fun update(
-            phase: AnalysisProgress.Phase,
-            decodedFrames: Long,
-            analyzedBlocks: Long,
-            force: Boolean,
-        ) {
-            if (finished) return
-            this.phase = phase
-            val analyzeWeight = 1f - decodeWeight
-            lastWorkTarget = AnalysisProgress.workTarget(
-                phase = phase,
-                decodedFrames = decodedFrames,
-                totalFrames = totalFrames,
-                analyzedBlocks = analyzedBlocks,
-                totalBlocks = PROGRESS_BLOCKS,
-                decodeWeight = decodeWeight,
-                analyzeWeight = analyzeWeight,
-            )
-            smoothed = AnalysisProgress.compute(
-                phase = phase,
-                decodedFrames = decodedFrames,
-                totalFrames = totalFrames,
-                analyzedBlocks = analyzedBlocks,
-                totalBlocks = PROGRESS_BLOCKS,
-                smoothedPrev = smoothed,
-                decodeWeight = decodeWeight,
-                analyzeWeight = analyzeWeight,
-            )
-            if (!force) {
-                val now = System.currentTimeMillis()
-                if (now - lastEmitMs < PROGRESS_UPDATE_INTERVAL_MS) return
-                if (smoothed <= lastEmitted + EMIT_EPSILON) return
-            }
-            emit()
-        }
-
-        private fun emit() {
-            // 台阶上限作用在**真正上报的值**上:被节流吞掉的更新会在下一次上报时累积,
-            // 若只约束内部值,外部 100ms 采样仍可能一次看到两个台阶叠加。
-            val reported = if (lastEmitted < 0f) {
-                smoothed
-            } else {
-                minOf(smoothed, lastEmitted + AnalysisProgress.MAX_STEP)
-            }
-            lastEmitMs = System.currentTimeMillis()
-            lastEmitted = reported
-            _state.value = when (phase) {
-                AnalysisProgress.Phase.STARTING,
-                AnalysisProgress.Phase.DECODING -> AnalysisState.Decoding(reported)
-
-                AnalysisProgress.Phase.ANALYZING,
-                AnalysisProgress.Phase.FINALIZING -> AnalysisState.Analyzing(reported)
-
-                AnalysisProgress.Phase.DONE -> AnalysisState.Analyzing(1f)
-            }
-        }
-
-        private fun sanitizeFraction(fraction: Float): Float =
-            if (fraction.isNaN()) 0f else fraction.coerceIn(0f, 1f)
     }
 
     /**
@@ -582,31 +366,7 @@ class LoopAnalysisManager @Inject constructor(
 
         const val DEFAULT_MAX_CANDIDATES = 10
 
-        /** 常规进度上报间隔(≤10Hz)。 */
-        const val PROGRESS_UPDATE_INTERVAL_MS = 100L
-
-        /** 工作回调空档超过该值 → 心跳微步,避免 >1s 完全静止。 */
-        const val PROGRESS_STALL_FILL_AFTER_MS = 250L
-
-        /** 心跳微步(每次 100ms tick 最多推进 0.2%)。 */
-        const val PROGRESS_CREEP_STEP = 0.002f
-
-        /** 收尾进度还没到 0.95 时,Done 前最多等这么久(每个 100ms tick 推进一个 MAX_STEP)。 */
-        const val PROGRESS_FINALIZE_MAX_WAIT_MS = 1_200L
-
-        /** 到达 0.95 后保持一小段时间,保证 0.95 → 1.0 能被 100ms 采样看到两次。 */
+        /** 到达 0.95 后保持一小段时间,保证 0.95 → 1.0 能被采样看到两次。 */
         const val PROGRESS_FINALIZE_HOLD_MS = 150L
-
-        /** 低于该增量不重复上报。 */
-        const val EMIT_EPSILON = 1e-4f
-
-        /** 分析块标称总量(引擎只给 fraction,这里归一化成块数)。 */
-        const val PROGRESS_BLOCKS = 1_000L
-
-        /** 时长未知时的标称总帧数(只影响归一化比例)。 */
-        const val NOMINAL_WORK_UNITS = 1_000_000L
-
-        /** 解码帧数估算用标称采样率。 */
-        const val NOMINAL_SAMPLE_RATE = 44_100
     }
 }

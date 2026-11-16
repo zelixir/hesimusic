@@ -35,33 +35,25 @@ class AnalysisProgressTest {
     @Test
     fun `收尾停在百分之九十五且结束分步走台阶到一`() {
         // 收尾按 MAX_STEP 逐步逼近 0.95(不会一次从 0.9 跳到 1.0)。
-        var finalizing = progress(
+        val finalizing = progress(
             AnalysisProgress.Phase.FINALIZING,
             decoded = TOTAL_FRAMES,
             blocks = TOTAL_BLOCKS,
             prev = 0.90f,
         )
-        assertEquals(0.94f, finalizing, 1e-6f)
-        repeat(4) {
-            finalizing = progress(
-                AnalysisProgress.Phase.FINALIZING,
-                decoded = TOTAL_FRAMES,
-                blocks = TOTAL_BLOCKS,
-                prev = finalizing,
-            )
-        }
-        assertEquals(AnalysisProgress.WORK_END, finalizing, 1e-6f)
+        assertEquals(0.95f, finalizing, 1e-6f)
 
-        // DONE 也受 MAX_STEP 约束:0.95 → 0.99 → 1.0(两次更新),而不是直接 1.0。
-        val nearlyDone = progress(AnalysisProgress.Phase.DONE, prev = finalizing)
+        // DONE 也受 MAX_STEP 约束:0.95 → 1.0 是最后一个台阶。
+        val done = progress(AnalysisProgress.Phase.DONE, prev = finalizing)
+        assertEquals(1f, done, 0f)
+        assertEquals(AnalysisProgress.MAX_STEP, done - finalizing, 1e-6f)
+
+        // 从低位进入 DONE 也不会一次跳到底。
         assertEquals(
-            finalizing + AnalysisProgress.MAX_STEP,
-            nearlyDone,
+            AnalysisProgress.MAX_STEP,
+            progress(AnalysisProgress.Phase.DONE, prev = 0f),
             1e-6f,
         )
-        val done = progress(AnalysisProgress.Phase.DONE, prev = nearlyDone)
-        assertEquals(1f, done, 0f)
-        assertTrue(done - finalizing <= AnalysisProgress.MAX_STEP * 2 + 1e-6f)
     }
 
     // -----------------------------------------------------------------------
