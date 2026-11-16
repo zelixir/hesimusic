@@ -172,6 +172,102 @@ class LoopCandidateRestoreTest {
     }
 
     @Test
+    fun `差1样本仍命中_不插入合成候选`() {
+        val candidates = tenCandidates()
+        val target = candidates[4]
+        val restored = LoopCandidateRestore.fromRow(
+            row(
+                // 落库链路是 采样点 → ms 夹取 → 反推采样点,真机会差 1~2 个样本(231787ms vs 231786ms)。
+                startSamples = target.startSamples + 1L,
+                endSamples = target.endSamples - 1L,
+                candidatesJson = LoopCandidatesJson.encode(candidates),
+            ),
+        )
+
+        assertFalse("1 个样本的取整误差不得被当成「用户拖过」", restored.splicedSavedWindow)
+        assertEquals("候选数必须保持 10(真机复验点)", 10, restored.candidates.size)
+        assertEquals("必须命中第 4 个候选", 4, restored.selectedIndex)
+        assertEquals("列表顺序不变", candidates, restored.candidates)
+    }
+
+    @Test
+    fun `容差边界_1ms内命中_超过1ms不命中`() {
+        val candidates = tenCandidates()
+        val target = candidates[2]
+        val json = LoopCandidatesJson.encode(candidates)
+        // 44.1kHz:44 样本 = 0.998ms(≤1ms 命中);45 样本 = 1.020ms(>1ms 不命中)。
+        val hitDelta = 44L
+        val missDelta = 45L
+
+        val withinTolerance = LoopCandidateRestore.fromRow(
+            row(
+                startSamples = target.startSamples + hitDelta,
+                endSamples = target.endSamples - hitDelta,
+                candidatesJson = json,
+            ),
+        )
+        assertFalse("0.998ms 在容差内,必须判命中、不插入", withinTolerance.splicedSavedWindow)
+        assertEquals(10, withinTolerance.candidates.size)
+        assertEquals(2, withinTolerance.selectedIndex)
+
+        val beyondTolerance = LoopCandidateRestore.fromRow(
+            row(
+                startSamples = target.startSamples + missDelta,
+                endSamples = target.endSamples,
+                candidatesJson = json,
+            ),
+        )
+        assertTrue("1.02ms 超出容差,必须当作改动过的窗口", beyondTolerance.splicedSavedWindow)
+        assertEquals(11, beyondTolerance.candidates.size)
+        assertEquals(0, beyondTolerance.selectedIndex)
+    }
+
+    @Test
+    fun `真机复现_保存窗口比候选晚1毫秒_仍命中不插入`() {
+        // 真机:候选 0 的 loopEndMs=231786,保存后行内 loopEndMs=231787(差 1ms → 44.1kHz 下约 44 样本)。
+        val candidates = tenCandidates()
+        val target = candidates[0]
+        val oneMsInSamples = 44L
+        val restored = LoopCandidateRestore.fromRow(
+            row(
+                startSamples = target.startSamples + oneMsInSamples,
+                endSamples = target.endSamples + oneMsInSamples,
+                candidatesJson = LoopCandidatesJson.encode(candidates),
+            ),
+        )
+
+        assertFalse("1ms 取整误差必须判命中,否则真机又变「候选(11)」", restored.splicedSavedWindow)
+        assertEquals("候选数必须是 10(不是 11)", 10, restored.candidates.size)
+        assertEquals(0, restored.selectedIndex)
+        assertEquals(candidates, restored.candidates)
+    }
+
+    @Test
+    fun `差100样本不命中_插入合成候选`() {
+        val candidates = tenCandidates()
+        val target = candidates[6]
+        val savedStart = target.startSamples + 100L
+        val savedEnd = target.endSamples - 100L
+        val restored = LoopCandidateRestore.fromRow(
+            row(
+                startSamples = savedStart,
+                endSamples = savedEnd,
+                score = 0.61,
+                candidatesJson = LoopCandidatesJson.encode(candidates),
+            ),
+        )
+
+        assertTrue("100 个样本是真改动,必须插入合成候选", restored.splicedSavedWindow)
+        assertEquals(11, restored.candidates.size)
+        assertEquals(0, restored.selectedIndex)
+        assertEquals(
+            "合成候选就是保存窗口本身",
+            LoopCandidateKt(savedStart, savedEnd, 0.61, 0.12, 0.34),
+            restored.candidates.first(),
+        )
+    }
+
+    @Test
     fun `合成候选与_十候选恢复的边界_不重复插入`() {
         // 合成候选的下标 0 与行内窗口一致:再次恢复时必须命中,不再插入(候选数仍 11 → 命中 0)
         val saved = LoopCandidateKt(12_345L, 678_900L, 0.77, 0.05, 0.06)

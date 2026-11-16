@@ -387,7 +387,12 @@ class LoopAudioSink(
         val bDeltaFrame = seam.windowEndFrame - seam.deltaFrames
         val startFrame = usToFrameFloor(mediaPts)
         if (startFrame >= bDeltaFrame) {
-
+            seamLog(
+                "check src=" + mediaPts + " bDelta=" + frameToUsCeil(bDeltaFrame) +
+                    " state=" + seamState + " readyX=" + seam.isPrefixReady +
+                    " readyY=" + seam.isSuffixReady + " verified=" + seam.isVerified +
+                    " decision=ROUTE",
+            )
             if (!tryBeginSeam(seam, buffer, 0, minOf(frames.toLong(), seam.deltaFrames).toInt())) {
                 buffer.position(inputStart)
                 buffer.limit(originalLimit)
@@ -451,7 +456,7 @@ class LoopAudioSink(
             seamPrepared = seam.prepareSeamPrefix() && seam.prepareSeamSuffix()
         }
         if (!seamPrepared) {
-
+            seamLog("skip reason=PREPARE x=" + seam.isPrefixReady + " y=" + seam.isSuffixReady)
             return false
         }
         val live = ByteArray(maxOf(0, liveFrames) * bytesPerFrame)
@@ -461,8 +466,8 @@ class LoopAudioSink(
             dup.get(live, 0, live.size)
         }
         if (!seam.verifyLivePrefix(live, liveFrames)) {
-
             seamVerifyFailCount += 1L
+            seamLog("skip reason=VERIFY liveFrames=" + liveFrames)
             return false
         }
         if (!seam.beginSeam()) {
@@ -794,11 +799,27 @@ class LoopAudioSink(
             seamBuffer != null &&
             seamState != SeamRouteState.FALLBACK
 
+    private fun seamLog(message: String) {
+        if (controller.seamBufferMode != SeamBufferMode.ON ||
+            !controller.seamSinkRouteEnabled
+        ) {
+            return
+        }
+        try {
+            Log.d("LoopPerf", "seam " + message)
+        } catch (_: Throwable) {
+        }
+    }
+
     private fun refreshSeamRoute(window: com.zjr.hesimusic.loop.LoopWindow?) {
         if (!controller.seamActiveForWindow || window == null || sampleRate <= 0 ||
-            bytesPerFrame != 2 || bpfUnsupportedForSeam()
+            bytesPerFrame < 2
         ) {
-
+            seamLog(
+                "skip refresh active=" + controller.seamActiveForWindow +
+                    " window=" + (window != null) + " sr=" + sampleRate +
+                    " bpf=" + bytesPerFrame,
+            )
             seamBuffer = null
             pendingSeam = null
             seamState = SeamRouteState.FALLBACK
@@ -831,7 +852,11 @@ class LoopAudioSink(
         )
         buffer.beginCapture()
         seamPrepared = buffer.prepareSeamPrefix() && buffer.prepareSeamSuffix()
-
+        seamLog(
+            "refresh a=" + a + " b=" + b + " d=" + delta +
+                " prefix=" + buffer.isPrefixReady + " suffix=" + buffer.isSuffixReady +
+                " prepared=" + seamPrepared,
+        )
         seamBuffer = buffer
         pendingSeam = null
         seamSeekIssued = false
@@ -842,8 +867,6 @@ class LoopAudioSink(
         seamMaxGapFrames = 0L
         seamDiscontinuityCount = 0L
     }
-
-    private fun bpfUnsupportedForSeam(): Boolean = bytesPerFrame != 2
 
     private fun usToFrameCeil(us: Long): Long {
         val sr = sampleRate.toLong()

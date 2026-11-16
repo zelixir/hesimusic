@@ -12,6 +12,7 @@ import com.zjr.hesimusic.data.model.SongLoop
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.loop.LoopPosition
 import com.zjr.hesimusic.loop.LoopWindow
+import com.zjr.hesimusic.loop.audio.SeamBufferMode
 import com.zjr.hesimusic.loop.analysis.AnalysisState
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
 import com.zjr.hesimusic.loop.analysis.LoopCandidateKt
@@ -349,6 +350,7 @@ object LoopDebugServer {
             method == "POST" && segments == listOf("debug", "tap") -> handleDebugTap(body)
             method == "POST" && segments == listOf("debug", "reconnect") -> handleDebugReconnect()
             method == "POST" && segments == listOf("debug", "pcm-compare") -> handlePcmCompare(body)
+            method == "POST" && segments == listOf("debug", "seam") -> handleSeamToggle(body)
             else -> throw HttpError(404, "unknown endpoint: $method ${request.path}")
         }
     }
@@ -1254,6 +1256,29 @@ object LoopDebugServer {
             ParallelDecodeHooks.disableParallel = false
             ParallelDecodeHooks.segmentCountOverride = null
         }
+    }
+
+    /**
+     * POST /debug/seam {enable?: Boolean, route?: Boolean} —— 打开/关闭接缝拼接缓冲(issue 00017)。
+     *
+     * 两项都默认关闭(生产路径走 M3′);这里只用于真机验证。
+     * - enable: seamBufferMode = ON/OFF
+     * - route:  seamSinkRouteEnabled = true/false(真正把 PCM 路由切到 S)
+     */
+    @Suppress("UNUSED_PARAMETER")
+    private fun handleSeamToggle(body: JSONObject?): Map<String, Any?> {
+        val controller = deps().loopAudioController()
+        val enable = body?.optBoolean("enable", controller.seamBufferMode == SeamBufferMode.ON) ?: (controller.seamBufferMode == SeamBufferMode.ON)
+        val route = body?.optBoolean("route", controller.seamSinkRouteEnabled) ?: controller.seamSinkRouteEnabled
+        controller.seamBufferMode = if (enable) SeamBufferMode.ON else SeamBufferMode.OFF
+        controller.seamSinkRouteEnabled = route
+        Log.i(TAG, "debug/seam enable=" + enable + " route=" + route)
+        return linkedMapOf(
+            "seamBufferMode" to controller.seamBufferMode.name,
+            "seamSinkRouteEnabled" to controller.seamSinkRouteEnabled,
+            "windowEligible" to controller.seamWindowEligible,
+            "activeForWindow" to controller.seamActiveForWindow,
+        )
     }
 
     /** POST /debug/reconnect —— 显式丢弃当前 controller 并重建(最多等 2s)。 */

@@ -624,7 +624,17 @@ seedRingRange 在音频 sink 未 configure 时恒返回 PENDING;而 sink 只有�
 
 1. `candidatesJson` 为 null / 损坏 / 空数组 → 单候选 = 行内窗口,A/B = 行内窗口(改造前行为);
 2. 行内窗口(`loopStartSamples/loopEndSamples`)**命中**某候选 → 用落库列表,
-   `selectedCandidate` = 命中下标,列表不插入;
+   `selectedCandidate` = 命中下标,列表不插入。命中判定 = **≤2 样本 或 ≤1ms(任一满足)**:
+
+   | 容差 | 常量 | 作用 |
+   |---|---|---|
+   | ≤2 样本 | `MATCH_TOLERANCE_SAMPLES` | 吸收浮点/取整噪声(0.045ms @44.1kHz) |
+   | ≤1ms | `MATCH_TOLERANCE_MS` | 兜住「采样点 → 显示 ms(round) → 保存采样点(round)」链路的真实误差 |
+
+   为什么两个都要:该链路在 44.1kHz 下误差可达 **22 样本(0.5ms)**、48kHz 下 24 样本,远超 2 样本;
+   真机复现正是保存 231787ms vs 候选 231786ms(1ms = 44 样本)。只做 ±2 样本 → 真机仍是「候选(11)」。
+   1ms 远小于人手拖动精度(拖 B 一个像素就是几十 ms),不会吞掉真实调整;真正的窗口改动
+   (验收用例:差 100 样本 ≈ 2.27ms)仍判不命中并插入合成候选;
 3. 行内窗口**不命中**(用户拖过 A/B)→ 把行内窗口作为**第 0 个合成候选插入**(候选数 +1),
    `selectedCandidate` = 0,A/B = 保存窗口;合成候选的 score/noteDistance/loudnessDifference
    取行内已有值(即该窗口自己的分数),不造 0。
@@ -634,8 +644,9 @@ seedRingRange 在音频 sink 未 configure 时恒返回 PENDING;而 sink 只有�
 ### 14.3 单测
 
 - `LoopCandidatesJsonTest`:JSON 往返 / 10 候选顺序 / 损坏兜底 / 精度;
-- `LoopCandidateRestoreTest`:命中不插入、不命中插入合成候选(11 且 A/B=保存窗口)、legacy null、
-  空数组、二次恢复不重复插入;
+- `LoopCandidateRestoreTest`:命中不插入、差 1 样本仍命中、真机复现「保存比候选晚 1ms(44 样本)」
+  仍命中且候选数 10、容差边界 44 样本命中 / 45 样本不命中、差 100 样本不命中插入合成候选
+  (11 且 A/B=保存窗口)、legacy null、空数组、二次恢复不重复插入;
 - `AppDatabaseMigration9To10Test`:proxy 真实执行 `migrate()`,断言唯一 ADD COLUMN、无破坏性语句、
   与 Room 生成建表 SQL 逐字一致;
 - `SongLoopCandidatesPersistenceTest`:写 10 读回 10 且顺序一致、demote 不丢、Room 生成的

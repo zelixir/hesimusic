@@ -52,6 +52,10 @@ class LoopSeamSpliceBuffer(
     var seamVerifyFailCount: Long = 0L
         private set
 
+    val isPrefixReady: Boolean get() = capturedX
+    val isSuffixReady: Boolean get() = preparedY
+    val isVerified: Boolean get() = verified
+
     var lastOutputEndFrame: Long = Long.MIN_VALUE
         private set
 
