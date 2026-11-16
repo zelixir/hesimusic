@@ -187,6 +187,24 @@ class LoopAudioSinkTest {
         assertTrue("失败后源 PCM 必须继续写", fake.feeds.any { it.ptsUs >= 31_000_000L })
     }
 
+    @Test
+    fun `seam X Y 未就绪时跳过且不写 S`() {
+        val (controller, sink, _) = rig(window(0, 31_000))
+        controller.seamBufferMode = SeamBufferMode.ON
+        controller.seamSinkRouteEnabled = true
+        controller.seamDeltaUs = 1_000_000L
+        controller.seamDecodeRange = { _, _ -> null }
+        controller.seamSeekRequested = { }
+
+        var f = 0
+        while (f < 30_000) {
+            assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(f, 1000), f * 1000L))
+            f += 1000
+        }
+        assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(30_000, 1000), 30_000_000L))
+        assertTrue("未就绪不得切换: " + sink.seamDebugStats(), sink.seamDebugStats().contains("switch=0"))
+    }
+
     // ---------------------------------------------------------------- 捕获/切帧
 
     @Test

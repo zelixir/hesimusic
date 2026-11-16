@@ -67,15 +67,20 @@ enum class SnapshotPlaybackState {
  */
 fun project(viewModelSnapshot: PlayerSnapshot): PlayerPageState {
     val songId = viewModelSnapshot.songId
+    // 状态机的全局不变量：shuffle=true ⇒ repeat != ONE。真实播放器在“写 repeat=ONE、
+    // 再关 shuffle”的中间帧可能短暂出现该组合；投影按状态机的归一化口径（关 shuffle）
+    // 表示，避免投影本身非法、也避免把服务层的写序当成模型差异。
+    val repeat = viewModelSnapshot.repeat
+    val shuffle = viewModelSnapshot.shuffle && repeat != RepeatMode.ONE
     val seamless = viewModelSnapshot.seamlessIntent?.takeIf { intent ->
         songId != null &&
             intent.songId == songId &&
-            viewModelSnapshot.repeat == RepeatMode.ONE &&
-            !viewModelSnapshot.shuffle
+            repeat == RepeatMode.ONE &&
+            !shuffle
     }
     val mode = PlayMode(
-        repeat = viewModelSnapshot.repeat,
-        shuffle = viewModelSnapshot.shuffle,
+        repeat = repeat,
+        shuffle = shuffle,
         seamless = seamless,
     )
     val resume = if (viewModelSnapshot.isPlaying) ResumeTarget.PLAYING else ResumeTarget.PAUSED
@@ -286,18 +291,29 @@ class PlayerPageShadow(
         val effects = mutableListOf<PlayerPageEffect>()
         val nowMs = snapshot.nowMs
         val suppressed = nowMs < suppressComparisonUntilMs
+        var structuralChange = false
+
+        fun applyObserved(event: PlayerPageEvent, structural: Boolean = false) {
+            if (structural) structuralChange = true
+            apply(event, nowMs, effects)
+        }
 
         if (snapshot.songId == null) {
-            state = PlayerPageState.Idle
+            // 播放停止/清空：以投影为起点（通常是 Idle；带错误时可直接进入 Error），
+            // 不把“停止”当成一个未建模的 TrackChanged(0) 事件。
+            state = projected
+        } else if (state is PlayerPageState.Idle) {
+            // 首次装歌（或播放停止后重新装歌）：以投影为起点，不把“加载中”的瞬态
+            // 当成 TrackChanged 的语义差异。后续切歌仍走 TrackChanged。
+            state = projected
         } else {
             if (previous == null || snapshot.songId != previous.songId) {
-                apply(
+                applyObserved(
                     PlayerPageEvent.TrackChanged(
                         songId = snapshot.songId,
                         hasLoopIntent = snapshot.seamlessIntent != null,
                     ),
-                    nowMs,
-                    effects,
+                    structural = true,
                 )
             }
 
@@ -309,38 +325,40 @@ class PlayerPageShadow(
             // 进入无缝必须排在 repeat/shuffle 写入之前，才能记录“进入前”的原值。
             snapshot.seamlessIntent?.let { intent ->
                 if (PlayerPageReducer.modeOf(state)?.seamless == null) {
-                    apply(PlayerPageEvent.EnterSeamless(intent.songId), nowMs, effects)
+                    applyObserved(PlayerPageEvent.EnterSeamless(intent.songId), structural = true)
                 }
             }
 
             if (!endedNow && errorNow == null && previous != null && snapshot.isPlaying != previous.isPlaying) {
-                apply(
+                applyObserved(
                     if (snapshot.isPlaying) PlayerPageEvent.Play else PlayerPageEvent.Pause,
-                    nowMs,
-                    effects,
                 )
             }
 
-            if (previous != null && snapshot.repeat != previous.repeat) {
-                apply(PlayerPageEvent.SetRepeat(snapshot.repeat), nowMs, effects)
+            // 用与 project 相同的归一化口径喂模式事件，避免把播放器“先写 ONE 再关 shuffle”
+            // 的中间帧翻译成 shuffle=true（那会让模型再归一到 ALL）。
+            val targetRepeat = snapshot.repeat
+            val targetShuffle = snapshot.shuffle && snapshot.repeat != RepeatMode.ONE
+            if (previous != null && targetRepeat != previous.repeat) {
+                applyObserved(PlayerPageEvent.SetRepeat(targetRepeat), structural = true)
             }
-            if (previous != null && snapshot.shuffle != previous.shuffle) {
-                apply(PlayerPageEvent.SetShuffle(snapshot.shuffle), nowMs, effects)
+            if (previous != null && targetShuffle != (previous.shuffle && previous.repeat != RepeatMode.ONE)) {
+                applyObserved(PlayerPageEvent.SetShuffle(targetShuffle), structural = true)
             }
 
             // 模式事件已经先按用户语义退出无缝；若仍未退出（例如 debug clear），补一次退出。
             if (snapshot.seamlessIntent == null && PlayerPageReducer.modeOf(state)?.seamless != null) {
-                apply(PlayerPageEvent.ExitSeamless("loop-intent-cleared"), nowMs, effects)
+                applyObserved(PlayerPageEvent.ExitSeamless("loop-intent-cleared"), structural = true)
             }
 
             if (errorNow != null && errorNow != errorBefore) {
-                apply(PlayerPageEvent.PlaybackError(errorNow), nowMs, effects)
+                applyObserved(PlayerPageEvent.PlaybackError(errorNow))
             }
             if (endedNow && !endedBefore && state !is PlayerPageState.Error) {
-                apply(PlayerPageEvent.PlaybackEnded, nowMs, effects)
+                applyObserved(PlayerPageEvent.PlaybackEnded)
             }
             if (!suppressed && errorNow == null && !endedNow) {
-                apply(PlayerPageEvent.PositionTick(snapshot.positionMs.coerceAtLeast(0L)), nowMs, effects)
+                applyObserved(PlayerPageEvent.PositionTick(snapshot.positionMs.coerceAtLeast(0L)))
             }
         }
 
@@ -357,6 +375,18 @@ class PlayerPageShadow(
         }
 
         val mismatches = diff(projected, state)
+        if (mismatches.isNotEmpty() && structuralChange) {
+            // 切歌/进出无缝/模式写序的中间帧允许“结算一帧”：下一帧稳定观测再计入差异，
+            // 避免把服务层写序造成的瞬态误报成状态机 bug。持续差异仍会在下一帧被捕获。
+            suppressedObservationCount++
+            return finish(
+                expected = projected,
+                mismatches = emptyList(),
+                effects = effects,
+                suppressed = true,
+                observedAtMs = nowMs,
+            )
+        }
         return finish(projected, mismatches, effects, suppressed = false, observedAtMs = nowMs)
     }
 

@@ -133,6 +133,17 @@ class PlayerPageShadowTest {
     }
 
     @Test
+    fun projectNormalizesSingleLoopShuffleMidpoint() {
+        // 服务层写序可能是先 repeat=ONE 再 shuffle=false；中间帧投影必须仍满足不变量。
+        val projected = project(
+            snapshot(repeat = RepeatMode.ONE, shuffle = true),
+        ) as PlayerPageState.Playing
+        assertEquals(RepeatMode.ONE, projected.mode.repeat)
+        assertFalse(projected.mode.shuffle)
+        PlayerPageReducer.INVARIANTS.forEach { assertTrue(it.violation(projected) == null) }
+    }
+
+    @Test
     fun projectBufferingUsesIsPlayingSemantics() {
         // 当前模型没有 BufferStarted/BufferReady 事件；真实运行时按 isPlaying 近似。
         assertEquals(
@@ -343,6 +354,37 @@ class PlayerPageShadowTest {
         )
         assertEquals(PlayerPageState.Playing(1_000L, PlayMode(RepeatMode.ALL, false)), exited.model)
         assertTrue(exited.mismatches.joinToString("; "), exited.mismatches.isEmpty())
+        assertEquals(0L, shadow.mismatchCount)
+    }
+
+    @Test
+    fun shadowClearsToIdleWhenSongGone() {
+        val shadow = PlayerPageShadow()
+        shadow.observe(snapshot(positionMs = 1_000L, nowMs = 0L))
+
+        val observation = shadow.observe(
+            snapshot(songId = null, isPlaying = false, positionMs = 0L, playbackState = SnapshotPlaybackState.IDLE, nowMs = 1_000L),
+        )
+
+        assertEquals(PlayerPageState.Idle, observation.model)
+        assertTrue(observation.mismatches.joinToString("; "), observation.mismatches.isEmpty())
+    }
+
+    @Test
+    fun shadowNormalizesSingleLoopShuffleMidpointWithoutMismatch() {
+        val shadow = PlayerPageShadow()
+        shadow.observe(snapshot(repeat = RepeatMode.ALL, shuffle = false, positionMs = 1_000L, nowMs = 0L))
+
+        val midpoint = shadow.observe(
+            snapshot(repeat = RepeatMode.ONE, shuffle = true, positionMs = 1_000L, nowMs = 1_000L),
+        )
+        assertEquals(PlayerPageState.Playing(1_000L, PlayMode(RepeatMode.ONE, false)), midpoint.model)
+        assertTrue(midpoint.mismatches.joinToString("; "), midpoint.mismatches.isEmpty())
+
+        val settled = shadow.observe(
+            snapshot(repeat = RepeatMode.ONE, shuffle = false, positionMs = 1_100L, nowMs = 2_000L),
+        )
+        assertTrue(settled.mismatches.joinToString("; "), settled.mismatches.isEmpty())
         assertEquals(0L, shadow.mismatchCount)
     }
 

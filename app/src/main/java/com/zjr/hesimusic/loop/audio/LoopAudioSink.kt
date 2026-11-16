@@ -389,14 +389,25 @@ class LoopAudioSink(
 
         // NORMAL：只放行到 B-Δ；跨过边界就切 S。
         val bDeltaFrame = seam.windowEndFrame - seam.deltaFrames
+        val bDeltaUs = frameToUsCeil(bDeltaFrame)
         val startFrame = usToFrameFloor(mediaPts)
-        if (startFrame >= bDeltaFrame) {
+        if (mediaPts >= bDeltaUs - 500_000L) {
             seamLog(
-                "check src=" + mediaPts + " bDelta=" + frameToUsCeil(bDeltaFrame) +
-                    " state=" + seamState + " readyX=" + seam.isPrefixReady +
-                    " readyY=" + seam.isSuffixReady + " verified=" + seam.isVerified +
-                    " decision=ROUTE",
+                "check mediaPts=" + mediaPts + " startFrame=" + startFrame +
+                    " bFrame=" + seam.windowEndFrame + " bDeltaFrame=" + bDeltaFrame +
+                    " bDeltaUs=" + bDeltaUs + " prefix=" + seam.isPrefixReady +
+                    " suffix=" + seam.isSuffixReady +
+                    " decision=" + if (seam.isPrefixReady && seam.isSuffixReady) "ROUTE" else "SKIP_PREPARE",
             )
+        }
+        if (mediaPts >= bDeltaUs) {
+            if (!seam.isPrefixReady || !seam.isSuffixReady) {
+                buffer.position(inputStart)
+                buffer.limit(originalLimit)
+                seamState = SeamRouteState.FALLBACK
+                seamLog("skip reason=PREPARE mediaPts=" + mediaPts)
+                return false
+            }
             if (!tryBeginSeam(seam, buffer, 0, minOf(frames.toLong(), seam.deltaFrames).toInt())) {
                 buffer.position(inputStart)
                 buffer.limit(originalLimit)
@@ -596,8 +607,13 @@ class LoopAudioSink(
         val accepted = try {
             super.handleBuffer(buffer, mediaPtsUs + outputStreamOffsetUs, 1)
         } catch (t: Throwable) {
-            Log.w("LoopPerf", "seam source write failed pts=" + mediaPtsUs, t)
-            seamState = SeamRouteState.FALLBACK
+            try {
+                Log.w("LoopPerf", "seam source write failed pts=" + mediaPtsUs, t)
+            } catch (_: Throwable) {
+            }
+            seamBypass = true
+            seamState = SeamRouteState.NORMAL
+            seamLog("fallback reason=SOURCE_WRITE_FAIL pts=" + mediaPtsUs)
             return false
         }
         val after = buffer.position()
@@ -840,6 +856,8 @@ class LoopAudioSink(
             )
             seamBuffer = null
             pendingSeam = null
+            seamQueue.clear()
+            seamBypass = false
             seamState = SeamRouteState.FALLBACK
             return
         }
@@ -860,6 +878,8 @@ class LoopAudioSink(
             seamState = SeamRouteState.FALLBACK
             return
         }
+        seamQueue.clear()
+        seamBypass = false
         val buffer = LoopSeamSpliceBuffer(
             sampleRate = sampleRate,
             bytesPerFrame = bytesPerFrame,
