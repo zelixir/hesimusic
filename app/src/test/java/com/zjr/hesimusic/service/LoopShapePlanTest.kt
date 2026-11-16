@@ -78,37 +78,21 @@ class LoopShapePlanTest {
     // ---------------------------------------------------------------- 2. 进入/改 A/B 的预卷
 
     @Test
-    fun preRoll_whenEnteringInsideWindowWithIncompleteRing() {
-        // display 15s ∈ [A,B)，k = 0 → 本轮起点 A → 预卷 A - 250ms
-        val p = plan(target = window, applied = null, rawUs = 15_000_000L, ringCoveredFrames = 0L)
-        assertEquals(LoopShapePlan.Kind.PRE_ROLL, p.kind)
-        assertEquals(window, p.window)
-        assertEquals(9_750_000L, p.seekRawUs)
+    fun enter_neverSeeks_whenRingEmptyButPositionInsideWindow() {
+        // 历史行为:此时会预卷到 A-250ms(把用户拖到的位置拽回区段开始,issue 00001)。
+        // 新策略:只写窗口,位置由捕获/分片预填补齐,任何向后 seek 都不允许。
+        val inside = plan(target = window, applied = null, rawUs = 15_000_000L, ringCoveredFrames = 0L)
+        assertEquals(LoopShapePlan.Kind.ENTER, inside.kind)
+        assertEquals(window, inside.window)
+        assertNull("进入时即使在区间内且 ring 为空,也不得向后 seek", inside.seekRawUs)
         // 恰在 A
-        assertEquals(
-            9_750_000L,
-            plan(target = window, applied = null, rawUs = A, ringCoveredFrames = 0L).seekRawUs,
-        )
-    }
-
-    @Test
-    fun preRoll_keepsCurrentIteration() {
-        // 旧窗口 W（A=10,B=20）下 raw 45s → display 15s；新窗口 W2(5..30)，k = (45-5)/25 = 1
-        // → 正常映射 5 + 25 + (15-5) = 40s → 本轮起点 30s → 预卷 29.75s
-        val p = plan(target = widerWindow, applied = window, rawUs = 45_000_000L, ringCoveredFrames = 0L)
-        assertEquals(LoopShapePlan.Kind.PRE_ROLL, p.kind)
-        assertEquals(widerWindow, p.window)
-        assertEquals(29_750_000L, p.seekRawUs)
-    }
-
-    @Test
-    fun preRoll_clampedAtZeroWhenLoopStartIsTiny() {
+        assertNull(plan(target = window, applied = null, rawUs = A, ringCoveredFrames = 0L).seekRawUs)
+        // 换 A/B 且 raw 在跨轮位置
+        assertNull(plan(target = widerWindow, applied = window, rawUs = 45_000_000L, ringCoveredFrames = 0L).seekRawUs)
+        // loopStart 极小(历史上会被 clamp 到 0)
         val early = LoopWindow(songId = 7L, loopStartUs = 100_000L, loopEndUs = 10_100_000L)
-        val p = plan(target = early, applied = null, rawUs = 5_000_000L, ringCoveredFrames = 0L)
-        assertEquals(LoopShapePlan.Kind.PRE_ROLL, p.kind)
-        assertEquals(0L, p.seekRawUs)
+        assertNull(plan(target = early, applied = null, rawUs = 5_000_000L, ringCoveredFrames = 0L).seekRawUs)
     }
-
     // ---------------------------------------------------------------- 3. 退出无缝
 
     @Test

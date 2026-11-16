@@ -50,24 +50,18 @@ object LoopSessionProjection {
     /**
      * 展示位置 → 引擎原始 seek 位置（µs）。
      *
-     * 三个分支由 [LoopPosition.rawSeekUs] 决定（target < A 回前奏 / [A,B) 保持当前轮次 /
-     * >= B 折回第 0 轮）。在此基础上叠加**降级预卷**：
-     * 若 ring 不完整且目标落在 [A,B) 内，则改为 seek 到「该轮起点 − 250ms」，
-     * 让本轮完整流经 [A,B) 后环回，从而补齐 ring（契约 §4）。
+     * 只做**位置映射**(见 [LoopPosition.rawSeekUs]),不再叠加任何"降级预卷":
+     * 分片预填上线后,ring 覆盖不足是常态,把用户拖到的位置改成「本轮起点 − 250ms」
+     * 会直接表现为"拖到区间中却跳回区段开始"(issue 00001)。缺口由捕获/后续分片补齐。
      */
     fun seekUs(
         targetUs: Long,
         window: LoopWindow?,
-        currentRawUs: Long,
-        isRingComplete: Boolean,
+        @Suppress("UNUSED_PARAMETER") currentRawUs: Long,
+        @Suppress("UNUSED_PARAMETER") isRingComplete: Boolean,
     ): Long {
         if (window == null) return targetUs
-        val rawUs = LoopPosition.rawSeekUs(targetUs, window, currentRawUs)
-        if (isRingComplete || !window.containsUs(targetUs)) return rawUs
-        // rawSeekUs 在 [A,B) 分支返回 start + k*L + (target-start)，
-        // 反推本轮起点 = raw - (target - start)（与 iterationIndexUs 同义，但不必暴露 internal）。
-        val iterationStartUs = rawUs - (targetUs - window.loopStartUs)
-        return degradedSeekUs(iterationStartUs)
+        return LoopPosition.rawSeekUs(targetUs, window)
     }
 
     /**

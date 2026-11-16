@@ -27,23 +27,23 @@ object LoopPosition {
      * 用户/UI seek 目标(展示口径)-> 引擎原始 seek 位置。
      *
      * - target < start:原样返回(回到前奏),播到 b 后自然进入折返;
-     * - start <= target < end:映射到**当前轮次**的同一相位(取 <= currentRawUs 的最大 k),
-     *   这样 seek 不会把播放位置拽回第 0 轮,音频保持连续;
-     * - target >= end:折返到 start + ((target-start) mod L)(与旧行为一致,落在第 0 轮坐标)。
+     * - start <= target < end:映射到**第 0 轮**的同一相位(start + (target - start))。
+     *   **不再按当前轮次 k 偏移**:跨轮映射会让「拖到 35s」变成「seek 到 65s(第 1 轮)」,
+     *   而引擎随后要按输入 PTS 重新定相,任何对不齐都会让落点漂到别的相位(issue 00001 复现到的
+     *   「拖到区间中→落到 A 附近」)。固定落在第 0 轮后,seek 的目标 = 引擎的输入 PTS,
+     *   位置确定、可预测;向后 seek 由引擎的 discontinuity 处理(不再向后预卷)。
+     * - target >= end:折返到 start + ((target-start) mod L)(同样落在第 0 轮坐标)。
      *
-     * currentRawUs < start(前奏期)按 k = 0 计算;非法窗口原样返回 target。
+     * 非法窗口原样返回 target。
      */
-    fun rawSeekUs(targetUs: Long, w: LoopWindow, currentRawUs: Long): Long {
+    fun rawSeekUs(targetUs: Long, w: LoopWindow): Long {
         if (!w.isValid()) return targetUs
         val start = w.loopStartUs
         val length = w.lengthUs
         return when {
             targetUs < start -> targetUs
             targetUs >= w.loopEndUs -> start + Math.floorMod(targetUs - start, length)
-            else -> {
-                val k = iterationIndexUs(currentRawUs, w)
-                start + k * length + (targetUs - start)
-            }
+            else -> start + (targetUs - start)
         }
     }
 

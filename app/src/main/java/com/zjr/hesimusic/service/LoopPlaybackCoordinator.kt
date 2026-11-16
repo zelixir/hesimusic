@@ -399,6 +399,17 @@ class LoopPlaybackCoordinator @Inject constructor(
                 Log.w(TAG_PERF, "degraded ignored (no player) target=" + targetRawUs + "us")
                 return@launch
             }
+            // 绝不向后 seek:任何"往回跳"都是用户可感知的位置倒退(issue 00001)。
+            // 降级本身已经由音频层负责(回捕获/直通继续喂源输入),这里只放行"不倒退"的目标。
+            val currentUs = player.currentPosition * LoopSessionProjection.US_PER_MS
+            if (targetRawUs < currentUs) {
+                Log.w(
+                    TAG_PERF,
+                    "degraded ignored (backward) targetRawUs=" + targetRawUs +
+                        "us currentUs=" + currentUs + "us degradeCount=" + audio.degradeCount,
+                )
+                return@launch
+            }
             player.seekTo(targetRawUs / LoopSessionProjection.US_PER_MS)
             Log.d(
                 TAG_PERF,

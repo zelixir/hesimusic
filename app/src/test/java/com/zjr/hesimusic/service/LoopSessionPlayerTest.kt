@@ -85,16 +85,16 @@ class LoopSessionPlayerTest {
     }
 
     @Test
-    fun seek_insideWindowKeepsCurrentIteration() {
-        // 当前在第 2 轮（raw = A + 2L + 3s = 33s），seek 到展示位置 14s
-        // → 同一轮的 10 + 2*10 + 4 = 34s（不把播放位置拽回第 0 轮）
+    fun seek_insideWindowAlwaysLandsInFirstIteration() {
+        // 新语义:区间内 seek 与"当前在第几轮"无关,永远落在第 0 轮的同一相位。
+        // 历史:按当前轮次映射会把「拖到 14s」变成「seek 到 34s(第 2 轮)」,引擎重新定相时
+        // 一旦对不齐就漂到 A 附近(issue 00001)。
         assertEquals(
-            34_000_000L,
+            14_000_000L,
             LoopSessionProjection.seekUs(14_000_000L, window, currentRawUs = 33_000_000L, isRingComplete = true),
         )
-        // 当前在前奏 / 恰在 A：k = 0
         assertEquals(14_000_000L, LoopSessionProjection.seekUs(14_000_000L, window, currentRawUs = 0L, isRingComplete = true))
-        assertEquals(A, LoopSessionProjection.seekUs(A, window, currentRawUs = 0L, isRingComplete = true))
+        assertEquals(A, LoopSessionProjection.seekUs(A, window, currentRawUs = 33_000_000L, isRingComplete = true))
     }
 
     @Test
@@ -108,20 +108,15 @@ class LoopSessionPlayerTest {
     // ---------------------------------------------------------------- 4. 降级预卷
 
     @Test
-    fun degrade_prerollsToIterationStartMinus250ms() {
-        // 正常映射：34s；本轮起点 = 34s - (14s - 10s) = 30s → 预卷 29.75s
+    fun noDegradePreroll_seekKeepsUserTarget() {
+        // ring 不完整**不再**把目标改成「本轮起点 − 250ms」(那是"拖到区间中→跳回区段开始"的元凶)。
         assertEquals(
-            29_750_000L,
+            14_000_000L,
             LoopSessionProjection.seekUs(14_000_000L, window, currentRawUs = 33_000_000L, isRingComplete = false),
         )
-        // target 恰为 A 时预卷到本轮起点前 250ms（第 2 轮 → 29.75s）
+        assertEquals(A, LoopSessionProjection.seekUs(A, window, currentRawUs = 33_000_000L, isRingComplete = false))
         assertEquals(
-            29_750_000L,
-            LoopSessionProjection.seekUs(A, window, currentRawUs = 33_000_000L, isRingComplete = false),
-        )
-        // k = 0：本轮起点 = A = 10s → 9.75s（前奏尾部也要完整流经，才能补齐从 A 开始的 ring）
-        assertEquals(
-            9_750_000L,
+            12_000_000L,
             LoopSessionProjection.seekUs(12_000_000L, window, currentRawUs = 0L, isRingComplete = false),
         )
     }
@@ -130,8 +125,9 @@ class LoopSessionPlayerTest {
     fun degrade_prerollNeverGoesBelowZero() {
         val early = LoopWindow(songId = 7L, loopStartUs = 100_000L, loopEndUs = 10_100_000L)
         assertEquals(0L, LoopSessionProjection.degradedSeekUs(100_000L))
+        // seek 不再走预卷:即使 ring 不完整也保持用户目标
         assertEquals(
-            0L,
+            5_000_000L,
             LoopSessionProjection.seekUs(5_000_000L, early, currentRawUs = 0L, isRingComplete = false),
         )
         // 起点足够大时保持精确的 250ms 预卷
@@ -139,10 +135,15 @@ class LoopSessionPlayerTest {
     }
 
     @Test
-    fun degrade_skippedWhenRingComplete() {
+    fun ringCompleteDoesNotChangeSeekTarget() {
+        // ring 完整与否都不影响映射(都已固定落在第 0 轮)
         assertEquals(
-            34_000_000L,
+            14_000_000L,
             LoopSessionProjection.seekUs(14_000_000L, window, currentRawUs = 33_000_000L, isRingComplete = true),
+        )
+        assertEquals(
+            14_000_000L,
+            LoopSessionProjection.seekUs(14_000_000L, window, currentRawUs = 33_000_000L, isRingComplete = false),
         )
     }
 
@@ -182,6 +183,7 @@ class LoopSessionPlayerTest {
 
     @Test
     fun raw_replayPhaseUsesSinkPositionPlainPhaseUsesPlayerPosition() {
+        // 说明:本用例里的 seekUs 期望已随"区间内 seek 固定落在第 0 轮"更新为 14s。
         // 重放期：用 sink 推进的媒体位置（B + kL + 环内偏移），player 自身位置冻结在 B
         assertEquals(
             34_000_000L,
@@ -203,9 +205,9 @@ class LoopSessionPlayerTest {
         )
         assertEquals(14_000_000L, replayDisplay)
         assertEquals(A, plainDisplay)
-        // seek 的 currentRawUs 也必须来自同一口径，否则会算错轮次
+        // seek 不再依赖 currentRawUs(区间内固定落在第 0 轮),但 rawUs 的口径仍是展示位置来源
         assertEquals(
-            34_000_000L,
+            14_000_000L,
             LoopSessionProjection.seekUs(
                 targetUs = 14_000_000L,
                 window = window,

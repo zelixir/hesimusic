@@ -85,20 +85,11 @@ object LoopShapePlan {
             }
         }
 
-        // 进入 / A/B 变化：起播点落在 [A,B) 且 ring **完全没有覆盖** → 预卷到该轮起点 − 250ms。
-        // 复用 seekUs 的降级分支：k 取当前 raw 所在轮次，不会把播放位置拽回第 0 轮。
-        // 只要有前缀覆盖(分片预填/捕获已开始)就不再预卷:用户的位置优先,缺口靠后续分片补。
-        if (ringCoveredFrames <= 0L && targetWindow.containsUs(displayUs)) {
-            val preRollUs = LoopSessionProjection.seekUs(
-                targetUs = displayUs,
-                window = targetWindow,
-                currentRawUs = rawUs,
-                isRingComplete = false,
-            )
-            return Plan(window = targetWindow, seekRawUs = preRollUs, kind = Kind.PRE_ROLL)
-        }
-
-        // 普通进入（前奏起播 / ring 已完整 / 位置已在区间外）：只需写窗口
+        // 进入 / A/B 变化:**只写窗口,绝不 seek**。
+        // 历史:这里曾在 ring 未覆盖时预卷到「该轮起点 − 250ms」把 ring 填满。分片预填上线后
+        // 「未覆盖」是前几十秒的常态,预卷就变成「用户拖到区间中→被拽回区段开始」的元凶;
+        // 而缺口本来就会被「捕获 + 后续分片」补齐。因此彻底移除向后预卷:
+        // 任何会让播放头倒退的 seek 都不允许由本层发起。
         return Plan(window = targetWindow, seekRawUs = null, kind = Kind.ENTER)
     }
 }

@@ -437,7 +437,6 @@ class PreviewPlayer @Inject constructor(
         val rawUs = LoopPosition.rawSeekUs(
             targetUs = displayMs * 1000L,
             w = w,
-            currentRawUs = rawNowUs(),
         )
         p.seekTo((rawUs / 1000L).coerceAtLeast(0L))
     }

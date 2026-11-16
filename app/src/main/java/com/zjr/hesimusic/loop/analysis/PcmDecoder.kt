@@ -143,9 +143,11 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
                         return@withContext MonoPcm(mono, probe.sampleRate, mono.size.toLong())
                     }
                     if (result is ParallelDecodeResult.Rejected) {
+                        // 接缝/对齐不一致:该 mime 不可并行,进程内永久回退单线程。
                         Log.w(TAG, "parallel decode rejected (" + result.reason + "); fall back to serial")
+                        markParallelUnsafe(probe.mime)
                     }
-                    markParallelUnsafe(probe.mime)
+                    // 其他失败(解码器忙/实例受限等)只回退本次,下次仍可再试。
                 }
             }
         }
@@ -253,6 +255,7 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
                 toEos = segment.toEos,
                 onFrames = onFrames,
                 keepFromStart = segment.index == 0,
+                alignToNearest = segment.index != 0,
             )
             if (pcm.sampleRate != plan.sampleRate || pcm.channels != plan.channels) {
                 throw LoopException(
@@ -336,6 +339,7 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
         toEos: Boolean = false,
         onFrames: ((Long) -> Unit)? = null,
         keepFromStart: Boolean = false,
+        alignToNearest: Boolean = false,
     ): Pcm16Segment {
         val decodeStartMs = System.currentTimeMillis()
         val extractor = MediaExtractor()
@@ -463,13 +467,14 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
                                                 (sampleRate * bytesPerFrame).coerceAtLeast(1024),
                                             )
                                         }
-                                        keepStartFrame = if (keepFromStart) {
-                                            0L
-                                        } else {
-                                            Pcm16Frames.frameAtOrAfterUs(
-                                                startUs - anchorUs,
-                                                sampleRate,
-                                            )
+                                        // 并行分段的起点是“精确帧号 x 1e6 / sr”向下取整得到的
+                                        // 时间,与真实帧边界的误差 < 1us(< 0.05 样本);这里用
+                                        // 四舍五入而不是 ceil,避免 PTS 截断方向不同时整体偏移 1 帧。
+                                        // 预填区间仍用 ceil(契约:第一个 PTS >= us 的帧)。
+                                        keepStartFrame = when {
+                                            keepFromStart -> 0L
+                                            alignToNearest -> frameNearUs(startUs - anchorUs, sampleRate)
+                                            else -> Pcm16Frames.frameAtOrAfterUs(startUs - anchorUs, sampleRate)
                                         }
                                     }
                                     val clip = if (toEos) {
@@ -739,6 +744,12 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
         ) {
             throw LoopException("解码器输出的 PCM 编码不受支持")
         }
+    }
+
+    /** 与 [Pcm16Frames.frameAtOrAfterUs] 同口径但四舍五入(分段起点对齐用)。 */
+    private fun frameNearUs(offsetUs: Long, sampleRate: Int): Long {
+        if (offsetUs <= 0L || sampleRate <= 0) return 0L
+        return (offsetUs * sampleRate + Pcm16Frames.US_PER_SECOND / 2) / Pcm16Frames.US_PER_SECOND
     }
 
     private fun isParallelUnsafe(mime: String): Boolean = parallelUnsafeMimes.contains(mime)
