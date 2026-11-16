@@ -256,6 +256,28 @@ class LoopPageEffectRunnerTest {
     }
 
     @Test
+    fun prefillPartialReadyFromAwaitingPlaysButProgressDoesNot() {
+        val host = FakeLoopPageHost()
+        val state = ready(
+            playback = PlaybackState.AwaitingPrefill(LoopPageMode.FULL, 0L),
+            prefill = PrefillState.InProgress(0.3f, 4_000L, 12_000L),
+        )
+        val (_, progressEffects) = LoopPageReducer.reduce(
+            state,
+            LoopPageEvent.PrefillProgress(0.5f, 6_000L, 12_000L),
+        )
+        LoopPageEffectRunner(host).run(progressEffects)
+        assertEquals("PrefillProgress 不得产生 Play/Pause", emptyList<String>(), host.calls)
+
+        val (_, partialEffects) = LoopPageReducer.reduce(
+            state,
+            LoopPageEvent.PrefillPartialReady(8_000L, 12_000L),
+        )
+        LoopPageEffectRunner(host).run(partialEffects)
+        assertEquals(listOf("play:FULL:0:true"), host.calls)
+    }
+
+    @Test
     fun deletePersistsThenNavigatesBack() {
         val host = FakeLoopPageHost(deleteResult = true)
         LoopPageEffectRunner(host).run(

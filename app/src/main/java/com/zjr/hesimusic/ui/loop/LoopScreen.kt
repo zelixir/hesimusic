@@ -103,6 +103,7 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.zjr.hesimusic.data.model.Song
+import kotlinx.coroutines.delay
 import com.zjr.hesimusic.loop.analysis.WaveformPeaks
 import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.ui.loop.state.AnalysisPhase
@@ -367,7 +368,6 @@ private fun ResultContent(
 ) {
     val buffering by viewModel.buffering.collectAsState()
     val isReplaying by viewModel.isReplaying.collectAsState()
-    val ringReady by viewModel.ringReady.collectAsState()
 
     val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
@@ -381,7 +381,22 @@ private fun ResultContent(
     val confirmed = state.confirmed
     val playingIntent = state.playback is PlaybackState.Playing ||
         state.playback is PlaybackState.AwaitingPrefill
-    val ringPreparing = state.prefill is PrefillState.InProgress
+    val prefill = state.prefill
+    val ringPreparing = prefill is PrefillState.InProgress
+    val prefixReady = prefillPrefixReady(prefill)
+    val prefillLabel = prefillProgressLabel(prefill)
+
+    // 弱提示:预填超过 1.5s 仍未就绪才显示;前缀就绪(PrefillState.Partial)立即隐藏。
+    var showPrefillHint by remember { mutableStateOf(false) }
+    LaunchedEffect(ringPreparing) {
+        if (!ringPreparing) {
+            showPrefillHint = false
+        } else {
+            showPrefillHint = false
+            delay(1_500L)
+            showPrefillHint = true
+        }
+    }
 
     val loopRatio = if (durationMs > 0L) {
         ((bMs - aMs).toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
@@ -496,8 +511,8 @@ private fun ResultContent(
                 style = MaterialTheme.typography.bodySmall,
                 color = Color(0xFF3FB950),
             )
-            ringPreparing -> Text(
-                "正在准备环缓冲…",
+            showPrefillHint && prefillLabel != null -> Text(
+                prefillLabel,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -521,9 +536,9 @@ private fun ResultContent(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (mode == LoopPageMode.SEAM && !ringReady && !ringPreparing) {
+        if (mode == LoopPageMode.SEAM && !prefixReady && !ringPreparing) {
             Text(
-                "环缓冲区尚未就绪:请先完整试听一轮「完整循环」或「仅循环段」,接缝检查才能无缝环回",
+                "环缓冲前缀尚未就绪:请先完整试听一轮「完整循环」或「仅循环段」,接缝检查才能无缝环回",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
             )

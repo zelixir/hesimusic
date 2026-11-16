@@ -103,6 +103,8 @@ class LoopViewModel @Inject constructor(
         /** 分片预填片长:2s(第一片落地即可起播,其余后台补)。 */
         private const val PREFILL_CHUNK_MS = RingChunkedSeeder.DEFAULT_CHUNK_MS
 
+        // 前缀上限/长窗口阈值见 LoopPagePrefillPolicy(可单测)。
+
         /** 预览侧等待 sink 就绪的重试间隔与上限(约 60s)。 */
         private const val PREVIEW_SEED_RETRY_DELAY_MS = 100L
         private const val PREVIEW_SEED_RETRY_LIMIT = 600
@@ -546,11 +548,17 @@ class LoopViewModel @Inject constructor(
             return
         }
 
+        // 269s 这类长窗口只解 [A, A+12s);<=30s 保持整窗。seederWindow 只影响
+        // “解多少”,seed 仍写进完整 A/B 窗口的 ring(两者起点都是 A,帧号对齐)。
+        val seederWindow = LoopPagePrefillPolicy.prefillWindow(window)
+        val prefixOnly = seederWindow != window
+        val totalMs = (seederWindow.lengthUs / 1000L).coerceAtLeast(0L)
+
         prefillJob?.cancel()
         val token = Any()
         prefillToken = token
 
-        // 先把窗口写给音频层,分片 seed 才能通过;不 seek/不播放。
+        // 先把**完整**窗口写给音频层,分片 seed 才能通过;不 seek/不播放。
         previewPlayer.applyWindowForPrefill(window)
         dispatch(LoopPageEvent.PrefillStarted)
 
@@ -570,14 +578,35 @@ class LoopViewModel @Inject constructor(
                 val seeder = RingChunkedSeeder(PREFILL_CHUNK_MS)
                 val result = withContext(Dispatchers.Default) {
                     seeder.run(
-                        window = window,
+                        // 只解前缀;但 seed 写完整窗口的 ring。
+                        window = seederWindow,
                         // 播放捕获/上一轮预填可能已覆盖前缀:从它之后继续追加。
                         startFrame = previewPlayer.ringCoveredFrames,
                         decode = { startUs, endUs ->
                             pcmDecoder.decodePcm16Range(song.filePath, startUs, endUs)
                         },
                         seed = { startFrame, segment ->
-                            seedPreviewChunk(song, window, startFrame, segment)
+                            val seeded = seedPreviewChunk(song, window, startFrame, segment)
+                            if (seeded && segment.sampleRate > 0) {
+                                val coveredMs = (
+                                    (startFrame + segment.frames) * 1000L / segment.sampleRate
+                                    ).coerceIn(0L, totalMs)
+                                val progress = if (totalMs > 0L) {
+                                    coveredMs.toFloat() / totalMs.toFloat()
+                                } else {
+                                    0f
+                                }
+                                withContext(Dispatchers.Main) {
+                                    dispatch(
+                                        LoopPageEvent.PrefillProgress(
+                                            progress = progress,
+                                            coveredMs = coveredMs,
+                                            totalMs = totalMs,
+                                        ),
+                                    )
+                                }
+                            }
+                            seeded
                         },
                     )
                 }
@@ -587,13 +616,21 @@ class LoopViewModel @Inject constructor(
 
                 Log.d(
                     TAG,
-                    "ring prefill complete=" + result.complete + " chunks=" + result.chunks +
+                    "ring prefill complete=" + result.complete +
+                        " chunks=" + result.chunks +
                         " frames=" + result.appendedFrames +
+                        " prefixOnly=" + prefixOnly +
+                        " targetMs=" + totalMs +
                         " covered=" + previewPlayer.ringCoveredFrames +
                         " stop=" + result.stopReason + " window=" + window,
                 )
                 if (result.complete) {
-                    dispatch(LoopPageEvent.PrefillReady)
+                    if (prefixOnly) {
+                        // 前缀就绪即可起播;不再等整环。
+                        dispatch(LoopPageEvent.PrefillPartialReady(totalMs, totalMs))
+                    } else {
+                        dispatch(LoopPageEvent.PrefillReady)
+                    }
                 } else if (result.stopReason != null) {
                     dispatch(LoopPageEvent.PrefillFailed(result.stopReason))
                 }
@@ -611,6 +648,8 @@ class LoopViewModel @Inject constructor(
             }
         }
     }
+
+
 
     /**
      * 预览侧追加一片。首片可能早于用户按下播放:此时音频层还没有输出格式

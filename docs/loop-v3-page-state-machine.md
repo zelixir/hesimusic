@@ -161,21 +161,23 @@ CancelPrefill -> StartPrefill(新窗口) -> SeekTo(起点);预填完成后由 Pr
 
 ### 6.1 规模
 
-- 状态夹具:10 个
+- 状态夹具:11 个
   1. Loading
   2. Analyzing(DECODING, 0.25)
   3. Ready.NotStarted.Stopped
   4. Ready.PrefillInProgress.Playing
-  5. Ready.PrefillReady.Playing
-  6. Ready.AwaitingPrefill
-  7. Ready.DraggingA
-  8. Ready.DraggingB
-  9. Ready.Confirmed.Paused
-  10. Ready.Seam.Playing
-- 事件夹具:28 个(26 种事件类型;Enter 2 个、SwitchMode 2 个)
-- 参数化矩阵:10 x 28 = 280 个用例
-- 额外测试:矩阵完整性 1、全局不变量 1、bug/非法操作回归 13、effect runner 13
-- 本轮新增测试执行数:308,全部通过
+  5. Ready.PrefixPartial.Playing(PrefillState.Partial(8s,12s))
+  6. Ready.PrefillReady.Playing
+  7. Ready.AwaitingPrefill
+  8. Ready.DraggingA
+  9. Ready.DraggingB
+  10. Ready.Confirmed.Paused
+  11. Ready.Seam.Playing
+- 事件夹具:29 个(27 种事件类型;Enter 2 个、SwitchMode 2 个;新增 PrefillPartialReady)
+- 参数化矩阵:11 x 29 = 319 个用例
+- 额外测试:矩阵完整性 1、全局不变量 1、bug/非法操作回归 15、effect runner 14、
+  预填文案 4、前缀策略 4
+- 本轮新增测试执行数:358,全部通过
 
 ### 6.2 覆盖策略
 
@@ -183,7 +185,7 @@ CancelPrefill -> StartPrefill(新窗口) -> SeekTo(起点);预填完成后由 Pr
   如果 reducer 对某个"本应非法"的组合偷偷改了状态,用例会因 assertSame/effect 不等而红。
 - 每个组合都断言:新状态(数据类全字段相等)、effect 序列(顺序 + 内容);
   no-op 组合额外断言同一 state 实例。
-- 全局不变量测试对 280 个 reduce 结果统一检查第 5 节 1~6 条。
+- 全局不变量测试对 319 个 reduce 结果统一检查第 5 节 1~6 条。
 
 ### 6.3 已报 bug 的断言
 
@@ -357,18 +359,16 @@ PreviewPlayer.kt 保持不变;模式映射放在 UI 层:
 结果:
 
 - 第二轮改动后的 :app:compileDebugKotlin 通过;
-- 新增 ui.loop 4 个测试类:LoopPageReducerTest 280 + MatrixCoverage 2 + Regression 13 +
-  LoopPageEffectRunnerTest 13 = 308 个测试全部通过;
-- 全量单测在并发 audio/service 改动期间不稳定:失败集中在 LoopRingSeedTest /
-  LoopRingPrefillerTest(loop/audio、service;这些文件正被另一个 agent 修改,单跑也失败),
-  不属于本轮 ui/loop 写域;待其收口后重跑全量。ui.loop 的 308 个测试始终全绿。
+- 新增/更新 ui.loop 测试:LoopPageReducerTest 319 + MatrixCoverage 2 + Regression 15 +
+  EffectRunner 14 + PrefillUi 4 + PrefillPolicy 4 = 358 个测试全部通过;
+- 全量单测 952 个:0 failed / 0 errors,BUILD SUCCESSFUL。
   并发开发期间一度受另一个 agent 的 LoopIntent.arm debug 调用点影响,已由 lead 修复;
   loop/audio、service 测试的临时失败也已随并发改动收口消失。
 
 ## 10. 结论
 
 - 页面状态从 N 个可变字段收敛为 1 个不可变状态 + 1 个纯函数 + 1 组声明式 effect;
-- 280 个状态 x 事件组合 + 308 个测试执行,把"所有状态都在预期中"变成可执行断言;
+- 319 个状态 x 事件组合 + 358 个测试执行,把"所有状态都在预期中"变成可执行断言;
 - 00008/00009 已各自变成可复现的模型断言,并在 reducer/effect runner 层给出修复语义;
 - 第二轮已把状态机接进 LoopViewModel/LoopScreen,并修复 00012 的候选清单/选中项/占比遮挡
   (行内宽度竞争 + sheet/导航栏底部留白,见 §11.4)。
@@ -477,9 +477,82 @@ LoopScreen 现在只 collect 一次 pageState + peaks + song + notice;播放器�
 
 ### 11.5 本轮验证
 
-- 新增/更新测试:LoopPageReducerTest 280、MatrixCoverage 2、Regression 13、
-  LoopPageEffectRunnerTest 13,合计 308,全部通过;
+- 新增/更新测试:LoopPageReducerTest 319、MatrixCoverage 2、Regression 15、
+  EffectRunner 14、PrefillUi 4、PrefillPolicy 4,合计 358,全部通过;
 - :app:compileDebugKotlin 在本轮改动后通过;
-- 全量单测在并发 audio/service 改动期间不稳定:失败集中在 LoopRingSeedTest /
-  LoopRingPrefillerTest(loop/audio、service,另一个 agent 修改中,单跑也失败);
-  ui.loop 308 全绿,待其收口后重跑全量。
+- 全量单测 952 个,0 failed / 0 errors,BUILD SUCCESSFUL。
+
+
+## 12. 00015:预览预填只填前缀 + 不阻塞起播 + 进度显示
+
+### 12.1 问题
+
+页面预览此前直接对**整窗**用 RingChunkedSeeder 分片:269s 窗口 = 135 片,
+现场一直显示「正在准备环缓冲…」约 30s,起播被整环预填阻塞。
+
+### 12.2 页面策略(纯函数,可单测)
+
+LoopPagePrefillPolicy:
+
+- 窗口 <=30s:整窗填满(30s 窗口 15 片,与旧行为一致);
+- 窗口 >30s:只解 [A, A+12s) = 6 片(2s/片),前缀就绪即可起播,不再等整环;
+- 与 service/LoopRingPrefiller 的 maxPrefixMs=12000 对齐;页面不参与覆盖耗尽后的续播
+  (audio-engine 已负责 seek 到 A+cursor 继续捕获)。
+
+VM 的 StartPrefill:
+1. 仍把**完整** A/B 窗口写给音频层(applyWindowForPrefill),保证 seedRingRange 的窗口匹配;
+2. 只把**前缀窗口**交给 RingChunkedSeeder 解码;首帧相对 A 的帧号与完整 ring 对齐,
+   seed 仍写完整窗口的 ring;
+3. 每落一片 dispatch PrefillProgress(progress, coveredMs, totalMs);
+4. 前缀窗口 complete:
+   - 长窗口 -> PrefillPartialReady(totalMs,totalMs),立即允许 Play;
+   - 短窗口(整窗)-> PrefillReady(旧行为)。
+
+### 12.3 状态机
+
+新增:
+
+- PrefillState.Partial(coveredMs,totalMs):前缀已就绪、可起播;
+- InProgress(progress,coveredMs,totalMs):进度文案用;
+- LoopPageEvent.PrefillPartialReady(coveredMs,totalMs)。
+
+语义:
+
+- PrefillProgress:
+  - InProgress:更新 progress/covered/total,coveredMs 单调不减;
+  - Partial:继续推进 covered/total,但**不改变 PlaybackState、不产生 effect**;
+  - Ready:no-op;
+- PrefillPartialReady:
+  - AwaitingPrefill -> Playing + Play(resumeMode,resumeAtMs)(前缀够用即起播);
+  - 其余播放状态只把 prefill 置 Partial,不产生 Play;
+  - 已经 Partial/Ready 时 no-op(避免重复 Play);
+- PrefillReady 在 Partial 基础上补一个“整环完成”只改 prefill=Ready,不改播放/不重复 Play;
+- PrefillFailed 在 Partial 时 no-op(前缀已可播,后续分片失败不影响);
+- 因此 AwaitingPrefill => InProgress 不变量仍成立,Partial 不会和 Awaiting 共存。
+
+### 12.4 UI 进度
+
+- 预填 InProgress 超过 1.5s 才显示弱提示(LaunchedEffect + delay);
+- 文案:prefillProgressLabel -> 「准备环缓冲 8s/12s」;total=0 时「正在准备环缓冲…」;
+- 前缀就绪(PrefillState.Partial)或整环 Ready 立即隐藏;
+- 接缝检查的“环缓冲未就绪”警告改用 prefillPrefixReady(Partial/Ready),不再死等
+  player.ringReady(长窗口不会整环完成)。
+
+### 12.5 验收单测
+
+- LoopPagePrefillPolicyTest:
+  - 269s 窗口 -> prefix 12s、6 片;
+  - 30s 窗口 -> 整窗、15 片;
+  - 20s 窗口 -> 整窗、10 片;
+- LoopPagePrefillUiTest:
+  - 0s/12s -> 4s/12s -> 8s/12s -> 12s/12s,超界 clamp;
+  - Partial/Ready 不显示进度;
+- LoopPageReducerRegressionTest:
+  - AwaitingPrefill + PrefillPartialReady -> Playing + Play;
+  - 之后 PrefillProgress 继续推进,PlaybackState 仍 Playing、effect 为空;
+  - 非 Awaiting 的 PartialReady 不产生 Play;
+- LoopPageEffectRunnerTest:
+  - PrefillProgress 不产生 Play/Pause;
+  - PrefillPartialReady 在 Awaiting 下产出 Play。
+
+结果:ui.loop 358 个测试全绿;全量 952 个测试,0 failed / 0 errors。

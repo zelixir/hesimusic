@@ -34,13 +34,22 @@ enum class AnalysisPhase { DECODING, ANALYZING }
  * 后台环缓冲预填状态。
  *
  * - [NotStarted]：未开始（无候选 / 刚进入 Ready 且没有窗口）；
- * - [InProgress]：解码预填中（UI 可显示「正在准备环缓冲…」）；
+ * - [InProgress]：解码预填中；coveredMs/totalMs 供 UI 显示「准备环缓冲 8s/12s」；
+ * - [Partial]：**前缀已就绪**（长窗口只填 [A, A+12s)），可起播；后台/整环可能仍未完整；
  * - [Ready]：当前提交窗口的 ring 已完整；
  * - [Failed]：预填失败（UI 保留降级路径，不阻塞试听）。
  */
 sealed interface PrefillState {
     data object NotStarted : PrefillState
-    data class InProgress(val progress: Float = 0f) : PrefillState
+    data class InProgress(
+        val progress: Float = 0f,
+        val coveredMs: Long = 0L,
+        val totalMs: Long = 0L,
+    ) : PrefillState
+    data class Partial(
+        val coveredMs: Long,
+        val totalMs: Long,
+    ) : PrefillState
     data object Ready : PrefillState
     data class Failed(val message: String) : PrefillState
 }
@@ -161,7 +170,18 @@ sealed interface LoopPageEvent {
     data class Tick(val positionMs: Long) : LoopPageEvent
 
     data object PrefillStarted : LoopPageEvent
-    data class PrefillProgress(val progress: Float) : LoopPageEvent
+    data class PrefillProgress(
+        val progress: Float,
+        val coveredMs: Long = 0L,
+        val totalMs: Long = 0L,
+    ) : LoopPageEvent
+
+    /** 长窗口只填前缀时的“可起播”信号；效果与 PrefillReady 一样（Awaiting 时补 Play）。 */
+    data class PrefillPartialReady(
+        val coveredMs: Long,
+        val totalMs: Long,
+    ) : LoopPageEvent
+
     data object PrefillReady : LoopPageEvent
     data class PrefillFailed(val message: String) : LoopPageEvent
 
@@ -350,7 +370,12 @@ object LoopPageReducer {
         is LoopPageEvent.Tick -> tick(state, event.positionMs)
 
         LoopPageEvent.PrefillStarted -> prefillStarted(state)
-        is LoopPageEvent.PrefillProgress -> prefillProgress(state, event.progress)
+        is LoopPageEvent.PrefillProgress ->
+            prefillProgress(state, event.progress, event.coveredMs, event.totalMs)
+
+        is LoopPageEvent.PrefillPartialReady ->
+            prefillPartialReady(state, event.coveredMs, event.totalMs)
+
         LoopPageEvent.PrefillReady -> prefillReady(state)
         is LoopPageEvent.PrefillFailed -> prefillFailed(state, event.message)
 
@@ -525,15 +550,69 @@ object LoopPageReducer {
     private fun prefillProgress(
         state: LoopPageState.Ready,
         progress: Float,
-    ): Pair<LoopPageState, List<LoopPageEffect>> = when (state.prefill) {
+        coveredMs: Long,
+        totalMs: Long,
+    ): Pair<LoopPageState, List<LoopPageEffect>> = when (val prefill = state.prefill) {
         PrefillState.Ready -> noEffects(state)
-        else -> state.copy(prefill = PrefillState.InProgress(clampProgress(progress))) to emptyList()
+
+        is PrefillState.Partial ->
+            // 前缀已就绪:背景进度继续推进,但绝不改 PlaybackState/不打断播放。
+            state.copy(
+                prefill = PrefillState.Partial(
+                    coveredMs = coveredMs.coerceAtLeast(prefill.coveredMs),
+                    totalMs = if (totalMs > 0L) totalMs else prefill.totalMs,
+                ),
+            ) to emptyList()
+
+        else -> {
+            val previous = prefill as? PrefillState.InProgress
+            val nextCovered = coveredMs
+                .coerceAtLeast(previous?.coveredMs ?: 0L)
+                .coerceAtLeast(0L)
+            val nextTotal = if (totalMs > 0L) totalMs else previous?.totalMs ?: 0L
+            state.copy(
+                prefill = PrefillState.InProgress(
+                    progress = clampProgress(progress),
+                    coveredMs = nextCovered,
+                    totalMs = nextTotal,
+                ),
+            ) to emptyList()
+        }
+    }
+
+    private fun prefillPartialReady(
+        state: LoopPageState.Ready,
+        coveredMs: Long,
+        totalMs: Long,
+    ): Pair<LoopPageState, List<LoopPageEffect>> {
+        // 整环已完整 / 已经前缀就绪:重复信号不重复 Play。
+        if (state.prefill == PrefillState.Ready || state.prefill is PrefillState.Partial) {
+            return noEffects(state)
+        }
+        val partial = PrefillState.Partial(
+            coveredMs = coveredMs.coerceAtLeast(0L),
+            totalMs = totalMs.coerceAtLeast(0L),
+        )
+        val awaiting = state.playback as? PlaybackState.AwaitingPrefill
+            ?: return state.copy(prefill = partial) to emptyList()
+
+        // 前缀够用即可起播:与 PrefillReady 一样补 Play,不再等整环。
+        val next = state.copy(
+            prefill = partial,
+            playback = PlaybackState.Playing,
+            positionMs = awaiting.resumeAtMs,
+        )
+        return next to listOf(LoopPageEffect.Play(awaiting.resumeMode, awaiting.resumeAtMs))
     }
 
     private fun prefillReady(
         state: LoopPageState.Ready,
     ): Pair<LoopPageState, List<LoopPageEffect>> {
         if (state.prefill == PrefillState.Ready) return noEffects(state)
+        // 前缀已就绪(Partial)时补一个“整环完成”不改变播放状态。
+        if (state.prefill is PrefillState.Partial) {
+            return state.copy(prefill = PrefillState.Ready) to emptyList()
+        }
         val awaiting = state.playback as? PlaybackState.AwaitingPrefill
             ?: return state.copy(prefill = PrefillState.Ready) to emptyList()
 
@@ -551,6 +630,9 @@ object LoopPageReducer {
         message: String,
     ): Pair<LoopPageState, List<LoopPageEffect>> {
         if (state.prefill == PrefillState.Ready) return noEffects(state)
+        // 前缀已就绪:后续分片失败不影响已可播的前缀,保持 Partial/播放不变。
+        if (state.prefill is PrefillState.Partial) return noEffects(state)
+
         val awaiting = state.playback as? PlaybackState.AwaitingPrefill
             ?: return state.copy(prefill = PrefillState.Failed(message)) to emptyList()
 

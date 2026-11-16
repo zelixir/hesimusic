@@ -23,7 +23,7 @@ import kotlin.math.roundToLong
 /**
  * 状态 × 事件全矩阵测试（第一轮：纯模型）。
  *
- * 10 个代表性状态 × 28 个事件 = 280 个参数化用例。矩阵的默认期望是
+ * 11 个代表性状态 × 29 个事件 = 319 个参数化用例。矩阵的默认期望是
  * **no-op 恒等**（同一个 state 实例 + 空 effect）；凡是有语义的转换都显式列在
  * [LoopPageMatrix.EXPECTATIONS] 里。这样任何“本应非法却偷偷改了状态”的组合都会红。
  */
@@ -300,6 +300,55 @@ class LoopPageReducerRegressionTest {
     // ------------------------------------------------------------------ 保存 / 预填失败
 
     @Test
+    fun prefillPartialReadyStartsPlaybackAndProgressDoesNotInterruptIt() {
+        val awaiting = LoopPageMatrix.ready(
+            prefill = PrefillState.InProgress(0.3f, 4_000L, 12_000L),
+            playback = PlaybackState.AwaitingPrefill(LoopPageMode.FULL, 0L),
+            positionMs = 0L,
+        )
+        val (partial, partialEffects) = LoopPageReducer.reduce(
+            awaiting,
+            LoopPageEvent.PrefillPartialReady(8_000L, 12_000L),
+        )
+        assertEquals(
+            "前缀就绪立即补 Play",
+            listOf(LoopPageEffect.Play(LoopPageMode.FULL, 0L)),
+            partialEffects,
+        )
+        val partialReady = partial as LoopPageState.Ready
+        assertEquals(PrefillState.Partial(8_000L, 12_000L), partialReady.prefill)
+        assertEquals(PlaybackState.Playing, partialReady.playback)
+        assertEquals(0L, partialReady.positionMs)
+
+        // 前缀就绪后进度继续推进:只更新 PrefillState,不改播放状态/不产生 effect。
+        val (advanced, progressEffects) = LoopPageReducer.reduce(
+            partialReady,
+            LoopPageEvent.PrefillProgress(0.9f, 11_000L, 12_000L),
+        )
+        assertEquals(emptyList<LoopPageEffect>(), progressEffects)
+        val advancedReady = advanced as LoopPageState.Ready
+        assertEquals(PrefillState.Partial(11_000L, 12_000L), advancedReady.prefill)
+        assertEquals(PlaybackState.Playing, advancedReady.playback)
+        assertEquals(0L, advancedReady.positionMs)
+    }
+
+    @Test
+    fun prefillPartialReadyWithoutAwaitingDoesNotPlay() {
+        val playing = LoopPageMatrix.ready(
+            prefill = PrefillState.InProgress(0.3f, 4_000L, 12_000L),
+            playback = PlaybackState.Playing,
+        )
+        val (next, effects) = LoopPageReducer.reduce(
+            playing,
+            LoopPageEvent.PrefillPartialReady(8_000L, 12_000L),
+        )
+        assertEquals(emptyList<LoopPageEffect>(), effects)
+        val ready = next as LoopPageState.Ready
+        assertEquals(PrefillState.Partial(8_000L, 12_000L), ready.prefill)
+        assertEquals(PlaybackState.Playing, ready.playback)
+    }
+
+    @Test
     fun confirmAndSaveWorksWhenPrefillIsNotReady() {
         val notStarted = LoopPageMatrix.ready(
             prefill = PrefillState.NotStarted,
@@ -537,6 +586,9 @@ object LoopPageMatrix {
             positionMs = 0L,
         ),
         "Ready.PrefillInProgress.Playing" to ready(prefill = PrefillState.InProgress(0.4f)),
+        "Ready.PrefixPartial.Playing" to ready(
+            prefill = PrefillState.Partial(8_000L, 12_000L),
+        ),
         "Ready.PrefillReady.Playing" to ready(),
         "Ready.AwaitingPrefill" to ready(
             prefill = PrefillState.InProgress(0.7f),
@@ -591,7 +643,8 @@ object LoopPageMatrix {
         "TogglePlay" to LoopPageEvent.TogglePlay,
         "Tick" to LoopPageEvent.Tick(70_000L),
         "PrefillStarted" to LoopPageEvent.PrefillStarted,
-        "PrefillProgress" to LoopPageEvent.PrefillProgress(0.8f),
+        "PrefillProgress" to LoopPageEvent.PrefillProgress(0.8f, 8_000L, 12_000L),
+        "PrefillPartialReady" to LoopPageEvent.PrefillPartialReady(8_000L, 12_000L),
         "PrefillReady" to LoopPageEvent.PrefillReady,
         "PrefillFailed" to LoopPageEvent.PrefillFailed("prefill boom"),
         "ConfirmAndSave" to LoopPageEvent.ConfirmAndSave,
@@ -942,7 +995,18 @@ object LoopPageMatrix {
                     expect(
                         stateKey,
                         "PrefillProgress",
-                        Expectation.Transition(ready.copy(prefill = PrefillState.InProgress(0.8f)), emptyList()),
+                        Expectation.Transition(
+                            ready.copy(prefill = PrefillState.InProgress(0.8f, 8_000L, 12_000L)),
+                            emptyList(),
+                        ),
+                    )
+                    expect(
+                        stateKey,
+                        "PrefillPartialReady",
+                        Expectation.Transition(
+                            ready.copy(prefill = PrefillState.Partial(8_000L, 12_000L)),
+                            emptyList(),
+                        ),
                     )
                     expect(
                         stateKey,
@@ -960,10 +1024,21 @@ object LoopPageMatrix {
                     expect(
                         stateKey,
                         "PrefillProgress",
-                        Expectation.Transition(ready.copy(prefill = PrefillState.InProgress(0.8f)), emptyList()),
+                        Expectation.Transition(
+                            ready.copy(prefill = PrefillState.InProgress(0.8f, 8_000L, 12_000L)),
+                            emptyList(),
+                        ),
                     )
                     val awaiting = ready.playback as? PlaybackState.AwaitingPrefill
                     if (awaiting == null) {
+                        expect(
+                            stateKey,
+                            "PrefillPartialReady",
+                            Expectation.Transition(
+                                ready.copy(prefill = PrefillState.Partial(8_000L, 12_000L)),
+                                emptyList(),
+                            ),
+                        )
                         expect(
                             stateKey,
                             "PrefillReady",
@@ -975,6 +1050,18 @@ object LoopPageMatrix {
                             Expectation.Transition(ready.copy(prefill = PrefillState.Failed("prefill boom")), emptyList()),
                         )
                     } else {
+                        expect(
+                            stateKey,
+                            "PrefillPartialReady",
+                            Expectation.Transition(
+                                ready.copy(
+                                    prefill = PrefillState.Partial(8_000L, 12_000L),
+                                    playback = PlaybackState.Playing,
+                                    positionMs = awaiting.resumeAtMs,
+                                ),
+                                listOf(LoopPageEffect.Play(awaiting.resumeMode, awaiting.resumeAtMs)),
+                            ),
+                        )
                         expect(
                             stateKey,
                             "PrefillReady",
@@ -1003,6 +1090,22 @@ object LoopPageMatrix {
                             ),
                         )
                     }
+                }
+
+                is PrefillState.Partial -> {
+                    expect(
+                        stateKey,
+                        "PrefillProgress",
+                        Expectation.Transition(
+                            ready.copy(prefill = PrefillState.Partial(8_000L, 12_000L)),
+                            emptyList(),
+                        ),
+                    )
+                    expect(
+                        stateKey,
+                        "PrefillReady",
+                        Expectation.Transition(ready.copy(prefill = PrefillState.Ready), emptyList()),
+                    )
                 }
 
                 PrefillState.Ready -> Unit
