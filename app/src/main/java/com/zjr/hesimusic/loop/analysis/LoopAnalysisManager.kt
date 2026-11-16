@@ -228,6 +228,13 @@ class LoopAnalysisManager @Inject constructor(
                 Log.w(TAG, "temporary result save failed", e)
             }
 
+            // 收尾进度停在 0.95;若 EMA 还没跟上,最多再等一个刷新周期让 0.95 可见,
+            // 保证 Done 的 1.0 只比它高一个 MAX_STEP(见 issue 00018 的真机指标)。
+            var settleWaitedMs = 0L
+            while (!tracker.finalizingSettled() && settleWaitedMs < PROGRESS_FINALIZE_MAX_WAIT_MS) {
+                delay(PROGRESS_UPDATE_INTERVAL_MS)
+                settleWaitedMs += PROGRESS_UPDATE_INTERVAL_MS
+            }
             tracker.finish()
             _state.value = AnalysisState.Done(
                 songId = song.id,
@@ -331,22 +338,36 @@ class LoopAnalysisManager @Inject constructor(
         }
 
         /**
-         * 心跳:工作回调空档 ≥ [PROGRESS_STALL_FILL_AFTER_MS],或进度已经追平/超过工作量目标
-         * (例如并行解码失败后回退单线程、进度不再前进)时,做一次极小步进,保证持续可见。
+         * 心跳:
+         * - 收尾段:按 [AnalysisProgress.MAX_STEP] 逐步逼近 [AnalysisProgress.WORK_END],
+         *   让最后一次 0.95 → 1.0 的台阶只剩 [AnalysisProgress.MAX_STEP];
+         * - 其他阶段:工作回调空档 ≥ [PROGRESS_STALL_FILL_AFTER_MS],或进度已经追平/超过工作量目标
+         *   (例如并行解码失败后回退单线程、进度不再前进)时,做一次极小步进,保证持续可见。
          */
         @Synchronized
         fun heartbeat() {
             if (finished) return
             val now = System.currentTimeMillis()
+            if (now - lastEmitMs < PROGRESS_UPDATE_INTERVAL_MS) return
+            if (phase == AnalysisProgress.Phase.FINALIZING) {
+                if (smoothed >= AnalysisProgress.WORK_END) return
+                smoothed = minOf(AnalysisProgress.WORK_END, smoothed + AnalysisProgress.MAX_STEP)
+                emit()
+                return
+            }
             val stalled = now - lastWorkMs >= PROGRESS_STALL_FILL_AFTER_MS
             val aheadOfWork = smoothed > lastWorkTarget
             if (!stalled && !aheadOfWork) return
-            if (now - lastEmitMs < PROGRESS_UPDATE_INTERVAL_MS) return
             val next = minOf(AnalysisProgress.WORK_END, smoothed + PROGRESS_CREEP_STEP)
             if (next <= smoothed) return
             smoothed = next
             emit()
         }
+
+        /** 收尾是否已经到 0.95(没到的话 Done 前多等一个刷新周期,避免最后一次台阶过大)。 */
+        @Synchronized
+        fun finalizingSettled(): Boolean =
+            phase == AnalysisProgress.Phase.FINALIZING && smoothed >= AnalysisProgress.WORK_END
 
         /** 分析成功:标记结束(下一个状态就是 Done,不再上报进度)。 */
         @Synchronized
@@ -519,8 +540,11 @@ class LoopAnalysisManager @Inject constructor(
         /** 工作回调空档超过该值 → 心跳微步,避免 >1s 完全静止。 */
         const val PROGRESS_STALL_FILL_AFTER_MS = 250L
 
-        /** 心跳微步(每次 100ms  tick 最多推进 0.2%)。 */
+        /** 心跳微步(每次 100ms tick 最多推进 0.2%)。 */
         const val PROGRESS_CREEP_STEP = 0.002f
+
+        /** 收尾进度还没到 0.95 时,Done 前最多等这么久(每个 100ms tick 推进一个 MAX_STEP)。 */
+        const val PROGRESS_FINALIZE_MAX_WAIT_MS = 500L
 
         /** 低于该增量不重复上报。 */
         const val EMIT_EPSILON = 1e-4f
