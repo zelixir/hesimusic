@@ -240,6 +240,8 @@ class BackupRestoreManager @Inject constructor(
                     put("loudnessDifference", loop.loudnessDifference)
                     put("createdAt", loop.createdAt)
                     put("confirmed", loop.confirmed)
+                    // v10(issue 00016):完整候选列表;老备份没有该字段 → 恢复后按单候选回退。
+                    loop.candidatesJson?.let { put("candidatesJson", it) }
                 }
             )
         }
@@ -260,6 +262,8 @@ class BackupRestoreManager @Inject constructor(
                 loudnessDifference = item.optDouble("loudnessDifference", 0.0),
                 createdAt = item.optLong("createdAt", System.currentTimeMillis()),
                 confirmed = item.optBoolean("confirmed", true),
+                // 缺字段(老备份)或空串 → null:结果页退回单候选,与 v9 之前行为一致。
+                candidatesJson = item.optString("candidatesJson", "").takeIf { it.isNotEmpty() },
             )
         }.filter { it.songId > 0L }
 

@@ -19,7 +19,7 @@ import org.junit.Test
 class SongLoopDataLayerTest {
 
     @Test
-    fun `迁移版本号连续覆盖 7 到 9`() {
+    fun `迁移版本号连续覆盖 7 到 10`() {
         assertEquals("MIGRATION_7_8 起点应为 7", 7, AppDatabase.MIGRATION_7_8.startVersion)
         assertEquals("MIGRATION_7_8 终点应为 8", 8, AppDatabase.MIGRATION_7_8.endVersion)
         assertEquals("MIGRATION_8_9 起点应为 8", 8, AppDatabase.MIGRATION_8_9.startVersion)
@@ -28,6 +28,50 @@ class SongLoopDataLayerTest {
             "7→8 的终点必须衔接 8→9 的起点,否则旧开发包升级链断裂",
             AppDatabase.MIGRATION_7_8.endVersion,
             AppDatabase.MIGRATION_8_9.startVersion
+        )
+        assertEquals("MIGRATION_9_10 起点应为 9(issue 00016:candidatesJson 列)", 9, AppDatabase.MIGRATION_9_10.startVersion)
+        assertEquals("MIGRATION_9_10 终点应为 10", 10, AppDatabase.MIGRATION_9_10.endVersion)
+        assertEquals(
+            "8→9 的终点必须衔接 9→10 的起点",
+            AppDatabase.MIGRATION_8_9.endVersion,
+            AppDatabase.MIGRATION_9_10.startVersion
+        )
+    }
+
+    @Test
+    fun `最新迁移终点等于当前数据库版本`() {
+        assertEquals(
+            "改 @Database(version) 必须同步加迁移,否则设备升级 crash",
+            10,
+            APP_DATABASE_VERSION
+        )
+        assertEquals(
+            "最后一个迁移的终点必须等于 APP_DATABASE_VERSION",
+            APP_DATABASE_VERSION,
+            AppDatabase.MIGRATION_9_10.endVersion
+        )
+    }
+
+    @Test
+    fun `candidatesJson 列默认 null_老行语义不变`() {
+        val row = SongLoop(
+            songId = 1L,
+            loopStartSamples = 44_100L,
+            loopEndSamples = 132_300L,
+            sampleRate = 44_100,
+            loopStartMs = 1_000L,
+            loopEndMs = 3_000L,
+            score = 0.9,
+            noteDistance = 0.12,
+            loudnessDifference = 0.34,
+            createdAt = 1_700_000_000_000L
+        )
+        assertEquals("v10 新列默认必须是 null(老数据回退单候选)", null, row.candidatesJson)
+        val property = SongLoop::class.java.getDeclaredField("candidatesJson")
+        assertEquals(
+            "列类型必须是可空 String(Room 会建 TEXT 列)",
+            "java.lang.String",
+            property.type.name
         )
     }
 

@@ -142,6 +142,20 @@ class LoopAudioController @Inject constructor() {
     val coveredFrames: Long
         get() = engine.coveredFrames
 
+    /**
+     * 00017 接缝缓冲开关（原型阶段）：默认 OFF，生产仍走 M3′ 整环/分片预填。
+     * 置 ON 只表示允许后续接线；当前 sink 默认路径未消费此开关。
+     */
+    @Volatile
+    var seamBufferMode: SeamBufferMode = SeamBufferMode.OFF
+
+    /** 长窗口（>30s）才允许启用接缝缓冲；短窗口继续 M3′。 */
+    val seamWindowEligible: Boolean
+        get() = (window?.lengthUs ?: 0L) > 30_000_000L
+
+    val seamActiveForWindow: Boolean
+        get() = seamBufferMode == SeamBufferMode.ON && seamWindowEligible
+
     /** 当前 ring 是否由解码预填（[seedRing]）安装而非播放捕获。 */
     val isRingPrefilled: Boolean
         get() = engine.isRingPrefilled

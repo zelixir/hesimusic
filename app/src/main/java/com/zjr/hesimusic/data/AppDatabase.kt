@@ -21,9 +21,17 @@ import com.zjr.hesimusic.data.model.SmartPlaylist
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.model.SongLoop
 
+/**
+ * 当前 schema 版本(v10 起由常量承载,便于单测断言"MIGRATION_9_10 终点 == 当前版本")。
+ *
+ * ⚠️ 改这里必须同时:①加一条 `MIGRATION_(n-1)_n`;②在 [com.zjr.hesimusic.di.DatabaseModule] 的
+ * `addMigrations(...)` 注册。只改版本号不写迁移 → 用户设备升级直接 crash(IllegalStateException)。
+ */
+const val APP_DATABASE_VERSION = 10
+
 @Database(
     entities = [Song::class, Playlist::class, PlaylistEntry::class, Favorite::class, LogEntry::class, HiddenSong::class, SmartPlaylist::class, SongLoop::class],
-    version = 9,
+    version = APP_DATABASE_VERSION,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -218,6 +226,20 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE `song_loop` ADD COLUMN `confirmed` INTEGER NOT NULL DEFAULT 1")
 
                 android.util.Log.d(TAG, "MIGRATION_8_9 completed")
+            }
+        }
+
+        /**
+         * Migration from version 9 to 10(issue 00016):
+         * - Add song_loop.candidatesJson column:分析时的完整候选数组(JSON),重进结果页恢复候选列表;
+         * - 纯增量:DROP 老表会让已确认/临时结果全丢,这里只 ADD COLUMN,存量行该列为 NULL
+         *   (结果页自动退回单候选,见 LoopCandidateRestore);
+         * - 故意**不写 android.util.Log**:migrate() 因此可在纯 JVM 单测里用
+         *   SupportSQLiteDatabase 代理对象真实执行并断言 SQL(对照 AppDatabaseMigration9To10Test)。
+         */
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `song_loop` ADD COLUMN `candidatesJson` TEXT")
             }
         }
     }

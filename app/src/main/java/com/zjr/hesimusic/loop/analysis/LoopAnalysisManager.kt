@@ -50,8 +50,9 @@ data class LoopCandidateKt(
  * 语义(与上一版一致,契约 §3.1):
  * - [analyze] 单飞:进行中再次调用直接返回 false,不并发;
  * - 分析成功 → Done(内存候选 + 波形)并**自动落库临时结果**(confirmed=0,
- *   仅当无行或行 confirmed=0 时 upsert top1;已确认行不覆盖);
- * - [confirmAndSave] → upsert confirmed=1;
+ *   仅当无行或行 confirmed=0 时 upsert top1;已确认行不覆盖);同一次 upsert 还把
+ *   **完整候选数组**写进 `song_loop.candidatesJson`(issue 00016),重进结果页可恢复候选列表;
+ * - [confirmAndSave] → upsert confirmed=1(带内存候选列表时一并刷新 JSON,不带时保留旧 JSON);
  * - [demoteFinal] → confirmed 1→0,行保留;
  * - [deleteResult] → 删行。
  */
@@ -180,11 +181,24 @@ class LoopAnalysisManager @Inject constructor(
 
             // 临时结果自动落库:无行或行 confirmed=0 → upsert top1(confirmed=0);
             // 已确认行不覆盖(临时结果仅在页面内存展示)。
+            // issue 00016:同一次 upsert 把**完整候选数组**写进 candidatesJson,
+            // 重新进入结果页才能恢复「候选(N)」而不是只剩 1 个。
             try {
                 val existing = songLoopDao.getBySongId(song.id)
                 if (existing == null || !existing.confirmed) {
-                    saveResultInternal(song.id, candidates.first(), mono.sampleRate, durationMs, confirmed = false)
-                    Log.d(TAG, "temporary result saved (confirmed=0) song=${song.id}")
+                    saveResultInternal(
+                        songId = song.id,
+                        candidate = candidates.first(),
+                        sampleRate = mono.sampleRate,
+                        durationMs = durationMs,
+                        confirmed = false,
+                        candidatesJson = LoopCandidatesJson.encode(candidates),
+                    )
+                    Log.d(
+                        TAG,
+                        "temporary result saved (confirmed=0) candidates=" + candidates.size +
+                            " song=" + song.id,
+                    )
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -205,9 +219,50 @@ class LoopAnalysisManager @Inject constructor(
         }
     }
 
-    /** 确认并保存候选(采样点 → ms 换算,夹到 [0, totalMs]);upsert confirmed=1 覆盖旧结果。 */
+    /**
+     * 确认并保存候选(采样点 → ms 换算,夹到 [0, totalMs]);upsert confirmed=1 覆盖旧结果。
+     *
+     * 不带候选列表的重载(debug 服务器/老调用):**保留**行内已有的 candidatesJson,
+     * 不会因为一次确认把已落库的候选列表清空(issue 00016 §2)。
+     */
     suspend fun confirmAndSave(songId: Long, candidate: LoopCandidateKt, sampleRate: Int, durationMs: Long) {
-        saveResultInternal(songId, candidate, sampleRate, durationMs, confirmed = true)
+        confirmAndSave(songId, candidate, sampleRate, durationMs, candidates = null)
+    }
+
+    /**
+     * 确认并保存,并把结果页当前候选列表一并落库。
+     *
+     * @param candidates 结果页内存里的完整候选列表(可能含用户微调后的窗口对应的**选中项**);
+     *   非空 → 重新序列化写入;null/空 → 保留行内已有 JSON(老数据/无内存列表路径)。
+     */
+    suspend fun confirmAndSave(
+        songId: Long,
+        candidate: LoopCandidateKt,
+        sampleRate: Int,
+        durationMs: Long,
+        candidates: List<LoopCandidateKt>?,
+    ) {
+        val candidatesJson = if (!candidates.isNullOrEmpty()) {
+            LoopCandidatesJson.encode(candidates)
+        } else {
+            // legacy 行(或调用方没有内存列表):保留已落库的 JSON,不能清空。
+            try {
+                songLoopDao.getBySongId(songId)?.candidatesJson
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "read existing candidatesJson failed", e)
+                null
+            }
+        }
+        saveResultInternal(
+            songId = songId,
+            candidate = candidate,
+            sampleRate = sampleRate,
+            durationMs = durationMs,
+            confirmed = true,
+            candidatesJson = candidatesJson,
+        )
     }
 
     /** 取消最终结果:confirmed 1→0(行保留);无行/已是临时状态时幂等。 */
@@ -228,13 +283,18 @@ class LoopAnalysisManager @Inject constructor(
     /** 一次性查询(菜单入口分流用)。 */
     suspend fun getResultOnce(songId: Long): SongLoop? = songLoopDao.getBySongId(songId)
 
-    /** 统一落库入口:临时结果 confirmed=false / 用户确认 confirmed=true。 */
+    /**
+     * 统一落库入口:临时结果 confirmed=false / 用户确认 confirmed=true。
+     *
+     * @param candidatesJson 完整候选数组 JSON;null 表示老数据/未知(结果页退回单候选)。
+     */
     private suspend fun saveResultInternal(
         songId: Long,
         candidate: LoopCandidateKt,
         sampleRate: Int,
         durationMs: Long,
         confirmed: Boolean,
+        candidatesJson: String?,
     ) {
         if (sampleRate <= 0) throw LoopException("无效采样率")
         val totalMs = maxOf(0L, durationMs)
@@ -253,6 +313,7 @@ class LoopAnalysisManager @Inject constructor(
                 loudnessDifference = candidate.loudnessDifference,
                 createdAt = System.currentTimeMillis(),
                 confirmed = confirmed,
+                candidatesJson = candidatesJson,
             ),
         )
     }

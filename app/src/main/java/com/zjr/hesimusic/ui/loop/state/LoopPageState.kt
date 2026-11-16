@@ -135,12 +135,19 @@ sealed interface LoopPageEvent {
         val progress: Float,
     ) : LoopPageEvent
 
+    /**
+     * 分析完成 / 从 `song_loop` 行恢复结果页。
+     *
+     * @param selectedCandidate 恢复时的初始选中下标(issue 00016:重进页面要停在已确认那个候选);
+     *   越界自动夹到 `0..size-1`,空列表时为 0。新分析路径不传(默认 0 = score 最优)。
+     */
     data class AnalysisDone(
         val songId: Long,
         val candidates: List<LoopCandidateKt>,
         val sampleRate: Int,
         val durationMs: Long,
         val confirmed: Boolean = false,
+        val selectedCandidate: Int = 0,
     ) : LoopPageEvent
 
     data class AnalysisFailed(val message: String) : LoopPageEvent
@@ -316,9 +323,13 @@ object LoopPageReducer {
         event: LoopPageEvent.AnalysisDone,
     ): Pair<LoopPageState, List<LoopPageEffect>> {
         val duration = maxOf(event.durationMs, MIN_LOOP_LENGTH_MS + 1L)
-        val first = event.candidates.firstOrNull()
-        val (aMs, bMs) = if (first != null) {
-            candidateWindowMs(first, event.sampleRate, duration)
+        // issue 00016:恢复路径可能要求"选中已确认那个候选"(而不是 score 最优的第 0 个),
+        // 越界一律夹回合法区间;空列表时 selectedCandidate 恒为 0(不变量见 Ready 注释)。
+        val selected = event.selectedCandidate
+            .coerceIn(0, (event.candidates.size - 1).coerceAtLeast(0))
+        val chosen = event.candidates.getOrNull(selected)
+        val (aMs, bMs) = if (chosen != null) {
+            candidateWindowMs(chosen, event.sampleRate, duration)
         } else {
             0L to duration
         }
@@ -330,7 +341,7 @@ object LoopPageReducer {
             aMs = aMs,
             bMs = bMs,
             candidates = event.candidates,
-            selectedCandidate = 0,
+            selectedCandidate = selected,
             confirmed = event.confirmed,
             // 预填由 StartPrefill effect 真正启动(播放器未 prepared 时 VM 会推迟),
             // 因此这里先 NotStarted;PrefillStarted 再进入 InProgress,避免首次进页
@@ -340,7 +351,7 @@ object LoopPageReducer {
             positionMs = 0L,
             drag = DragState.Idle,
         )
-        val effects = if (first != null) {
+        val effects = if (chosen != null) {
             listOf(LoopPageEffect.StartPrefill(ready.window()))
         } else {
             emptyList()

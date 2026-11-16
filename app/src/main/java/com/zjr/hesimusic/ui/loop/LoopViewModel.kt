@@ -310,7 +310,14 @@ class LoopViewModel @Inject constructor(
             )
             viewModelScope.launch {
                 val ok = try {
-                    analysisManager.confirmAndSave(songId, candidate, sr, ready.durationMs)
+                    // issue 00016:把结果页内存里的完整候选列表一并落库(重进页面才能恢复候选(N))。
+                    analysisManager.confirmAndSave(
+                        songId = songId,
+                        candidate = candidate,
+                        sampleRate = sr,
+                        durationMs = ready.durationMs,
+                        candidates = ready.candidates,
+                    )
                     true
                 } catch (e: CancellationException) {
                     throw e
@@ -444,20 +451,27 @@ class LoopViewModel @Inject constructor(
         if (row != null) {
             val duration = maxOf(song.duration, row.loopEndMs, MIN_LOOP_LENGTH_MS + 1L)
             _peaks.value = null
-            val candidate = LoopCandidateKt(
-                startSamples = row.loopStartSamples,
-                endSamples = row.loopEndSamples,
-                score = row.score,
-                noteDistance = row.noteDistance,
-                loudnessDifference = row.loudnessDifference,
+            // issue 00016:优先按 candidatesJson 恢复**完整候选列表**,并让 selectedCandidate
+            // 指向已确认窗口(匹配 loopStartSamples/loopEndSamples);解析失败/老数据 → 单候选回退。
+            // 用户手动拖过 A/B 时保存窗口不在候选里 → 恢复逻辑会把它作为第 0 个合成候选插入,
+            // 保证 A/B 仍是用户保存的窗口(用户保存的窗口优先于候选排序)。
+            val restored = LoopCandidateRestore.fromRow(row)
+            Log.d(
+                TAG,
+                "restore candidates=" + restored.candidates.size +
+                    " selected=" + restored.selectedIndex +
+                    " fromStoredList=" + restored.fromStoredList +
+                    " splicedSavedWindow=" + restored.splicedSavedWindow +
+                    " song=" + song.id,
             )
             dispatch(
                 LoopPageEvent.AnalysisDone(
                     songId = song.id,
-                    candidates = listOf(candidate),
+                    candidates = restored.candidates,
                     sampleRate = row.sampleRate,
                     durationMs = duration,
                     confirmed = row.confirmed,
+                    selectedCandidate = restored.selectedIndex,
                 ),
             )
             refillPeaks(song)
