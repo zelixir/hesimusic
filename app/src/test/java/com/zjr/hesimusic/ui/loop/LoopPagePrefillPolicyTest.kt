@@ -2,12 +2,20 @@ package com.zjr.hesimusic.ui.loop
 
 import com.zjr.hesimusic.loop.LoopWindow
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LoopPagePrefillPolicyTest {
 
     private fun window(lengthMs: Long, startMs: Long = 30_000L): LoopWindow =
         LoopWindow(7L, startMs * 1000L, (startMs + lengthMs) * 1000L)
+
+    @Test
+    fun unpreparedPlayerDefersPrefillUntilPlaybackStarts() {
+        assertTrue("未 prepare 必须先起播", LoopPagePrefillPolicy.shouldDeferStart(isPlayerPrepared = false))
+        assertFalse("已 prepare 不应推迟", LoopPagePrefillPolicy.shouldDeferStart(isPlayerPrepared = true))
+    }
 
     @Test
     fun longWindowOnlyFillsTwelveSecondPrefix() {

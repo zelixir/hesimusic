@@ -300,6 +300,40 @@ class LoopPageReducerRegressionTest {
     // ------------------------------------------------------------------ 保存 / 预填失败
 
     @Test
+    fun togglePlayFromStoppedStartsImmediatelyWithoutAwaiting() {
+        val stopped = LoopPageMatrix.ready(
+            playback = PlaybackState.Stopped,
+            prefill = PrefillState.InProgress(0f, 0L, 12_000L),
+            positionMs = 0L,
+        )
+        val (next, effects) = LoopPageReducer.reduce(stopped, LoopPageEvent.TogglePlay)
+        assertEquals(
+            "首次起播必须立即 Play,不能等预填",
+            listOf(LoopPageEffect.Play(LoopPageMode.FULL, 0L)),
+            effects,
+        )
+        val ready = next as LoopPageState.Ready
+        assertEquals(PlaybackState.Playing, ready.playback)
+        assertTrue(ready.playback !is PlaybackState.AwaitingPrefill)
+    }
+
+    @Test
+    fun prefillProgressWhilePlayingOnlyUpdatesProgress() {
+        val playing = LoopPageMatrix.ready(
+            playback = PlaybackState.Playing,
+            prefill = PrefillState.InProgress(0f, 0L, 12_000L),
+        )
+        val (next, effects) = LoopPageReducer.reduce(
+            playing,
+            LoopPageEvent.PrefillProgress(0.16f, 2_000L, 12_000L),
+        )
+        assertEquals(emptyList<LoopPageEffect>(), effects)
+        val ready = next as LoopPageState.Ready
+        assertEquals(PrefillState.InProgress(0.16f, 2_000L, 12_000L), ready.prefill)
+        assertEquals(PlaybackState.Playing, ready.playback)
+    }
+
+    @Test
     fun prefillPartialReadyStartsPlaybackAndProgressDoesNotInterruptIt() {
         val awaiting = LoopPageMatrix.ready(
             prefill = PrefillState.InProgress(0.3f, 4_000L, 12_000L),
@@ -684,7 +718,7 @@ object LoopPageMatrix {
         val state = ready(
             aMs = aMs,
             bMs = bMs,
-            prefill = PrefillState.InProgress(0f),
+            prefill = PrefillState.NotStarted,
             playback = PlaybackState.Stopped,
             positionMs = 0L,
         )
@@ -726,6 +760,8 @@ object LoopPageMatrix {
 
     private fun commitExpected(state: LoopPageState.Ready): Expectation.Transition {
         val startMs = modeStart(state.mode, state.aMs, state.bMs)
+        val active = state.playback is PlaybackState.Playing ||
+            state.playback is PlaybackState.AwaitingPrefill
         val playback = when (state.playback) {
             PlaybackState.Playing, is PlaybackState.AwaitingPrefill ->
                 PlaybackState.AwaitingPrefill(state.mode, startMs)
@@ -735,7 +771,7 @@ object LoopPageMatrix {
         val next = state.copy(
             positionMs = startMs,
             drag = DragState.Idle,
-            prefill = PrefillState.InProgress(0f),
+            prefill = if (active) PrefillState.InProgress(0f) else PrefillState.NotStarted,
             playback = playback,
         )
         return Expectation.Transition(

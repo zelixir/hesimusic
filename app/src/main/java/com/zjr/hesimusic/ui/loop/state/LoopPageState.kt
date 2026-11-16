@@ -332,7 +332,10 @@ object LoopPageReducer {
             candidates = event.candidates,
             selectedCandidate = 0,
             confirmed = event.confirmed,
-            prefill = if (first != null) PrefillState.InProgress(0f) else PrefillState.NotStarted,
+            // 预填由 StartPrefill effect 真正启动(播放器未 prepared 时 VM 会推迟),
+            // 因此这里先 NotStarted;PrefillStarted 再进入 InProgress,避免首次进页
+            // 显示一条没有尽头的「正在准备环缓冲…」。
+            prefill = PrefillState.NotStarted,
             playback = PlaybackState.Stopped,
             positionMs = 0L,
             drag = DragState.Idle,
@@ -480,10 +483,14 @@ object LoopPageReducer {
         state: LoopPageState.Ready,
     ): Pair<LoopPageState, List<LoopPageEffect>> {
         val startMs = modeStartMs(state.mode, state.aMs, state.bMs)
+        val active = state.playback is PlaybackState.Playing ||
+            state.playback is PlaybackState.AwaitingPrefill
         val next = state.copy(
             positionMs = startMs,
             drag = DragState.Idle,
-            prefill = PrefillState.InProgress(0f),
+            // 播放中/等待预填:立即开始新预填;暂停/停止:先标记未开始,
+            // 由 StartPrefill 真正启动(未 prepare 时 VM 会推迟,避免无尽提示)。
+            prefill = if (active) PrefillState.InProgress(0f) else PrefillState.NotStarted,
             // 00009:新窗口会让旧 ring 失效。播放中/已在等预填 → 继续等新预填,
             // 预填完成后补发 Play;暂停/停止态保持原状(只应用窗口,不擅自起播)。
             playback = when (state.playback) {

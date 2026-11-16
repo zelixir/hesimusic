@@ -175,9 +175,9 @@ CancelPrefill -> StartPrefill(新窗口) -> SeekTo(起点);预填完成后由 Pr
   11. Ready.Seam.Playing
 - 事件夹具:29 个(27 种事件类型;Enter 2 个、SwitchMode 2 个;新增 PrefillPartialReady)
 - 参数化矩阵:11 x 29 = 319 个用例
-- 额外测试:矩阵完整性 1、全局不变量 1、bug/非法操作回归 15、effect runner 14、
-  预填文案 4、前缀策略 4
-- 本轮新增测试执行数:358,全部通过
+- 额外测试:矩阵完整性 1、全局不变量 1、bug/非法操作回归 17、effect runner 14、
+  预填文案 4、前缀策略 5
+- 本轮新增测试执行数:361,全部通过
 
 ### 6.2 覆盖策略
 
@@ -359,16 +359,16 @@ PreviewPlayer.kt 保持不变;模式映射放在 UI 层:
 结果:
 
 - 第二轮改动后的 :app:compileDebugKotlin 通过;
-- 新增/更新 ui.loop 测试:LoopPageReducerTest 319 + MatrixCoverage 2 + Regression 15 +
-  EffectRunner 14 + PrefillUi 4 + PrefillPolicy 4 = 358 个测试全部通过;
-- 全量单测 952 个:0 failed / 0 errors,BUILD SUCCESSFUL。
+- 新增/更新 ui.loop 测试:LoopPageReducerTest 319 + MatrixCoverage 2 + Regression 17 +
+  EffectRunner 14 + PrefillUi 4 + PrefillPolicy 5 = 361 个测试全部通过;
+- 全量单测 955 个:0 failed / 0 errors,BUILD SUCCESSFUL。
   并发开发期间一度受另一个 agent 的 LoopIntent.arm debug 调用点影响,已由 lead 修复;
   loop/audio、service 测试的临时失败也已随并发改动收口消失。
 
 ## 10. 结论
 
 - 页面状态从 N 个可变字段收敛为 1 个不可变状态 + 1 个纯函数 + 1 组声明式 effect;
-- 319 个状态 x 事件组合 + 358 个测试执行,把"所有状态都在预期中"变成可执行断言;
+- 319 个状态 x 事件组合 + 361 个测试执行,把"所有状态都在预期中"变成可执行断言;
 - 00008/00009 已各自变成可复现的模型断言,并在 reducer/effect runner 层给出修复语义;
 - 第二轮已把状态机接进 LoopViewModel/LoopScreen,并修复 00012 的候选清单/选中项/占比遮挡
   (行内宽度竞争 + sheet/导航栏底部留白,见 §11.4)。
@@ -477,10 +477,10 @@ LoopScreen 现在只 collect 一次 pageState + peaks + song + notice;播放器�
 
 ### 11.5 本轮验证
 
-- 新增/更新测试:LoopPageReducerTest 319、MatrixCoverage 2、Regression 15、
-  EffectRunner 14、PrefillUi 4、PrefillPolicy 4,合计 358,全部通过;
+- 新增/更新测试:LoopPageReducerTest 319、MatrixCoverage 2、Regression 17、
+  EffectRunner 14、PrefillUi 4、PrefillPolicy 5,合计 361,全部通过;
 - :app:compileDebugKotlin 在本轮改动后通过;
-- 全量单测 952 个,0 failed / 0 errors,BUILD SUCCESSFUL。
+- 全量单测 955 个,0 failed / 0 errors,BUILD SUCCESSFUL。
 
 
 ## 12. 00015:预览预填只填前缀 + 不阻塞起播 + 进度显示
@@ -555,4 +555,52 @@ VM 的 StartPrefill:
   - PrefillProgress 不产生 Play/Pause;
   - PrefillPartialReady 在 Awaiting 下产出 Play。
 
-结果:ui.loop 358 个测试全绿;全量 952 个测试,0 failed / 0 errors。
+结果:ui.loop 361 个测试全绿;全量 955 个测试,0 failed / 0 errors。
+
+
+## 13. 00015 复验:首次起播 PENDING 自锁修复
+
+### 13.1 根因
+
+seedRingRange 在音频 sink 未 configure 时恒返回 PENDING;而 sink 只有在播放真正开始
+(renderer prepared)后才 configure。首次进入页面时如果走「等预填 → 才 Play」:
+
+- seed 等 sink configure;
+- sink 等 Play;
+- Play 等 PrefillReady(seed)。
+
+三方互等。00009 那条路径能工作,是因为换候选时播放已经在跑、sink 早已 configure。
+
+### 13.2 修正(按播放器是否已 prepared 分流)
+
+- LoopPagePrefillPolicy.shouldDeferStart(isPlayerPrepared) = !isPlayerPrepared;
+- LoopViewModel.startPrefillInternal:
+  - 播放器**未 prepared**(首次起播/换歌后):不启动 seed,只把窗口记到
+    deferredPrefillWindow,立即返回;**不 dispatch PrefillStarted、不进入 AwaitingPrefill**;
+  - 播放器**已 prepared**(播放中换候选/换模式):保持原流程,立即 seed;
+- LoopViewModel.play 真正 prepare 并 Play 之后,取出 deferredPrefillWindow 补做预填:
+  - sink configure 后 seed 成功 → 加速环回;
+  - 仍 PENDING/失败 → 后台重试/只记日志,**不影响已经开始的播放**;
+- ensurePreview 从“只看 isPrepared”改为“isPrepared && songId 匹配”,避免换歌后复用
+  上一首的 prepared 状态;
+- AnalysisDone 不再直接置 prefill=InProgress,而是 NotStarted + StartPrefill effect:
+  未 prepare 时 VM 推迟,首屏不会出现没有尽头的「正在准备环缓冲…」;prepare 后
+  PrefillStarted 才进入 InProgress;
+- CommitWindow 在 Paused/Stopped 下也先置 NotStarted(播放中/等待预填仍 InProgress),
+  避免暂停态拖动后出现无尽进度提示;
+- 初始 TogglePlay 的 reducer 语义不变:Stopped -> Playing + Play,不产生 AwaitingPrefill;
+- 已 prepared + 换候选仍走 AwaitingPrefill -> PrefillReady/PartialReady -> Play(00009 不回退)。
+
+### 13.3 验收单测
+
+- LoopPagePrefillPolicyTest:
+  - shouldDeferStart(false)=true、shouldDeferStart(true)=false;
+- LoopPageReducerRegressionTest:
+  - togglePlayFromStoppedStartsImmediatelyWithoutAwaiting:effects 含 Play、不含 AwaitingPrefill;
+  - prefillProgressWhilePlayingOnlyUpdatesProgress:进度事件只改 PrefillState,
+    PlaybackState 保持 Playing、effect 为空;
+- 原有 00009 用例保持:
+  - 已 prepared + 换候选 -> AwaitingPrefill;
+  - PrefillReady/PrefillPartialReady -> Play。
+
+结果:ui.loop 361 个测试全绿;全量 955 个测试,0 failed / 0 errors。

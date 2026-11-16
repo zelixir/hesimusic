@@ -211,6 +211,9 @@ class LoopViewModel @Inject constructor(
     private var prefillJob: Job? = null
     private var prefillToken: Any? = null
 
+    /** 播放器尚未 prepared 时暂存的预填窗口;Play 真正 prepare 后立即补做。 */
+    private var deferredPrefillWindow: LoopWindow? = null
+
     private var onSavedCallback: ((Song) -> Unit)? = null
 
     /** 上一次 SeekTo 是否已经真正应用到已 prepare 的播放器;用于避免 Play 二次 seek。 */
@@ -246,6 +249,14 @@ class LoopViewModel @Inject constructor(
                 }
                 anchorMs = startMs
                 anchorElapsedRealtime = SystemClock.elapsedRealtime()
+
+                // 首次起播:预填之前因 sink 未 configure 被推迟;Play 后补做,
+                // 成功则加速环回,失败只记日志,不阻塞播放。
+                val deferred = deferredPrefillWindow
+                if (deferred != null && previewPlayer.isPrepared) {
+                    deferredPrefillWindow = null
+                    startPrefillInternal(deferred)
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "preview play failed", e)
                 _notice.value = "预览启动失败，请重试"
@@ -548,6 +559,20 @@ class LoopViewModel @Inject constructor(
             return
         }
 
+        // 先取消旧 job(新窗口/新候选让旧预填失效)。
+        prefillJob?.cancel()
+        prefillJob = null
+        prefillToken = null
+
+        // 首次起播/换歌后:播放器未 prepared → 先让 Play 把 sink configure 起来,
+        // 预填延迟到 Play 之后再做。否则 seed 恒 PENDING,而 Play 又等 seed → 自锁。
+        if (LoopPagePrefillPolicy.shouldDeferStart(previewPlayer.isPrepared)) {
+            deferredPrefillWindow = window
+            Log.d(TAG, "ring prefill deferred until playback prepares sink window=" + window)
+            return
+        }
+        deferredPrefillWindow = null
+
         // 269s 这类长窗口只解 [A, A+12s);<=30s 保持整窗。seederWindow 只影响
         // “解多少”,seed 仍写进完整 A/B 窗口的 ring(两者起点都是 A,帧号对齐)。
         val seederWindow = LoopPagePrefillPolicy.prefillWindow(window)
@@ -692,13 +717,14 @@ class LoopViewModel @Inject constructor(
         prefillJob?.cancel()
         prefillJob = null
         prefillToken = null
+        deferredPrefillWindow = null
     }
 
     // ------------------------------------------------------------------ 预览
 
-    /** 按当前 pageState 的 A/B 建立预览(幂等;已 prepare 则复用)。 */
+    /** 按当前 pageState 的 A/B 建立预览(幂等;同歌已 prepare 则复用)。 */
     private fun ensurePreview(song: Song): Boolean {
-        if (previewPlayer.isPrepared) return true
+        if (previewPlayer.isPrepared && previewPlayer.songId == song.id) return true
         val ready = _pageState.value as? LoopPageState.Ready ?: return false
         return try {
             previewPlayer.prepare(song, ready.aMs, ready.bMs)

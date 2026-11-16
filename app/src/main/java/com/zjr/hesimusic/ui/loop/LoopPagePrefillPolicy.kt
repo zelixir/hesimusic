@@ -15,6 +15,13 @@ internal object LoopPagePrefillPolicy {
     const val LONG_WINDOW_MS = 30_000L
     const val PREFIX_MAX_MS = 12_000L
 
+    /**
+     * 播放器尚未 prepared 时,预填必须先让位给起播:
+     * seedRingRange 在 sink 未 configure 时恒 PENDING,而 sink 要 Play 后才 configure;
+     * 若此时还进入「等预填→Play」就会自锁。
+     */
+    fun shouldDeferStart(isPlayerPrepared: Boolean): Boolean = !isPlayerPrepared
+
     /** 实际要解码/seed 的窗口。 */
     fun prefillWindow(window: LoopWindow): LoopWindow {
         val lengthMs = window.lengthUs / 1000L
