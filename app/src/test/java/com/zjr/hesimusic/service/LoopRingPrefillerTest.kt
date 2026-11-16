@@ -164,6 +164,23 @@ class LoopRingPrefillerTest {
     }
 
     @Test
+    fun `显式帧上限对短窗口同样生效`() {
+        val controller = newController()
+        val w = window(aMs = 0L, bMs = 30_000L)
+        controller.window = w
+        val decoder = FakeDecoder()
+        val pre = newPrefiller(controller, decoder, chunkMs = 2_000, maxPrefixFrames = 5_000L)
+
+        pre.onWindowApplied(w)
+        settle()
+
+        assertEquals(5_000L, controller.coveredFrames)
+        assertFalse(controller.isRingComplete)
+        assertTrue(pre.progress.value.prefixOnly)
+        assertTrue(pre.progress.value.targetReached)
+    }
+
+    @Test
     fun `269s 窗口前缀 12s 只需 6 片`() {
         val controller = newController(sampleRate = 48_000, channels = 2)
         val w = LoopWindow(songId, 19_776_000L, 288_896_000L)
@@ -181,6 +198,10 @@ class LoopRingPrefillerTest {
         assertTrue(last.prefixOnly)
         assertFalse(last.complete)
         assertEquals(576_000L, last.totalFrames)
+        // UI 可直接显示「12s/12s」：进度里带 sampleRate 与 ms 换算。
+        assertEquals(48_000, last.sampleRate)
+        assertEquals(12_000L, last.totalMs)
+        assertEquals(12_000L, last.coveredMs)
     }
 
     @Test

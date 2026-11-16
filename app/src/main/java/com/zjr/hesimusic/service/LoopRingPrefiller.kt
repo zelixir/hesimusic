@@ -74,6 +74,7 @@ class LoopRingPrefiller(
         val complete: Boolean = false,
         val chunks: Int = 0,
         val prefixReady: Boolean = false,
+        val sampleRate: Int = 0,
     ) {
         /** 进度比例 ∈ [0,1]（total 未知时为 0）。 */
         val fraction: Float
@@ -86,6 +87,14 @@ class LoopRingPrefiller(
         /** 目标已达成（整环完成，或前缀已达上限）——即可起播/进度不再增长。 */
         val targetReached: Boolean
             get() = complete || (totalFrames > 0L && coveredFrames >= totalFrames)
+
+        /** 已覆盖时长(ms)；[sampleRate] 未知时为 0。UI 可显示「8s/12s」。 */
+        val coveredMs: Long
+            get() = if (sampleRate > 0) coveredFrames * 1_000L / sampleRate else 0L
+
+        /** 目标时长(ms)；[sampleRate] 未知时为 0。 */
+        val totalMs: Long
+            get() = if (sampleRate > 0) totalFrames * 1_000L / sampleRate else 0L
     }
 
     private val _progress = MutableStateFlow(Progress())
@@ -135,6 +144,7 @@ class LoopRingPrefiller(
                 complete = true,
                 chunks = 0,
                 prefixReady = true,
+                sampleRate = if (cachedSongId == window.songId) cachedSampleRate else 0,
             )
             return
         }
@@ -189,7 +199,24 @@ class LoopRingPrefiller(
         // 目标区间：[A, prefixEndUs)。显式帧上限优先；否则长窗口只填前缀、短窗口填满。
         var prefixEndUs = bUs
         if (maxPrefixFrames > 0L) {
-            // 显式帧上限：需要采样率换算（缓存过就直接用，否则探测一小片）。
+            // 显式帧上限：需要采样率换算（缓存过就直接用，否则先探测一小片）。
+            val sr = sampleRateFor(window, path)
+            if (sr == null || sr <= 0) {
+                logW("prefill skipped: cannot resolve sampleRate songId=" + window.songId)
+                return
+            }
+            val aFrame = Pcm16Frames.frameAtOrAfterUs(aUs, sr)
+            val bFrame = Pcm16Frames.frameAtOrAfterUs(bUs, sr)
+            val ringFrames = bFrame - aFrame
+            if (ringFrames <= 0L) return
+            prefixEndUs = if (maxPrefixFrames >= ringFrames) {
+                bUs
+            } else {
+                frameUs(aFrame + maxPrefixFrames, sr)
+            }
+        } else if (!fullFill) {
+            prefixEndUs = minOf(bUs, aUs + maxPrefixMs.coerceAtLeast(1) * 1_000L)
+        }
         val prefixOnly = prefixEndUs < bUs
 
         _progress.value = Progress(
@@ -198,6 +225,7 @@ class LoopRingPrefiller(
             prefixOnly = prefixOnly,
             complete = false,
             chunks = 0,
+            sampleRate = if (cachedSongId == window.songId) cachedSampleRate else 0,
         )
 
         val prefixRun = runSeeder(window, path, prefixEndUs, prefixOnly, false, startedNanos) ?: return
@@ -273,6 +301,7 @@ class LoopRingPrefiller(
                             complete = false,
                             chunks = seededChunks,
                             prefixReady = prefixReady,
+                            sampleRate = sampleRate,
                         )
                     }
                     installed
@@ -294,6 +323,7 @@ class LoopRingPrefiller(
         complete: Boolean,
         chunks: Int,
         prefixReady: Boolean,
+        sampleRate: Int,
     ) {
         val target = if (totalFrames > 0L) maxOf(totalFrames, coveredFrames) else 0L
         _progress.value = Progress(
@@ -303,6 +333,7 @@ class LoopRingPrefiller(
             complete = complete,
             chunks = chunks,
             prefixReady = prefixReady,
+            sampleRate = sampleRate,
         )
     }
 
@@ -322,6 +353,7 @@ class LoopRingPrefiller(
             complete = complete,
             chunks = run.result.chunks,
             prefixReady = prefixReady,
+            sampleRate = run.sampleRate,
         )
     }
 
