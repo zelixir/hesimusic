@@ -155,7 +155,10 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
             path,
             maxSeconds,
             onProgress,
-            threadPriority = Process.THREAD_PRIORITY_BACKGROUND, // v4 §7.1:分析解码维持 BACKGROUND
+            // v7 §decode-parallel:分析解码是用户等待的前台操作,用 DEFAULT 优先级。
+            // 若沿用 BACKGROUND(nice=10),EAS 调度会把并行段压到小核,4 段也拿不到大核;
+            // 播放链的预填解码(decodePcm16Range)仍保持 BACKGROUND。
+            threadPriority = ANALYSIS_DECODE_PRIORITY,
         )
         val ch = raw.channels
         val frames = raw.frames.toInt()
@@ -206,7 +209,7 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
     suspend fun decodePcm16(path: String, startUs: Long, endUs: Long): Pcm16Segment =
         decodePcm16Range(path, startUs, endUs)
 
-    private suspend fun <T> withBackgroundPriority(block: suspend () -> T): T {
+    private suspend fun <T> withThreadPriority(priority: Int, block: suspend () -> T): T {
         val tid = Process.myTid()
         val originalPriority = try {
             Process.getThreadPriority(tid)
@@ -214,7 +217,7 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
             0
         }
         try {
-            Process.setThreadPriority(tid, Process.THREAD_PRIORITY_BACKGROUND)
+            Process.setThreadPriority(tid, priority)
         } catch (_: Exception) {}
         try {
             return block()
@@ -222,6 +225,10 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
             try { Process.setThreadPriority(tid, originalPriority) } catch (_: Exception) {}
         }
     }
+
+    /** 环缓冲预填(播放链)保持 BACKGROUND,避免与播放/UI 抢 CPU。 */
+    private suspend fun <T> withBackgroundPriority(block: suspend () -> T): T =
+        withThreadPriority(Process.THREAD_PRIORITY_BACKGROUND, block)
 
     /**
      * 单段解码(并行路径):返回该段 mono 主体 + 接缝校验用的 overlap 帧。
@@ -235,7 +242,7 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
         override suspend fun decode(
             segment: DecodeSegment,
             onFrames: (Long) -> Unit,
-        ): DecodedSegment = withBackgroundPriority {
+        ): DecodedSegment = withThreadPriority(ANALYSIS_DECODE_PRIORITY) {
             val started = System.currentTimeMillis()
             val target = if (segment.toEos) null else segment.frameCount + plan.overlapFrames
             val pcm = decodePcm16Internal(
@@ -756,6 +763,9 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
 
         /** 接缝校验额外帧（约 85ms @48k）：覆盖编码器延迟/帧边界错位。 */
         const val OVERLAP_FRAMES = 4096L
+
+        /** 分析解码线程优先级：前台用户等待,用 DEFAULT 以允许大核参与(见 decodeMono 注释)。 */
+        val ANALYSIS_DECODE_PRIORITY: Int = Process.THREAD_PRIORITY_DEFAULT
 
         /** 已验证不可并行(或首次并行失败)的 mime;进程内缓存,后续直接单线程。 */
         val parallelUnsafeMimes: MutableSet<String> =
