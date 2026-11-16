@@ -104,55 +104,100 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
             val cores = Runtime.getRuntime().availableProcessors()
             val requested = ParallelDecodeHooks.segmentCountOverride
                 ?: SegmentPlanner.segmentCount(cores, probe.durationUs)
-            val canParallel = requested >= 2 && !isParallelUnsafe(probe.mime)
-            if (canParallel) {
-                // 估算总帧数(仅用于切段/进度;尾段以 EOS 为准,不影响拼接总长)。
+            val key = parallelKey(probe)
+            if (requested >= 2 && !parallelUnsafeKeys.contains(key)) {
                 val estimate = probe.durationUs * probe.sampleRate / Pcm16Frames.US_PER_SECOND
                 if (estimate > 0L) {
-                    val plan = SegmentPlanner.plan(
-                        totalFrames = estimate,
-                        sampleRate = probe.sampleRate,
-                        channels = probe.channels,
-                        segmentCount = requested,
-                        overlapFrames = OVERLAP_FRAMES,
-                    )
-                    val started = System.currentTimeMillis()
-                    val result = try {
-                        ParallelMonoDecode.decode(
-                            plan = plan,
-                            decoder = MediaCodecSegmentDecoder(path, plan),
-                            onProgress = onProgress,
-                        )
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        Log.w(TAG, "parallel decode threw; fall back to serial: " + e.message, e)
-                        null
+                    // 低成本对齐探针:未知 mime 先解约 2.5s 验证 seek 后的样本网格偏移;
+                    // 失败 => 该 mime+采样率永久走单线程,避免首次浪费整曲并行。
+                    var offset = parallelOffsets[key]
+                    var probeMs = 0L
+                    if (offset == null) {
+                        val probeStarted = System.currentTimeMillis()
+                        val probed = try {
+                            probeAlignment(path, probe)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Log.w(TAG, "alignment probe failed: " + e.message, e)
+                            null
+                        }
+                        probeMs = System.currentTimeMillis() - probeStarted
+                        if (probed == null) {
+                            markParallelUnsafe(key, probe)
+                        } else {
+                            parallelOffsets[key] = probed
+                            offset = probed
+                        }
                     }
-                    if (result is ParallelDecodeResult.Success) {
-                        lastDecodeUsedParallel = true
-                        lastDecodeSegmentCount = plan.segmentCount
-                        val mono = result.mono
-                        onProgress?.invoke(1f)
+                    if (offset != null) {
+                        val plan = SegmentPlanner.plan(
+                            totalFrames = estimate,
+                            sampleRate = probe.sampleRate,
+                            channels = probe.channels,
+                            segmentCount = requested,
+                            overlapFrames = OVERLAP_FRAMES,
+                        )
+                        val attemptStarted = System.currentTimeMillis()
+                        var rejected: ParallelDecodeResult.Rejected? = null
+                        val result = try {
+                            ParallelMonoDecode.decode(
+                                plan = plan,
+                                decoder = MediaCodecSegmentDecoder(path, plan),
+                                onProgress = onProgress,
+                            )
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Log.w(TAG, "parallel decode threw; fall back to serial: " + e.message, e)
+                            null
+                        }
+                        val attemptMs = System.currentTimeMillis() - attemptStarted
+                        if (result is ParallelDecodeResult.Success) {
+                            lastDecodeUsedParallel = true
+                            lastDecodeSegmentCount = plan.segmentCount
+                            val mono = result.mono
+                            onProgress?.invoke(1f)
+                            Log.d(
+                                "LoopPerf",
+                                "pcm parallel decode=" + attemptMs + "ms frames=" + mono.size +
+                                    " segments=" + plan.segmentCount + " ch=" + probe.channels +
+                                    " sr=" + probe.sampleRate + " offset=" + offset +
+                                    " probe=" + probeMs + "ms decode=" + result.decodeMs +
+                                    "ms seam=" + result.seamMs + "ms stitch=" + result.stitchMs + "ms",
+                            )
+                            return@withContext MonoPcm(mono, probe.sampleRate, mono.size.toLong())
+                        }
+                        if (result is ParallelDecodeResult.Rejected) {
+                            rejected = result
+                            Log.w(
+                                TAG,
+                                "parallel decode rejected (" + result.reason + ") offset=" +
+                                    offset + " decode=" + result.decodeMs + "ms seam=" +
+                                    result.seamMs + "ms attempt=" + attemptMs +
+                                    "ms; fall back to serial",
+                            )
+                            markParallelUnsafe(key, probe)
+                        }
+                        // 其他失败(解码器忙/实例受限等)只回退本次,下次仍可再试;
+                        // 已解出的段缓冲在这里已不可达,回退前让 GC 有机会回收(见下行注释)。
+                        if (rejected != null) {
+                            // 并行失败会留下约 100MB 大数组垃圾;显式提示一次 GC,
+                            // 降低下面整曲单线程解码的分配压力(真机回退耗时异常待复测确认)。
+                            System.gc()
+                        }
                         Log.d(
                             "LoopPerf",
-                            "pcm parallel decode=" + (System.currentTimeMillis() - started) +
-                                "ms frames=" + mono.size + " segments=" + plan.segmentCount +
-                                " ch=" + probe.channels + " sr=" + probe.sampleRate,
+                            "pcm decode attempt: probe=" + probeMs + "ms parallelAttempt=" +
+                                attemptMs + "ms rejected=" + (rejected != null),
                         )
-                        return@withContext MonoPcm(mono, probe.sampleRate, mono.size.toLong())
                     }
-                    if (result is ParallelDecodeResult.Rejected) {
-                        // 接缝/对齐不一致:该 mime 不可并行,进程内永久回退单线程。
-                        Log.w(TAG, "parallel decode rejected (" + result.reason + "); fall back to serial")
-                        markParallelUnsafe(probe.mime)
-                    }
-                    // 其他失败(解码器忙/实例受限等)只回退本次,下次仍可再试。
                 }
             }
         }
 
         // ---- 单线程回退(原路径,语义不变) ----
+        val fallbackStarted = System.currentTimeMillis()
         val raw = decodeInternal(
             path,
             maxSeconds,
@@ -175,6 +220,11 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
                 mono[f] = acc.toFloat() / ch
             }
         }
+        Log.d(
+            "LoopPerf",
+            "pcm serial decode=" + (System.currentTimeMillis() - fallbackStarted) +
+                "ms frames=" + raw.frames + " ch=" + raw.channels + " sr=" + raw.sampleRate,
+        )
         MonoPcm(mono, raw.sampleRate, raw.frames)
     }
 
@@ -246,7 +296,14 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
             onFrames: (Long) -> Unit,
         ): DecodedSegment = withThreadPriority(ANALYSIS_DECODE_PRIORITY) {
             val started = System.currentTimeMillis()
-            val target = if (segment.toEos) null else segment.frameCount + plan.overlapFrames
+            // 第 0 段从文件头连续解码(真值);其余段多保留 MARGIN 帧前导,
+            // 供拼接器按接缝互相关找到精确起点。
+            val frontMargin = if (segment.index == 0) 0 else SegmentPlanner.MARGIN_FRAMES
+            val target = if (segment.toEos) {
+                null
+            } else {
+                frontMargin.toLong() + segment.frameCount + plan.overlapFrames
+            }
             val pcm = decodePcm16Internal(
                 path = path,
                 startUs = plan.startUs(segment),
@@ -256,6 +313,7 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
                 onFrames = onFrames,
                 keepFromStart = segment.index == 0,
                 alignToNearest = segment.index != 0,
+                keepStartAdjust = -frontMargin.toLong(),
             )
             if (pcm.sampleRate != plan.sampleRate || pcm.channels != plan.channels) {
                 throw LoopException(
@@ -263,26 +321,14 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
                         " ch=" + pcm.channels + "/" + plan.channels,
                 )
             }
-            val frames = pcm.frames.toInt()
-            val monoAll = downmixToMono(pcm.data, pcm.channels, frames)
-            val mainFrames = if (segment.toEos) monoAll.size else segment.frameCount.toInt()
-            if (mainFrames > monoAll.size) {
-                throw LoopException("并行段解码不足: 需要 " + mainFrames + " 帧,实际 " + monoAll.size)
-            }
-            val mono = if (mainFrames == monoAll.size) monoAll else monoAll.copyOf(mainFrames)
-            val overlap = if (segment.toEos) {
-                FloatArray(0)
-            } else {
-                val n = minOf(plan.overlapFrames.toInt(), monoAll.size - mainFrames)
-                if (n <= 0) FloatArray(0) else monoAll.copyOfRange(mainFrames, mainFrames + n)
-            }
+            val raw = downmixToMono(pcm.data, pcm.channels, pcm.frames.toInt())
             Log.d(
                 "LoopPerf",
                 "pcm segment=" + segment.index + " startFrame=" + segment.startFrame +
-                    " frames=" + mono.size + " overlap=" + overlap.size +
+                    " rawFrames=" + raw.size + " margin=" + frontMargin +
                     " ms=" + (System.currentTimeMillis() - started),
             )
-            DecodedSegment(segment, mono, overlap)
+            DecodedSegment(segment, frontMargin, raw)
         }
     }
 
@@ -340,6 +386,7 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
         onFrames: ((Long) -> Unit)? = null,
         keepFromStart: Boolean = false,
         alignToNearest: Boolean = false,
+        keepStartAdjust: Long = 0L,
     ): Pcm16Segment {
         val decodeStartMs = System.currentTimeMillis()
         val extractor = MediaExtractor()
@@ -471,11 +518,13 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
                                         // 时间,与真实帧边界的误差 < 1us(< 0.05 样本);这里用
                                         // 四舍五入而不是 ceil,避免 PTS 截断方向不同时整体偏移 1 帧。
                                         // 预填区间仍用 ceil(契约:第一个 PTS >= us 的帧)。
-                                        keepStartFrame = when {
+                                        val baseKeep = when {
                                             keepFromStart -> 0L
                                             alignToNearest -> frameNearUs(startUs - anchorUs, sampleRate)
                                             else -> Pcm16Frames.frameAtOrAfterUs(startUs - anchorUs, sampleRate)
                                         }
+                                        keepStartFrame = if (keepFromStart) 0L
+                                        else (baseKeep + keepStartAdjust).coerceAtLeast(0L)
                                     }
                                     val clip = if (toEos) {
                                         val from = maxOf(streamFrame, keepStartFrame)
@@ -752,11 +801,70 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
         return (offsetUs * sampleRate + Pcm16Frames.US_PER_SECOND / 2) / Pcm16Frames.US_PER_SECOND
     }
 
-    private fun isParallelUnsafe(mime: String): Boolean = parallelUnsafeMimes.contains(mime)
+    private fun parallelKey(info: TrackProbe): String =
+        info.mime + "|" + info.sampleRate + "|" + info.channels
 
-    private fun markParallelUnsafe(mime: String) {
-        parallelUnsafeMimes.add(mime)
-        Log.w(TAG, "decode-parallel disabled for mime=" + mime + " (process-wide)")
+    private fun markParallelUnsafe(key: String, info: TrackProbe) {
+        parallelUnsafeKeys.add(key)
+        Log.w(
+            TAG,
+            "decode-parallel disabled for " + info.mime + " sr=" + info.sampleRate +
+                " ch=" + info.channels + " (process-wide)",
+        )
+    }
+
+    /**
+     * 低成本对齐探针:解“文件头 2s + overlap”与“2s 处新段 0.75s”,用互相关求 seek 段
+     * 相对连续流的样本偏移。成功返回解码时 keepStart 需要加的偏移(样本数);
+     * 失败(相关不足/解码异常)返回 null -> 该 mime 走单线程。
+     */
+    private suspend fun probeAlignment(path: String, info: TrackProbe): Int? {
+        val sr = info.sampleRate
+        if (sr <= 0 || info.durationUs < 6_000_000L) return null
+        val boundaryUs = 2_000_000L
+        val leadFrames = Pcm16Frames.framesForUsCeil(boundaryUs, sr) + OVERLAP_FRAMES
+        val head = decodePcm16Internal(
+            path = path,
+            startUs = 0L,
+            endUs = null,
+            targetFramesOverride = leadFrames,
+            toEos = false,
+            keepFromStart = true,
+        )
+        val margin = SegmentPlanner.MARGIN_FRAMES
+        val tailFrames = margin.toLong() + Pcm16Frames.framesForUsCeil(500_000L, sr) + OVERLAP_FRAMES
+        val next = decodePcm16Internal(
+            path = path,
+            startUs = boundaryUs,
+            endUs = null,
+            targetFramesOverride = tailFrames,
+            toEos = false,
+            alignToNearest = true,
+            keepStartAdjust = -margin.toLong(),
+        )
+        if (head.sampleRate != sr || next.sampleRate != sr ||
+            head.channels != info.channels || next.channels != info.channels
+        ) {
+            return null
+        }
+        val headMono = downmixToMono(head.data, head.channels, head.frames.toInt())
+        val nextMono = downmixToMono(next.data, next.channels, next.frames.toInt())
+        val overlapIdx = headMono.size - OVERLAP_FRAMES.toInt()
+        if (overlapIdx < 0 || nextMono.size < 4) return null
+        val headOverlap = headMono.copyOfRange(overlapIdx, headMono.size)
+        val started = System.currentTimeMillis()
+        val match = SegmentAligner.bestShift(
+            a = headOverlap,
+            b = nextMono,
+            center = margin,
+        ) ?: return null
+        Log.d(
+            "LoopPerf",
+            "pcm alignment probe mime=" + info.mime + " sr=" + sr + " shift=" +
+                match.shift + " corr=" + match.correlation +
+                " ms=" + (System.currentTimeMillis() - started),
+        )
+        return if (match.correlation >= SegmentAligner.MIN_CORRELATION) match.shift else null
     }
 
     private companion object {
@@ -778,8 +886,12 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
         /** 分析解码线程优先级：前台用户等待,用 DEFAULT 以允许大核参与(见 decodeMono 注释)。 */
         val ANALYSIS_DECODE_PRIORITY: Int = Process.THREAD_PRIORITY_DEFAULT
 
-        /** 已验证不可并行(或首次并行失败)的 mime;进程内缓存,后续直接单线程。 */
-        val parallelUnsafeMimes: MutableSet<String> =
+        /** mime|sr|ch -> seek 段相对连续流的样本偏移(探针测得,进程内复用)。 */
+        val parallelOffsets: java.util.concurrent.ConcurrentHashMap<String, Int> =
+            java.util.concurrent.ConcurrentHashMap()
+
+        /** 探针失败/接缝失败的 mime|sr|ch;进程内缓存,后续直接单线程。 */
+        val parallelUnsafeKeys: MutableSet<String> =
             Collections.synchronizedSet(mutableSetOf<String>())
     }
 }
