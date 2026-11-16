@@ -32,7 +32,7 @@ class LoopAudioSinkTest {
         val fake = FakeAudioSink()
         fake.maxFramesPerCall = maxFramesPerCall
         val sink = LoopAudioSink(controller, fake)
-        sink.configure(PcmTestSupport.format(), 4096, null)
+        sink.configure(format, 4096, null)
         controller.window = window
         return Triple(controller, sink, fake)
     }
@@ -127,6 +127,40 @@ class LoopAudioSinkTest {
             PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(0, 1000))
         assertArrayEquals(expectedSeam, actualSeam)
         assertTrue(sink.seamDebugStats().contains("switch=1"))
+    }
+
+    @Test
+    fun `seam 路由支持立体声 bpf4`() {
+        val (controller, sink, fake) = rig(
+            window(0, 31_000),
+            format = PcmTestSupport.format(channelCount = 2),
+        )
+        controller.seamBufferMode = SeamBufferMode.ON
+        controller.seamSinkRouteEnabled = true
+        controller.seamDeltaUs = 1_000_000L
+        fun stereo(start: Int, count: Int): ByteArray {
+            val mono = PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(start, count))
+            val out = ByteArray(mono.size * 2)
+            var j = 0
+            for (i in mono.indices step 2) {
+                out[j++] = mono[i]; out[j++] = mono[i + 1]
+                out[j++] = mono[i]; out[j++] = mono[i + 1]
+            }
+            return out
+        }
+        controller.seamDecodeRange = { s, e -> stereo(s.toInt(), (e - s).toInt()) }
+        controller.seamSeekRequested = { }
+
+        var f = 0
+        while (f < 30_000) {
+            assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(f, 1000), f * 1000L))
+            f += 1000
+        }
+        assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(30_000, 1000), 30_000_000L))
+
+        assertTrue("立体声 bpf4 必须能切: " + sink.seamDebugStats(), sink.seamDebugStats().contains("switch=1"))
+        assertTrue("内存应为 2Δ*4: " + sink.seamDebugStats(), sink.seamDebugStats().contains("bytes=8000"))
+        assertTrue(fake.feeds.any { it.frames > 0 && it.ptsUs >= 30_000_000L })
     }
 
     // ---------------------------------------------------------------- 捕获/切帧
