@@ -25,6 +25,12 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import kotlin.math.sin
+import kotlin.math.cos
+import kotlin.math.PI
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -44,19 +50,24 @@ private val INDEX_COLUMN_WIDTH = 40.dp
 private val ROW_CONTENT_PADDING = 16.dp
 
 /** 无缝状态符号:宽度 ≈ 「两位数字」宽度的 80%(数字宽度由字体度量,不写死 dp)。 */
-private const val LOOP_BADGE_WIDTH_RATIO = 0.8f
+private const val LOOP_BADGE_WIDTH_RATIO = 0.64f
 
 /** ∞ 的自然高宽比:两个相切圆 → 高 = 宽 / 2。 */
 private const val LOOP_BADGE_ASPECT_RATIO = 0.5f
 
 /** 圆环线宽相对符号高度的比例。 */
-private const val LOOP_BADGE_STROKE_RATIO = 0.18f
+private const val LOOP_BADGE_STROKE_RATIO = 0.28f
 
-/** ∞ 与序号数字(基线)之间留 1dp。 */
-private const val LOOP_BADGE_GAP_DP = 1f
+/** ∞ 与序号数字(基线)之间的间距;往下挪几个像素让它不与数字贴在一起。 */
+private const val LOOP_BADGE_GAP_DP = 3f
 
 /** 用于量「两位数字」宽度的探针;必须与序号同字号。 */
 private const val TWO_DIGIT_PROBE = "00"
+
+/** 双纽线采样段数:64 段在 ~20px 尺寸下已完全平滑。 */
+private const val LEMNISCATE_SEGMENTS = 64
+
+private const val TWO_PI = (2.0 * PI).toFloat()
 
 internal const val LOOP_CONFIRMED_DESCRIPTION = "已确认无缝循环"
 internal const val LOOP_UNCONFIRMED_DESCRIPTION = "有无缝分析结果未确认"
@@ -86,7 +97,7 @@ internal fun loopBadgeGeometry(twoDigitWidthPx: Float, maxHeightPx: Float): Loop
     return LoopBadgeGeometry(
         widthPx = width,
         heightPx = height,
-        strokeWidthPx = (height * LOOP_BADGE_STROKE_RATIO).coerceAtLeast(1f)
+        strokeWidthPx = (height * LOOP_BADGE_STROKE_RATIO).coerceAtLeast(1.5f)
     )
 }
 
@@ -264,12 +275,48 @@ private fun BoxScope.LoopSeamBadge(
         val baseline = if (indexLayout.lineCount > 0) indexLayout.lastBaseline else indexLayout.size.height.toFloat()
         val top = baseline + gapPx
         val centerX = indexLineCenterX(indexLayout)
-        val ovalWidth = geometry.widthPx / 2f
-        val ovalHeight = geometry.heightPx
-        val stroke = Stroke(width = geometry.strokeWidthPx)
-        drawOval(color, topLeft = Offset(centerX - ovalWidth, top), size = Size(ovalWidth, ovalHeight), style = stroke)
-        drawOval(color, topLeft = Offset(centerX, top), size = Size(ovalWidth, ovalHeight), style = stroke)
+        val centerY = top + geometry.heightPx / 2f
+        // 双纽线(lemniscate):左右两环在中心交叉,才是 ∞ 的样子;两个相切的圆看起来是两个 o。
+        drawPath(
+            path = lemniscatePath(
+                centerX = centerX,
+                centerY = centerY,
+                halfWidth = geometry.widthPx / 2f,
+                halfHeight = geometry.heightPx / 2f,
+            ),
+            color = color,
+            style = Stroke(
+                width = geometry.strokeWidthPx,
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round,
+            ),
+        )
     }
+}
+
+/**
+ * 双纽线(Bernoulli lemniscate)的闭合路径。
+ *
+ * 参数方程:x = a·cos t/(1+sin²t), y = a·sin t·cos t/(1+sin²t)。
+ * 曲线在中心 (t = ±π/2) 相交,这才是 ∞;两个相切圆会读成两个「o」。
+ * 采样后按 [halfHeight] 归一化 y,使符号填满给定高度。
+ */
+private fun lemniscatePath(centerX: Float, centerY: Float, halfWidth: Float, halfHeight: Float): Path {
+    val path = Path()
+    // 双纽线自然 |y| 最大值 = |x| 最大值 × 0.35355,先按自然比例采样再缩放 y。
+    val naturalHalfHeight = halfWidth * 0.35355339f
+    val yScale = if (naturalHalfHeight > 0f) halfHeight / naturalHalfHeight else 1f
+    for (i in 0..LEMNISCATE_SEGMENTS) {
+        val t = i.toFloat() / LEMNISCATE_SEGMENTS * TWO_PI
+        val sinT = sin(t)
+        val cosT = cos(t)
+        val denom = 1f + sinT * sinT
+        val x = centerX + halfWidth * cosT / denom
+        val y = centerY + halfWidth * sinT * cosT / denom * yScale
+        if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+    }
+    path.close()
+    return path
 }
 
 /** 序号文字实际占用的水平范围中心(px),用于让 ∞ 与数字居中对齐(LTR/RTL 都成立)。 */
