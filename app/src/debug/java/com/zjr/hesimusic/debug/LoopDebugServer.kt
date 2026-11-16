@@ -15,6 +15,7 @@ import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.analysis.AnalysisState
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
 import com.zjr.hesimusic.loop.analysis.LoopCandidateKt
+import com.zjr.hesimusic.loop.analysis.ParallelDecodeHooks
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -64,6 +65,7 @@ object LoopDebugServer {
     private const val SOCKET_READ_TIMEOUT_MS = 5_000
     private const val SOCKET_WRITE_TIMEOUT_MS = 5_000L
     private const val REQUEST_TIMEOUT_MS = 10_000L
+    private const val PCM_COMPARE_TIMEOUT_MS = 300_000L
     private const val DEPS_RETRY_DEADLINE_MS = 3_000L
     private const val MAX_HEADER_LINE_BYTES = 8 * 1024
     private const val MAX_HEADER_TOTAL_BYTES = 32 * 1024
@@ -312,11 +314,15 @@ object LoopDebugServer {
 
     private fun dispatch(request: DebugRequest): Any = runBlocking {
         try {
-            withTimeout(REQUEST_TIMEOUT_MS) { route(request) }
+            withTimeout(routeTimeoutMs(request)) { route(request) }
         } catch (e: TimeoutCancellationException) {
             throw HttpError(504, "request timeout")
         }
     }
+
+    /** pcm-compare 要整曲解码两遍(248s 曲目约 25s+),单独放宽超时。 */
+    private fun routeTimeoutMs(request: DebugRequest): Long =
+        if (request.path == "/debug/pcm-compare") PCM_COMPARE_TIMEOUT_MS else REQUEST_TIMEOUT_MS
 
     private suspend fun route(request: DebugRequest): Any {
         val segments = pathSegments(request.path)
@@ -342,6 +348,7 @@ object LoopDebugServer {
             method == "POST" && segments == listOf("navigate") -> handleNavigate(body)
             method == "POST" && segments == listOf("debug", "tap") -> handleDebugTap(body)
             method == "POST" && segments == listOf("debug", "reconnect") -> handleDebugReconnect()
+            method == "POST" && segments == listOf("debug", "pcm-compare") -> handlePcmCompare(body)
             else -> throw HttpError(404, "unknown endpoint: $method ${request.path}")
         }
     }
@@ -1156,6 +1163,97 @@ object LoopDebugServer {
                 .onFailure { Log.e(TAG, "navigate hook failed", it) }
         }
         return linkedMapOf("navigated" to true, "route" to route)
+    }
+
+    /**
+     * POST /debug/pcm-compare {path, segments?, maxSeconds?}
+     *
+     * 手工真机验证入口(不必跑 instrumented):同一文件先单线程、再 N 段并行解码,
+     * 逐样本比较并返回 identical / firstDiffIndex / usedParallel / 两阶段耗时。
+     * segments=0 用设备默认(2~4);1 只跑单线程。会清空并行能力缓存并强制重试。
+     */
+    private suspend fun handlePcmCompare(body: JSONObject?): Map<String, Any?> {
+        val d = deps()
+        val obj = body ?: throw HttpError(400, "JSON body required")
+        val path = obj.optString("path", "").trim()
+        if (path.isEmpty()) throw HttpError(400, "path required")
+        val segments = obj.optInt("segments", 0)
+        if (segments < 0 || segments > 4) throw HttpError(400, "segments must be 0..4")
+        val maxSeconds = obj.optInt("maxSeconds", 900).coerceIn(10, 900)
+        if (!path.startsWith("content:")) {
+            val file = File(path)
+            if (!file.exists() || !file.canRead()) throw HttpError(404, "file not readable: $path")
+        }
+        val decoder = d.pcmDecoder()
+        decoder.clearParallelCaches()
+        val out = linkedMapOf<String, Any?>(
+            "path" to path,
+            "requestedSegments" to segments,
+        )
+        try {
+            ParallelDecodeHooks.disableParallel = true
+            ParallelDecodeHooks.segmentCountOverride = null
+            val serialStarted = System.currentTimeMillis()
+            val serial = try {
+                decoder.decodeMono(path, maxSeconds)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                throw HttpError(500, "serial decode failed: " + (t.message ?: t.javaClass.simpleName))
+            }
+            out["serialMs"] = System.currentTimeMillis() - serialStarted
+            out["serialFrames"] = serial.frames
+            out["serialSampleRate"] = serial.sampleRate
+            System.gc()
+            sleepQuietly(100L)
+
+            ParallelDecodeHooks.disableParallel = false
+            if (segments > 0) ParallelDecodeHooks.segmentCountOverride = segments
+            val parallelStarted = System.currentTimeMillis()
+            val par = try {
+                decoder.decodeMono(path, maxSeconds)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                throw HttpError(500, "parallel decode failed: " + (t.message ?: t.javaClass.simpleName))
+            }
+            out["parallelMs"] = System.currentTimeMillis() - parallelStarted
+            out["parallelFrames"] = par.frames
+            out["parallelSampleRate"] = par.sampleRate
+            out["usedParallel"] = decoder.lastDecodeUsedParallel
+            out["actualSegments"] = decoder.lastDecodeSegmentCount
+            out["samples"] = serial.data.size
+
+            if (serial.sampleRate != par.sampleRate) {
+                out["identical"] = false
+                out["firstDiffIndex"] = -1
+                out["reason"] = "sampleRate " + serial.sampleRate + " != " + par.sampleRate
+            } else if (serial.frames != par.frames || serial.data.size != par.data.size) {
+                out["identical"] = false
+                out["firstDiffIndex"] = -1
+                out["reason"] = "shape serial=" + serial.frames + " parallel=" + par.frames
+            } else {
+                var firstDiff = -1
+                for (i in serial.data.indices) {
+                    if (serial.data[i] != par.data[i]) {
+                        firstDiff = i
+                        break
+                    }
+                }
+                out["identical"] = firstDiff < 0
+                out["firstDiffIndex"] = firstDiff
+            }
+            Log.i(
+                TAG,
+                "pcm-compare path=" + path + " segments=" + segments + " usedParallel=" +
+                    decoder.lastDecodeUsedParallel + " identical=" + out["identical"] +
+                    " serialMs=" + out["serialMs"] + " parallelMs=" + out["parallelMs"],
+            )
+            return out
+        } finally {
+            ParallelDecodeHooks.disableParallel = false
+            ParallelDecodeHooks.segmentCountOverride = null
+        }
     }
 
     /** POST /debug/reconnect —— 显式丢弃当前 controller 并重建(最多等 2s)。 */

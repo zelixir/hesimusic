@@ -102,9 +102,16 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
         }
         if (probe != null) {
             val cores = Runtime.getRuntime().availableProcessors()
-            val requested = ParallelDecodeHooks.segmentCountOverride
-                ?: SegmentPlanner.segmentCount(cores, probe.durationUs)
             val key = parallelKey(probe)
+            val override = ParallelDecodeHooks.segmentCountOverride
+            val deviceCap = deviceSegmentCap()
+            val failureCap = if ((parallelFailureCounts[key] ?: 0) >= 2) 2 else deviceCap
+            val requested = if (override != null) {
+                override
+            } else {
+                SegmentPlanner.segmentCount(cores, probe.durationUs)
+                    .coerceAtMost(failureCap)
+            }
             if (requested >= 2 && !parallelUnsafeKeys.contains(key)) {
                 val estimate = probe.durationUs * probe.sampleRate / Pcm16Frames.US_PER_SECOND
                 if (estimate > 0L) {
@@ -149,11 +156,21 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
-                            Log.w(TAG, "parallel decode threw; fall back to serial: " + e.message, e)
+                            val failures = (parallelFailureCounts.merge(key, 1, Int::plus) ?: 1)
+                            Log.w(
+                                TAG,
+                                "parallel decode threw (failure #" + failures + "); fall back to serial: " +
+                                    e.message,
+                                e,
+                            )
+                            if (failures >= 3) {
+                                markParallelUnsafe(key, probe)
+                            }
                             null
                         }
                         val attemptMs = System.currentTimeMillis() - attemptStarted
                         if (result is ParallelDecodeResult.Success) {
+                            parallelFailureCounts.remove(key)
                             lastDecodeUsedParallel = true
                             lastDecodeSegmentCount = plan.segmentCount
                             val mono = result.mono
@@ -296,6 +313,12 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
             onFrames: (Long) -> Unit,
         ): DecodedSegment = withThreadPriority(ANALYSIS_DECODE_PRIORITY) {
             val started = System.currentTimeMillis()
+            // Log.i:真机 instrumented 崩溃时,最后一条 start 日志能定位到具体段。
+            Log.i(
+                "LoopPerf",
+                "pcm segment start index=" + segment.index + " startFrame=" + segment.startFrame +
+                    " toEos=" + segment.toEos,
+            )
             // 第 0 段从文件头连续解码(真值);其余段多保留 MARGIN 帧前导,
             // 供拼接器按接缝互相关找到精确起点。
             val frontMargin = if (segment.index == 0) 0 else SegmentPlanner.MARGIN_FRAMES
@@ -322,9 +345,9 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
                 )
             }
             val raw = downmixToMono(pcm.data, pcm.channels, pcm.frames.toInt())
-            Log.d(
+            Log.i(
                 "LoopPerf",
-                "pcm segment=" + segment.index + " startFrame=" + segment.startFrame +
+                "pcm segment done index=" + segment.index + " startFrame=" + segment.startFrame +
                     " rawFrames=" + raw.size + " margin=" + frontMargin +
                     " ms=" + (System.currentTimeMillis() - started),
             )
@@ -409,10 +432,12 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
             extractor.selectTrack(trackIndex)
             val mime = format.getString(MediaFormat.KEY_MIME) ?: throw LoopException("未知的音频编码格式")
 
-            codec = try {
-                MediaCodec.createDecoderByType(mime)
-            } catch (e: Exception) {
-                throw LoopException("设备不支持解码该音频格式", e)
+            codec = synchronized(codecLifecycleLock) {
+                try {
+                    MediaCodec.createDecoderByType(mime)
+                } catch (e: Exception) {
+                    throw LoopException("设备不支持解码该音频格式", e)
+                }
             }
 
             // 先 seek 再 start：解码器从 [startUs − 1s, ...) 开始产出，保证覆盖区间起点。
@@ -423,8 +448,12 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
                     MediaExtractor.SEEK_TO_PREVIOUS_SYNC,
                 )
             }
-            codec.configure(format, null, null, 0)
-            codec.start()
+            synchronized(codecLifecycleLock) {
+                // 串行化 create/configure/start/stop/release:部分厂商 codec service
+                // 在并发创建/销毁实例时不稳定(真机 instrumented 崩溃的可疑来源)。
+                codec.configure(format, null, null, 0)
+                codec.start()
+            }
 
             var channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
             var sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
@@ -598,8 +627,10 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
         } catch (e: Exception) {
             throw LoopException(e.message ?: "音频解码失败", e)
         } finally {
-            try { codec?.stop() } catch (_: Exception) {}
-            try { codec?.release() } catch (_: Exception) {}
+            synchronized(codecLifecycleLock) {
+                try { codec?.stop() } catch (_: Exception) {}
+                try { codec?.release() } catch (_: Exception) {}
+            }
             try { extractor.release() } catch (_: Exception) {}
         }
     }
@@ -679,13 +710,17 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
             }
             val mime = format.getString(MediaFormat.KEY_MIME) ?: throw LoopException("未知的音频编码格式")
 
-            codec = try {
-                MediaCodec.createDecoderByType(mime)
-            } catch (e: Exception) {
-                throw LoopException("设备不支持解码该音频格式", e)
+            codec = synchronized(codecLifecycleLock) {
+                try {
+                    MediaCodec.createDecoderByType(mime)
+                } catch (e: Exception) {
+                    throw LoopException("设备不支持解码该音频格式", e)
+                }
             }
-            codec.configure(format, null, null, 0)
-            codec.start()
+            synchronized(codecLifecycleLock) {
+                codec.configure(format, null, null, 0)
+                codec.start()
+            }
 
             var channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
             var sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
@@ -778,8 +813,10 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
             throw LoopException(e.message ?: "音频解码失败", e)
         } finally {
             try { Process.setThreadPriority(tid, originalPriority) } catch (_: Exception) {}
-            try { codec?.stop() } catch (_: Exception) {}
-            try { codec?.release() } catch (_: Exception) {}
+            synchronized(codecLifecycleLock) {
+                try { codec?.stop() } catch (_: Exception) {}
+                try { codec?.release() } catch (_: Exception) {}
+            }
             try { extractor.release() } catch (_: Exception) {}
         }
     }
@@ -803,6 +840,38 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
 
     private fun parallelKey(info: TrackProbe): String =
         info.mime + "|" + info.sampleRate + "|" + info.channels
+
+    /**
+     * 设备可承载的并行段数上限(宁可慢也不崩):
+     * - 低内存设备 / heap < 256MB -> 2 段;
+     * - 其余 -> [SegmentPlanner.MAX_SEGMENTS](4)。
+     * 另外连续失败(解码器实例受限)2 次后会临时降到 2 段,3 次后直接单线程。
+     */
+    private fun deviceSegmentCap(): Int {
+        val am = try {
+            context.getSystemService(android.app.ActivityManager::class.java)
+        } catch (_: Exception) {
+            null
+        }
+        if (am != null) {
+            if (am.isLowRamDevice) return 2
+            if (am.memoryClass in 1..255) return 2
+        }
+        return SegmentPlanner.MAX_SEGMENTS
+    }
+
+    /** 测试/调试用:清空并行能力缓存(偏移、黑名单、失败计数)。 */
+    internal fun clearParallelCaches() {
+        parallelOffsets.clear()
+        parallelUnsafeKeys.clear()
+        parallelFailureCounts.clear()
+    }
+
+    /** 测试/调试用:只清失败/黑名单,保留探针测得的偏移(避免重复创建探针解码器)。 */
+    internal fun clearParallelFailures() {
+        parallelUnsafeKeys.clear()
+        parallelFailureCounts.clear()
+    }
 
     private fun markParallelUnsafe(key: String, info: TrackProbe) {
         parallelUnsafeKeys.add(key)
@@ -869,6 +938,9 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
 
     private companion object {
         const val TAG = "PcmDecoder"
+
+        /** create/configure/start/stop/release 串行化锁(厂商 codec service 并发稳定性)。 */
+        val codecLifecycleLock: Any = Any()
         const val TIMEOUT_US = 10_000L
 
         /** 预填解码提前量：从 startUs − 1s 开始 seek，给 MP3/AAC sync 帧留余量。 */
@@ -893,5 +965,9 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
         /** 探针失败/接缝失败的 mime|sr|ch;进程内缓存,后续直接单线程。 */
         val parallelUnsafeKeys: MutableSet<String> =
             Collections.synchronizedSet(mutableSetOf<String>())
+
+        /** 并行尝试抛异常(解码器忙/实例受限)的连续次数;>=2 降 2 段,>=3 直接单线程。 */
+        val parallelFailureCounts: java.util.concurrent.ConcurrentHashMap<String, Int> =
+            java.util.concurrent.ConcurrentHashMap()
     }
 }

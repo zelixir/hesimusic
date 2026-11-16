@@ -10,6 +10,7 @@ import com.zjr.hesimusic.data.repository.SongRepository
 import com.zjr.hesimusic.loop.LoopIntent
 import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
+import com.zjr.hesimusic.loop.analysis.PcmDecoder
 import com.zjr.hesimusic.loop.audio.LoopAudioController
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
@@ -31,6 +32,7 @@ interface DebugEntryPoint {
     fun smartPlaylistRepository(): SmartPlaylistRepository
     fun playbackPreferences(): PlaybackPreferences
     fun loopAnalysisManager(): LoopAnalysisManager
+    fun pcmDecoder(): PcmDecoder
     fun loopIntent(): LoopIntent
     fun loopRuntime(): LoopRuntime
     fun loopAudioController(): LoopAudioController
