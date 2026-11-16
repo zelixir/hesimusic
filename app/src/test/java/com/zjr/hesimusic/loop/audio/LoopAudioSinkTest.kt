@@ -23,6 +23,7 @@ class LoopAudioSinkTest {
     private fun rig(
         window: LoopWindow? = window(100, 200),
         maxFramesPerCall: Int = Int.MAX_VALUE,
+        format: androidx.media3.common.Format = PcmTestSupport.format(),
     ): Triple<LoopAudioController, LoopAudioSink, FakeAudioSink> {
         val controller = LoopAudioController()
         // 单测里让预分配/降级 dispatch 同步执行，保证确定性。

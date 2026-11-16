@@ -471,7 +471,7 @@ class LoopAudioSink(
             return false
         }
         if (!seam.beginSeam()) {
-
+            seamLog("skip reason=BEGIN x=" + seam.isPrefixReady + " y=" + seam.isSuffixReady)
             return false
         }
         seamState = SeamRouteState.SEAM
@@ -485,7 +485,7 @@ class LoopAudioSink(
         }
         queueSeam(seam.seamPrefixBytes(), frameToUsCeil(seam.windowEndFrame - seam.deltaFrames))
         queueSeam(seam.seamSuffixBytes(), frameToUsCeil(seam.windowEndFrame))
-
+        seamLog("route switch=" + seamSwitchCount + " seek=" + (seam.windowStartFrame + seam.deltaFrames))
         return true
     }
 
