@@ -18,7 +18,7 @@
 
 | # | 用例 | 判据 |
 |---|---|---|
-| A1 | 进度双阶段(POST /analyze + 500ms 轮询 /analysis) | Decoding 与 Analyzing 各 >=1 样本;全局进度非降;无 Failed |
+| A1 | 进度双阶段(POST /analyze + 40ms 轮询 /analysis;采样脚本 tools/progress-sample.ps1) | Decoding 与 Analyzing 各 >=1 样本;全局进度非降;无 Failed;**平滑(issue 00018):相邻不同值台阶 <=0.08、任意 1s 窗口内至少变化一次、开局 0.5s 内 <=0.15、0.95→1.0 用 1~2 步** |
 | A2 | 分析耗时 | 165s 级曲 <=15s;logcat LoopPerf 有 decode= 与 analyze= 各一条 |
 | A3 | 分析即暂停 | 播放中 /analyze 另一首 -> 100ms 内 playing=false |
 | A4 | 单飞 | 连续两次 /analyze -> 第二次 409,状态不跳变 |
