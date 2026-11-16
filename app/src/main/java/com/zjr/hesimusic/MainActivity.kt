@@ -191,6 +191,7 @@ class MainActivity : ComponentActivity() {
                                 onSleepTimerClick = { navController.navigate("sleep_timer") },
                                 onLogsClick = { navController.navigate("logs") },
                                 onSeamlessLoop = loopActions.onSeamlessLoop,
+                                onSeamlessAnalysis = loopActions.onSeamlessAnalysis,
                             )
                         }
 
@@ -278,6 +279,7 @@ class MainActivity : ComponentActivity() {
                                 onSleepTimerClick = { navController.navigate("sleep_timer") },
                                 onLogsClick = { navController.navigate("logs") },
                                 onSeamlessLoop = loopActions.onSeamlessLoop,
+                                onSeamlessAnalysis = loopActions.onSeamlessAnalysis,
                             )
                         }
 
@@ -340,18 +342,18 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** 菜单「无缝循环」事件(MainActivity 负责播放/导航,菜单只发事件)。 */
+/** 菜单「无缝循环 / 无缝分析」事件(MainActivity 负责播放/导航,菜单只发事件)。 */
 private data class LoopMenuActions(
-    val onSeamlessLoop: (Song, Boolean?) -> Unit,
+    val onSeamlessLoop: (Song) -> Unit,
+    val onSeamlessAnalysis: (Song) -> Unit,
 )
 
 /**
- * 按契约 §1 的入口分流构造回调:
- * - 行 confirmed=1 → **显式武装该歌的无缝意图** + 播放该歌 + repeatMode=ONE;
- * - 行 confirmed=0(临时)或无行 → 导航 loop/{songId}(进页加载已存结果 / 自动分析)。
+ * 构造菜单两个入口的回调:
+ * - 「无缝循环」(菜单仅在行 confirmed=1 时显示)→ **显式武装该歌的无缝意图** + 播放该歌 + repeatMode=ONE;
+ * - 「无缝分析」(始终显示,仅 CUE 置灰)→ 导航 loop/{songId}(进页加载已存结果 / 自动分析)。
  *
- * 「重新分析 / 取消最终结果 / 删除分析结果」已从长按菜单移入结果页(页内自行处理),
- * 这里只保留入口。
+ * 「重新分析 / 取消最终结果 / 删除分析结果」已从长按菜单移入结果页(页内自行处理)。
  */
 @Composable
 private fun rememberLoopMenuActions(
@@ -361,18 +363,14 @@ private fun rememberLoopMenuActions(
 ): LoopMenuActions {
     return remember(navController, musicViewModel, loopIntent) {
         LoopMenuActions(
-            onSeamlessLoop = { song, confirmed ->
-                when (confirmed) {
-                    true -> {
-                        // 显式进入:arm 必须在 play/setRepeatMode(ONE) 之前(记录进入前的 repeat,
-                        // 切歌退出时恢复)。切到别的歌不会自动武装,必须重新走这里。
-                        loopIntent.arm(song.id, musicViewModel.uiState.value.repeatMode)
-                        musicViewModel.play(song)
-                        musicViewModel.setRepeatMode(Player.REPEAT_MODE_ONE)
-                    }
-                    else -> navController.navigate("loop/${song.id}")
-                }
+            onSeamlessLoop = { song ->
+                // 显式进入:arm 必须在 play/setRepeatMode(ONE) 之前(记录进入前的 repeat,
+                // 切歌退出时恢复)。切到别的歌不会自动武装,必须重新走这里。
+                loopIntent.arm(song.id, musicViewModel.uiState.value.repeatMode)
+                musicViewModel.play(song)
+                musicViewModel.setRepeatMode(Player.REPEAT_MODE_ONE)
             },
+            onSeamlessAnalysis = { song -> navController.navigate("loop/${song.id}") },
         )
     }
 }

@@ -77,9 +77,12 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
      *    （不静默补零）。
      *
      * 说明：A/B 通常不落在帧边界，第 4 步的“严格帧数”可能比“PTS < endUs 的帧数”多 1 帧
-     * （末尾整帧）。装 ring 时由 LoopPcmEngine.seedRing 按 ring 长度裁掉多余帧。
+     * （末尾整帧）。装 ring 时由调用方（[RingChunkedSeeder]）按环长度裁掉多余帧。
+     *
+     * 分片预填每片都调用本函数：每次 seek 到片起点前 1s 再追赶，片与片之间由帧号
+     * 对齐（[RingChunkedSeeder]），因此不会因解码器 seek 精度产生缝隙或重复。
      */
-    suspend fun decodePcm16(path: String, startUs: Long, endUs: Long): Pcm16Segment =
+    suspend fun decodePcm16Range(path: String, startUs: Long, endUs: Long): Pcm16Segment =
         withContext(Dispatchers.Default) {
             if (startUs < 0L) throw LoopException("区间起点非法")
             if (endUs <= startUs) throw LoopException("区间长度非法")
@@ -99,6 +102,10 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
                 try { Process.setThreadPriority(tid, originalPriority) } catch (_: Exception) {}
             }
         }
+
+    /** 兼容入口：整段解码 = 一次范围解码（[decodePcm16Range]）。 */
+    suspend fun decodePcm16(path: String, startUs: Long, endUs: Long): Pcm16Segment =
+        decodePcm16Range(path, startUs, endUs)
 
     private suspend fun decodePcm16Internal(
         path: String,

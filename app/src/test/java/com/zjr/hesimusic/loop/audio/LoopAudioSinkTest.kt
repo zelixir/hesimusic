@@ -873,6 +873,116 @@ class LoopAudioSinkTest {
     }
 
     @Test
+    fun `seed 安装在区间内后连续输入不静音且相位不跳`() {
+        val (controller, sink, fake) = rig()
+        val w = window(100, 200)
+        assertTrue(sink.handleBuffer(PcmTestSupport.pcm16Buffer(0, 150), 0L, 1))
+        assertFalse(controller.isRingComplete)
+
+        assertTrue(
+            controller.seedRing(
+                w,
+                PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(100, 100)),
+                PcmTestSupport.SAMPLE_RATE,
+                1,
+            ).isInstalled,
+        )
+        assertEquals("应按最近输入 end=150 对齐", 150_000L, controller.engine.currentPositionUs())
+        assertTrue(controller.isReplaying)
+        val framesBefore = fake.feeds.sumOf { it.frames }
+
+        repeat(10) { i ->
+            val frame = 150 + i * 10
+            assertTrue(
+                "seed 后第 " + i + " 个输入必须正常消费",
+                sink.handleBuffer(
+                    PcmTestSupport.pcm16Buffer(frame, 10),
+                    frame * 1000L,
+                    1,
+                ),
+            )
+        }
+
+        val framesAfter = fake.feeds.sumOf { it.frames }
+        assertTrue("安装后必须有 delegate 输出（不静音）", framesAfter > framesBefore)
+        val replay = fake.feeds.firstOrNull { it.ptsUs >= 150_000L }
+        assertTrue("应有重放输出", replay != null)
+        assertEquals(150_000L, replay!!.ptsUs)
+        assertArrayEquals(
+            "输出应从环内 50 帧(源 150)开始",
+            PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(150, 10)),
+            replay.bytes.copyOfRange(0, 20),
+        )
+    }
+
+    @Test
+    fun `前奏中 seed 后 seek 到区间内不被拉回 A`() {
+        val w = window(1000, 2000)
+        val (controller, sink, fake) = rig(w)
+        assertTrue(sink.handleBuffer(PcmTestSupport.pcm16Buffer(0, 500), 0L, 1))
+
+        assertTrue(
+            controller.seedRing(
+                w,
+                PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(1000, 1000)),
+                PcmTestSupport.SAMPLE_RATE,
+                1,
+            ).isInstalled,
+        )
+        assertEquals("前奏中 seed 不应提前进重放", LoopPcmEngine.State.CAPTURING, controller.engine.state)
+        val afterSeed = fake.feeds.size
+
+        assertTrue(
+            sink.handleBuffer(
+                PcmTestSupport.pcm16Buffer(1500, 10),
+                1_500_000L,
+                1,
+            )
+        )
+
+        assertTrue("seek 后应进入重放", controller.isReplaying)
+        assertTrue(
+            "位置不得被打回 A",
+            controller.engine.currentPositionUs() >= 1_500_000L,
+        )
+        val replay = fake.feeds.drop(afterSeed).firstOrNull { it.ptsUs >= 1_500_000L }
+        assertTrue("应有重放输出", replay != null)
+        assertEquals(1_500_000L, replay!!.ptsUs)
+        assertArrayEquals(
+            "输出应来自环内 1500 帧",
+            PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(1500, 10)),
+            replay.bytes.copyOfRange(0, 20),
+        )
+    }
+
+    @Test
+    fun `重放中再次 seed 被拒绝但输出不静音`() {
+        val (controller, sink, fake) = rig()
+        val w = window(100, 200)
+        assertTrue(
+            controller.seedRing(
+                w,
+                PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(100, 100)),
+                PcmTestSupport.SAMPLE_RATE,
+                1,
+            ).isInstalled,
+        )
+        sink.playToEndOfStream()
+        assertTrue(controller.isReplaying)
+        val framesBefore = fake.feeds.sumOf { it.frames }
+
+        val busy = controller.seedRing(
+            w,
+            PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(100, 100)),
+            PcmTestSupport.SAMPLE_RATE,
+            1,
+        )
+        assertEquals(LoopPcmEngine.SeedStatus.REJECTED_BUSY, busy.status)
+        assertTrue(sink.handleBuffer(PcmTestSupport.pcm16Buffer(250, 10), 250_000L, 1))
+        assertTrue("旧 ring 必须继续输出", fake.feeds.sumOf { it.frames } > framesBefore)
+    }
+
+    @Test
     fun `debug PCM tap 落 WAV 且数据长度正确`() {
         val file = File.createTempFile("loop-tap-", ".wav")
         val sidecar = File(file.parentFile, file.name + ".jsonl")

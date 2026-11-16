@@ -12,10 +12,15 @@ import com.zjr.hesimusic.loop.analysis.AnalysisState
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
 import com.zjr.hesimusic.loop.analysis.LoopCandidateKt
 import com.zjr.hesimusic.loop.analysis.PcmDecoder
+import com.zjr.hesimusic.loop.analysis.Pcm16Segment
+import com.zjr.hesimusic.loop.analysis.RingChunkedSeeder
 import com.zjr.hesimusic.loop.analysis.WaveformPeaks
+import com.zjr.hesimusic.loop.audio.LoopPcmEngine
+import com.zjr.hesimusic.loop.LoopWindow
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -72,6 +77,16 @@ class LoopViewModel @Inject constructor(
 
         /** A/B 最小间隔(拖拽/精调下限),与 PreviewPlayer 保持一致。 */
         private const val MIN_LOOP_LENGTH_MS = PreviewPlayer.MIN_LOOP_LENGTH_MS
+
+        /** 分片预填片长：2s（第一片落地即可起播，其余后台补）。 */
+        private const val PREFILL_CHUNK_MS = RingChunkedSeeder.DEFAULT_CHUNK_MS
+
+        /** 首片慢于此值才显示「正在准备环缓冲…」弱提示（避免阻塞感）。 */
+        private const val SLOW_HINT_MS = 1_500L
+
+        /** 预览侧等待「用户起播/格式就绪」的轮询间隔与上限（约 60s）。 */
+        private const val PREVIEW_SEED_RETRY_DELAY_MS = 100L
+        private const val PREVIEW_SEED_RETRY_LIMIT = 600
     }
 
     val songId: Long = savedStateHandle.get<Long>(ARG_SONG_ID) ?: -1L
@@ -115,25 +130,31 @@ class LoopViewModel @Inject constructor(
     private val _durationMs = MutableStateFlow(0L)
     val durationMs: StateFlow<Long> = _durationMs.asStateFlow()
 
-    // ---- 后台预填环缓冲（进页即解码 [A,B) 灌 ring） ----
+    // ---- 分片预填环缓冲（第一片落地即可用，其余后台补） ----
     private val _ringPreparing = MutableStateFlow(false)
 
-    /** 后台正在解码并预填环缓冲区（UI 显示「正在准备环缓冲…」）。 */
+    /**
+     * 「预填很慢」时才为 true（首片解码超过 [SLOW_HINT_MS] 仍未落地）。
+     *
+     * 分片预填默认第一片（约 2s PCM）落地后就可起播，因此这里只是弱提示：
+     * 绝大多数情况下保持 false，UI 不会出现「正在准备环缓冲…」的阻塞感。
+     */
     val ringPreparing: StateFlow<Boolean> = _ringPreparing.asStateFlow()
 
     private var prefillJob: Job? = null
     private var prefillToken: Any? = null
 
     /**
-     * 后台解码 [A,B) 并预填环缓冲（进 Done 页 / 窗口变化后调用，可取消）。
+     * 后台**分片**解码并逐片追加环缓冲（进 Done 页 / 窗口变化后调用，可取消）。
      *
-     * 成功后「接缝检查」、恢复播放等从区间内起播的场景立即可无缝，不必先完整试听一轮；
-     * 失败（解码不足/输出格式与 sink 不一致/区间超限）只打日志，原有降级/预卷兜底保留。
+     * 第一片（[PREFILL_CHUNK_MS]）落地后「接缝检查」/区间内起播即可无缝，后续片继续后台补；
+     * 失败（解码不足/输出格式与 sink 不一致/追加被拒）只打日志，原有降级/预卷兜底保留。
      */
     private fun scheduleRingPrefill() {
         val song = _song.value ?: return
         if (song.isCue) return
         val window = previewPlayer.loopWindowFor(song, _aMs.value, _bMs.value) ?: run {
+            prefillJob?.cancel()
             _ringPreparing.value = false
             return
         }
@@ -146,40 +167,94 @@ class LoopViewModel @Inject constructor(
         prefillJob?.cancel()
         val token = Any()
         prefillToken = token
-        _ringPreparing.value = true
+        // 分片预填：首片落地前不提示（绝大多数会话无感），只有明显变慢才亮弱提示。
+        _ringPreparing.value = false
         prefillJob = viewModelScope.launch {
-            try {
-                val segment = pcmDecoder.decodePcm16(
-                    song.filePath,
-                    window.loopStartUs,
-                    window.loopEndUs,
-                )
-                // 解码期间可能已换窗口（拖动/换候选）：以最新 A/B 重新取窗口，不一致就丢弃。
-                val latest = previewPlayer.loopWindowFor(song, _aMs.value, _bMs.value)
-                if (latest != window) {
-                    Log.d(TAG, "ring prefill dropped: window changed " + window + " -> " + latest)
-                    return@launch
+            val slowHint = launch {
+                delay(SLOW_HINT_MS)
+                // 只有用户已经开始播放（窗口已写入音频层）且首片还没落地时才提示；
+                // 页面空转等待用户按播放时不显示阻塞式文案。
+                if (prefillToken === token && previewPlayer.hasRingWindow) {
+                    _ringPreparing.value = true
                 }
-                val result = previewPlayer.seedRing(
-                    window,
-                    segment.data,
-                    segment.sampleRate,
-                    segment.channels,
-                )
+            }
+            var firstChunkInstalled = false
+            try {
+                val seeder = RingChunkedSeeder(PREFILL_CHUNK_MS)
+                val result = withContext(Dispatchers.Default) {
+                    seeder.run(
+                        window = window,
+                        // 播放捕获/上一轮预填可能已覆盖前缀：从它之后继续追加。
+                        startFrame = previewPlayer.ringCoveredFrames,
+                        decode = { startUs, endUs ->
+                            pcmDecoder.decodePcm16Range(song.filePath, startUs, endUs)
+                        },
+                        seed = { startFrame, segment ->
+                            val installed = seedPreviewChunk(song, window, startFrame, segment)
+                            if (installed && !firstChunkInstalled) {
+                                // 第一片已可播：撤掉「正在准备环缓冲」弱提示。
+                                firstChunkInstalled = true
+                                _ringPreparing.value = false
+                            }
+                            installed
+                        },
+                    )
+                }
                 Log.d(
                     TAG,
-                    "ring prefill " + result.status + " frames=" + result.frames +
-                        " window=" + window + " detail=" + result.detail,
+                    "ring prefill complete=" + result.complete + " chunks=" + result.chunks +
+                        " frames=" + result.appendedFrames +
+                        " covered=" + previewPlayer.ringCoveredFrames +
+                        " stop=" + result.stopReason + " window=" + window,
                 )
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.w(TAG, "ring prefill failed: " + e.message)
             } finally {
+                slowHint.cancel()
                 if (prefillToken === token) {
                     _ringPreparing.value = false
                 }
             }
+        }
+    }
+
+    /**
+     * 预览侧追加一片。首片可能早于用户按下播放：此时音频层还没有窗口/输出格式
+     * （REJECTED_WINDOW / PENDING），后台等待重试（取消即退出），不阻塞 UI、不丢数据。
+     */
+    private suspend fun seedPreviewChunk(
+        song: Song,
+        window: LoopWindow,
+        startFrame: Long,
+        segment: Pcm16Segment,
+    ): Boolean {
+        var attempt = 0
+        while (true) {
+            // 分片期间可能已换窗口（拖动/换候选）：以最新 A/B 重取窗口，不一致就停。
+            val latest = previewPlayer.loopWindowFor(song, _aMs.value, _bMs.value)
+            if (latest != window) return false
+            val result = previewPlayer.seedRingRange(
+                window,
+                startFrame,
+                segment.data,
+                segment.sampleRate,
+                segment.channels,
+            )
+            if (result.isInstalled) return true
+            if (result.status != LoopPcmEngine.SeedStatus.PENDING &&
+                result.status != LoopPcmEngine.SeedStatus.REJECTED_WINDOW
+            ) {
+                // 格式/边界等硬拒绝：重试不会成功，停止追加（走音频层捕获兜底）。
+                return false
+            }
+            attempt += 1
+            if (attempt > PREVIEW_SEED_RETRY_LIMIT) {
+                Log.d(TAG, "ring prefill gave up: " + result.status + " window=" + window)
+                return false
+            }
+            delay(PREVIEW_SEED_RETRY_DELAY_MS)
         }
     }
 
@@ -441,6 +516,8 @@ class LoopViewModel @Inject constructor(
     fun setMode(mode: PreviewMode) {
         _mode.value = mode
         if (!ensurePreview()) return
+        // 若预填已放弃等待（例如在页面停留很久才起播），起播时补一次。
+        if (prefillJob?.isActive != true) scheduleRingPrefill()
         try {
             previewPlayer.play(mode, startOfMode(mode))
         } catch (e: Exception) {
@@ -597,6 +674,11 @@ class LoopViewModel @Inject constructor(
     }
 
     fun releasePreview() {
+        // 退出/确认保存：取消进行中的分片预填，丢弃后续片。
+        prefillJob?.cancel()
+        prefillJob = null
+        prefillToken = null
+        _ringPreparing.value = false
         previewPlayer.release()
     }
 

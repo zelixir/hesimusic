@@ -134,6 +134,10 @@ class LoopAudioController @Inject constructor() {
     val isRingComplete: Boolean
         get() = engine.isRingComplete
 
+    /** 连续前缀覆盖帧数；分片预填只从这里追加。 */
+    val coveredFrames: Long
+        get() = engine.coveredFrames
+
     /** 当前 ring 是否由解码预填（[seedRing]）安装而非播放捕获。 */
     val isRingPrefilled: Boolean
         get() = engine.isRingPrefilled
@@ -171,6 +175,22 @@ class LoopAudioController @Inject constructor() {
             else -> Unit
         }
         logSeedResult("seedRing", window, result)
+        return result
+    }
+
+    /**
+     * 分片预填：从连续前缀尾部追加，不重置播放相位。
+     * 首片在 sink configure 前会返回 PENDING，调用方（预填服务）短暂重试即可。
+     */
+    fun seedRingRange(
+        window: LoopWindow,
+        startFrame: Long,
+        pcm16: ByteArray,
+        sampleRate: Int,
+        channels: Int,
+    ): LoopPcmEngine.SeedResult {
+        val result = engine.seedRingRange(window, startFrame, pcm16, sampleRate, channels)
+        logSeedResult("seedRingRange", window, result)
         return result
     }
 

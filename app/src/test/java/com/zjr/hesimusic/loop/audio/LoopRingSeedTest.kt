@@ -117,6 +117,258 @@ class LoopRingSeedTest {
         assertArrayEquals("prefilled ring 不得被捕获覆盖", pcm, chunkBytes(engine, chunk))
     }
 
+    @Test
+    fun `seed 安装在区间内时保持当前相位并立即输出`() {
+        val engine = newEngine()
+        val w = window(100, 200)
+        engine.setWindow(w)
+
+        // 前奏 0..49，再进入区间 120..129；ring 尚未完整
+        val prelude = engine.onBuffer(0L, 50, PcmTestSupport.pcm16Buffer(0, 50))
+        engine.onInputDrained(prelude)
+        val inRegion = engine.onBuffer(120_000L, 10, PcmTestSupport.pcm16Buffer(120, 10))
+        engine.onInputDrained(inRegion)
+        assertFalse(engine.isRingComplete)
+        assertEquals(LoopPcmEngine.State.CAPTURING, engine.state)
+
+        val result = engine.seedRing(w, seedBytes(100, 100), 1000, 1)
+
+        assertEquals(LoopPcmEngine.SeedStatus.INSTALLED, result.status)
+        assertEquals("安装后应按最近输入位置(130)对齐", 130_000L, engine.currentPositionUs())
+        assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
+        val chunk = engine.pumpChunk(1 shl 20)!!
+        assertEquals(30L, chunk.frameOffsetInRound)
+        assertEquals(130_000L, chunk.ptsUs)
+        assertEquals(70, chunk.frames)
+        assertArrayEquals(
+            "输出应来自 seed 的环内 30 帧",
+            seedBytes(130, 70),
+            chunkBytes(engine, chunk),
+        )
+    }
+
+    @Test
+    fun `前奏中 seed 后 seek 到区间内按 PTS 进入重放`() {
+        val engine = newEngine()
+        val w = window(1000, 2000)
+        engine.setWindow(w)
+
+        // 前奏只播到 499 帧
+        val prelude = engine.onBuffer(0L, 500, PcmTestSupport.pcm16Buffer(0, 500))
+        engine.onInputDrained(prelude)
+        assertEquals(1000L, engine.ringFrames)
+        // 后台 seed 完成时还在前奏，不应改变捕获/输出
+        assertEquals(
+            LoopPcmEngine.SeedStatus.INSTALLED,
+            engine.seedRing(w, seedBytes(1000, 1000), 1000, 1).status,
+        )
+        assertEquals(LoopPcmEngine.State.CAPTURING, engine.state)
+
+        // 随后 seek 输入跳到区间内 1500；PTS 跳变 1000 帧 > 0.5s 阈值
+        val plan = engine.onBuffer(1_500_000L, 10, PcmTestSupport.pcm16Buffer(1500, 10))
+
+        assertTrue(plan.discard)
+        assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
+        assertEquals("不得落回 A", 1_500_000L, engine.currentPositionUs())
+        val chunk = engine.pumpChunk(1 shl 20)!!
+        assertEquals(500L, chunk.frameOffsetInRound)
+        assertEquals(1_500_000L, chunk.ptsUs)
+        assertArrayEquals(
+            "输出应来自环内 1500 帧",
+            seedBytes(1500, 500),
+            chunkBytes(engine, chunk),
+        )
+    }
+
+    @Test
+    fun `seed 安装在后 B 输入之后按相位继续`() {
+        val engine = newEngine()
+        val w = window(100, 200)
+        engine.setWindow(w)
+
+        // 输入整体越过 B(2530)，ring 未完整 → 原有路径降级
+        val plan = engine.onBuffer(2_530_000L, 10, PcmTestSupport.pcm16Buffer(2530, 10))
+        engine.onInputDrained(plan)
+        assertEquals(LoopPcmEngine.State.PASS_THROUGH, engine.state)
+
+        val result = engine.seedRing(w, seedBytes(100, 100), 1000, 1)
+        assertEquals(LoopPcmEngine.SeedStatus.INSTALLED, result.status)
+        assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
+        assertEquals(2_530_000L, engine.currentPositionUs())
+        val chunk = engine.pumpChunk(1 shl 20)!!
+        assertEquals(30L, chunk.frameOffsetInRound)
+        assertEquals(2_530_000L, chunk.ptsUs)
+    }
+
+    @Test
+    fun `重放中 seed 被拒绝且不打断当前输出`() {
+        val engine = newEngine()
+        val w = window(100, 200)
+        engine.setWindow(w)
+        assertEquals(
+            LoopPcmEngine.SeedStatus.INSTALLED,
+            engine.seedRing(w, seedBytes(100, 100), 1000, 1).status,
+        )
+        assertTrue(engine.onInputEnded())
+        assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
+
+        val first = engine.pumpChunk(40)!!
+        engine.onReplayChunkConsumed(first.byteLength)
+        val posBefore = engine.currentPositionUs()
+
+        val result = engine.seedRing(w, seedBytes(100, 100), 1000, 1)
+
+        assertEquals(LoopPcmEngine.SeedStatus.REJECTED_BUSY, result.status)
+        assertEquals("旧 ring 继续服务", LoopPcmEngine.State.REPLAYING, engine.state)
+        assertEquals(posBefore, engine.currentPositionUs())
+        val next = engine.pumpChunk(1 shl 20)!!
+        assertEquals("PTS 连续", posBefore, next.ptsUs)
+        assertTrue(next.frames > 0)
+    }
+
+    @Test
+    fun `分片预填按连续前缀追加三片`() {
+        val engine = newEngine()
+        val w = window(100, 200)
+        engine.setWindow(w)
+
+        assertEquals(
+            LoopPcmEngine.SeedStatus.INSTALLED,
+            engine.seedRingRange(w, 0L, seedBytes(100, 40), 1000, 1).status,
+        )
+        assertEquals(40L, engine.coveredFrames)
+        assertFalse(engine.isRingComplete)
+
+        assertEquals(
+            LoopPcmEngine.SeedStatus.INSTALLED,
+            engine.seedRingRange(w, 40L, seedBytes(140, 30), 1000, 1).status,
+        )
+        assertEquals(70L, engine.coveredFrames)
+        assertFalse(engine.isRingComplete)
+
+        assertEquals(
+            LoopPcmEngine.SeedStatus.INSTALLED,
+            engine.seedRingRange(w, 70L, seedBytes(170, 30), 1000, 1).status,
+        )
+        assertEquals(100L, engine.coveredFrames)
+        assertEquals(100L, engine.capturedFrames)
+        assertTrue(engine.isRingComplete)
+
+        engine.onInputEnded()
+        val chunk = engine.pumpChunk(1 shl 20)!!
+        assertArrayEquals(seedBytes(100, 100), chunkBytes(engine, chunk))
+    }
+
+    @Test
+    fun `分片预填拒绝非连续起点`() {
+        val engine = newEngine()
+        val w = window(100, 200)
+        engine.setWindow(w)
+        engine.seedRingRange(w, 0L, seedBytes(100, 40), 1000, 1)
+
+        val gap = engine.seedRingRange(w, 50L, seedBytes(150, 10), 1000, 1)
+
+        assertEquals(LoopPcmEngine.SeedStatus.REJECTED_GAP, gap.status)
+        assertEquals(40L, engine.coveredFrames)
+        assertFalse(engine.isRingComplete)
+    }
+
+    @Test
+    fun `门槛不足不进重放且补片后自动进入`() {
+        val engine = newEngine()
+        val w = window(1000, 2000)
+        engine.setWindow(w)
+        engine.seedRingRange(w, 0L, seedBytes(1000, 300), 1000, 1)
+
+        // 300 帧 < 500 帧门槛；输入越过 B 也只能停在捕获
+        val plan = engine.onBuffer(1_990_000L, 10, PcmTestSupport.pcm16Buffer(1990, 10))
+        engine.onInputDrained(plan)
+
+        assertEquals(LoopPcmEngine.State.CAPTURING, engine.state)
+        assertEquals("门槛不足不得记降级", 0L, engine.degradeCount)
+        assertFalse(engine.isRingComplete)
+
+        // 补到 700 帧后，离 B 的门槛已满足，自动进入重放
+        engine.seedRingRange(w, 300L, seedBytes(1300, 400), 1000, 1)
+        assertEquals(700L, engine.coveredFrames)
+        assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
+    }
+
+    @Test
+    fun `重放追尾回退降级并在补片后恢复`() {
+        val engine = newEngine()
+        val w = window(1000, 2000)
+        engine.setWindow(w)
+        engine.seedRingRange(w, 0L, seedBytes(1000, 600), 1000, 1)
+        val plan = engine.onBuffer(1_990_000L, 10, PcmTestSupport.pcm16Buffer(1990, 10))
+        engine.onInputDrained(plan)
+        assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
+
+        // 只覆盖了 600 帧：输出到 coveredFrames 后必须回退，不得输出未覆盖静音
+        val chunk = engine.pumpChunk(1 shl 20)!!
+        assertEquals(600, chunk.frames)
+        engine.onReplayChunkConsumed(chunk.byteLength)
+        assertEquals(600L, engine.totalReplayFrames)
+
+        assertEquals(null, engine.pumpChunk(1 shl 20))
+        assertEquals(LoopPcmEngine.State.CAPTURING, engine.state)
+        assertEquals("追尾应记一次降级", 1L, engine.degradeCount)
+
+        // 覆盖没有增长前，不能拿旧数据再次进入重放（否则会在 0..600 之间循环降级）
+        engine.onInputDrained(plan)
+        assertEquals(LoopPcmEngine.State.CAPTURING, engine.state)
+        assertEquals("不得重复降级", 1L, engine.degradeCount)
+
+        engine.seedRingRange(w, 600L, seedBytes(1600, 400), 1000, 1)
+        assertTrue(engine.isRingComplete)
+        assertEquals("补齐后应恢复重放", LoopPcmEngine.State.REPLAYING, engine.state)
+        assertEquals("降级次数不重复累计", 1L, engine.degradeCount)
+    }
+
+    @Test
+    fun `重放中追加分片不重置当前游标`() {
+        val engine = newEngine()
+        val w = window(1000, 2000)
+        engine.setWindow(w)
+        engine.seedRingRange(w, 0L, seedBytes(1000, 600), 1000, 1)
+        val plan = engine.onBuffer(1_990_000L, 10, PcmTestSupport.pcm16Buffer(1990, 10))
+        engine.onInputDrained(plan)
+        assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
+
+        val first = engine.pumpChunk(100 * 2)!!
+        assertEquals(100, first.frames)
+        engine.onReplayChunkConsumed(first.byteLength)
+        val posBefore = engine.currentPositionUs()
+        assertEquals(2_100_000L, posBefore)
+
+        engine.seedRingRange(w, 600L, seedBytes(1600, 400), 1000, 1)
+
+        assertEquals("追加不得重置相位", posBefore, engine.currentPositionUs())
+        assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
+        val next = engine.pumpChunk(1 shl 20)!!
+        assertEquals(posBefore, next.ptsUs)
+        assertTrue(next.frames > 0)
+    }
+
+    @Test
+    fun `窗口变更后分片覆盖归零`() {
+        val engine = newEngine()
+        val w = window(100, 200)
+        engine.setWindow(w)
+        engine.seedRingRange(w, 0L, seedBytes(100, 40), 1000, 1)
+        assertEquals(40L, engine.coveredFrames)
+
+        engine.setWindow(window(150, 250))
+
+        assertEquals(0L, engine.coveredFrames)
+        assertEquals(0L, engine.capturedFrames)
+        assertFalse(engine.isRingComplete)
+        assertEquals(
+            LoopPcmEngine.SeedStatus.REJECTED_WINDOW,
+            engine.seedRingRange(w, 0L, seedBytes(100, 40), 1000, 1).status,
+        )
+    }
+
     // ---------------------------------------------------------------- 失效
 
     @Test
@@ -264,6 +516,33 @@ class LoopRingSeedTest {
 
         controller.window = window(150, 250)
         assertFalse(controller.hasPendingSeed)
+    }
+
+    @Test
+    fun `controller seedRingRange 返回 PENDING 并在格式就绪后追加`() {
+        val controller = newController()
+        val w = window(100, 200)
+
+        assertEquals(
+            LoopPcmEngine.SeedStatus.PENDING,
+            controller.seedRingRange(w, 0L, seedBytes(100, 20), 1000, 1).status,
+        )
+        assertEquals(0L, controller.coveredFrames)
+
+        controller.onFormatConfigured(1000, 1, 2, false)
+        controller.window = w
+        assertEquals(
+            LoopPcmEngine.SeedStatus.INSTALLED,
+            controller.seedRingRange(w, 0L, seedBytes(100, 20), 1000, 1).status,
+        )
+        assertEquals(20L, controller.coveredFrames)
+
+        assertEquals(
+            LoopPcmEngine.SeedStatus.INSTALLED,
+            controller.seedRingRange(w, 20L, seedBytes(120, 20), 1000, 1).status,
+        )
+        assertEquals(40L, controller.coveredFrames)
+        assertFalse(controller.isRingComplete)
     }
 
     @Test

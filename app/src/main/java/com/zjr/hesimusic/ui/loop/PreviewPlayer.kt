@@ -208,17 +208,24 @@ class PreviewPlayer @Inject constructor(
     }
 
     /**
-     * 后台预填环缓冲：把 [window] 的 PCM16（交错小端）交给控制器安装。
-     *
-     * 任意线程可调用；sink 尚未 configure / 窗口尚未写入时由控制器暂存，稍后安装。
-     * 安装成功后该窗口内不再用播放捕获覆盖 ring（保证逐轮逐位相同）。
+     * 分片预填：把 [startFrame]（**环内帧号**，0 = 窗口起点 A）起的 PCM16（交错小端）
+     * 追加进 ring。任意线程可调用；返回是否成功追加（音频层门槛自动判断可否起播）。
      */
-    fun seedRing(
+    fun seedRingRange(
         window: LoopWindow,
+        startFrame: Long,
         pcm16: ByteArray,
         sampleRate: Int,
         channels: Int,
-    ): LoopPcmEngine.SeedResult = controller.seedRing(window, pcm16, sampleRate, channels)
+    ) = controller.seedRingRange(window, startFrame, pcm16, sampleRate, channels)
+
+    /** 当前 ring 已连续覆盖的前缀帧数（分片预填进度）。 */
+    val ringCoveredFrames: Long
+        get() = controller.coveredFrames
+
+    /** 预览播放器是否已经把窗口写进音频层（= 已 prepare/起播过）。 */
+    val hasRingWindow: Boolean
+        get() = controller.window != null
 
     /**
      * 当前窗口的 ring 是否已经完整（预填或捕获）。为 true 时后台预填解码可以跳过，

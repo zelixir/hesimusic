@@ -1,6 +1,7 @@
 package com.zjr.hesimusic.service
 
 import com.zjr.hesimusic.loop.LoopWindow
+import com.zjr.hesimusic.loop.analysis.Pcm16Frames
 import com.zjr.hesimusic.loop.analysis.Pcm16Segment
 import com.zjr.hesimusic.loop.audio.LoopAudioController
 import kotlinx.coroutines.CancellationException
@@ -17,25 +18,24 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 服务层环缓冲预填单测（纯 JVM）：可注入假解码器/假路径解析，用 [LoopAudioController] 真身验证落点。
- *
- * 覆盖：窗口应用且 ring 不完整 → 触发一次；ring 已完整 → 不触发；窗口清空/切换（含切歌）→
- * 取消旧任务；解码期间窗口变化 → 丢弃结果；失败不重试轰炸；路径缺失跳过。
+ * 服务层分片预填单测（纯 JVM）：假解码器 + 真 [LoopAudioController]，验证逐片追加、
+ * 取消、失败停止、窗口比较并设置。
  */
 class LoopRingPrefillerTest {
 
     private val songId = 7L
     private val otherSongId = 9L
+    private val chunkMs = 20
 
     private fun window(songId: Long = this.songId, aMs: Long = 100L, bMs: Long = 200L): LoopWindow =
         LoopWindow(songId = songId, loopStartUs = aMs * 1_000L, loopEndUs = bMs * 1_000L)
 
-    /** 假解码器：可阻塞（取消测试）、可失败、可用 gate 控制完成时机。 */
+    /** 假解码器：按区间返回 ceil((end−start)*sr/1e6) 帧；可阻塞（取消测试）/失败/gate 控制。 */
     private class FakeDecoder(
-        var frames: Long = 100L,
         var sampleRate: Int = 1_000,
         var channels: Int = 1,
-        var block: Boolean = false,
+        /** 从第几次 decode 调用开始阻塞（1 基；默认永不阻塞）。 */
+        var blockFrom: Int = Int.MAX_VALUE,
         var fail: Boolean = false,
     ) {
         val calls = mutableListOf<Triple<String, Long, Long>>()
@@ -48,12 +48,13 @@ class LoopRingPrefillerTest {
             started += 1
             try {
                 gate?.await()
-                if (block) awaitCancellation()
+                if (started >= blockFrom) awaitCancellation()
             } catch (e: CancellationException) {
                 cancelled += 1
                 throw e
             }
             if (fail) throw IllegalStateException("decode boom")
+            val frames = Pcm16Frames.framesForUsCeil(endUs - startUs, sampleRate)
             return Pcm16Segment(
                 data = ByteArray((frames * channels * 2).toInt()),
                 sampleRate = sampleRate,
@@ -65,9 +66,9 @@ class LoopRingPrefillerTest {
 
     private fun newController(): LoopAudioController {
         val controller = LoopAudioController()
-        // 单测里让预分配/降级 dispatch 同步执行，保证确定性。
         controller.preallocDispatcher = { it.run() }
         controller.degradeDispatcher = { it.run() }
+        controller.onFormatConfigured(1_000, 1, 2, false)
         return controller
     }
 
@@ -80,13 +81,13 @@ class LoopRingPrefillerTest {
             songId to "/music/seven.flac",
             otherSongId to "/music/nine.flac",
         )
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         return LoopRingPrefiller(
             audio = controller,
-            scope = scope,
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined),
             decode = { path, startUs, endUs -> decoder.decode(path, startUs, endUs) },
             resolvePath = { id -> pathMap[id] },
             dispatcher = Dispatchers.Unconfined,
+            chunkMs = chunkMs,
         )
     }
 
@@ -95,36 +96,44 @@ class LoopRingPrefillerTest {
         runBlocking { yield() }
     }
 
-    // ---------------------------------------------------------------- 触发/幂等
+    // ---------------------------------------------------------------- 逐片追加
 
     @Test
-    fun `ring 不完整时窗口应用触发一次预填`() {
+    fun `窗口应用后按 2s 以下的片长逐片追加直到完整`() {
         val controller = newController()
+        val w = window()
+        controller.window = w
         val decoder = FakeDecoder()
         val pre = newPrefiller(controller, decoder)
-        val w = window()
-        // 服务层顺序：先写 audio.window，再触发预填（比较并设置依赖它）。
-        controller.window = w
 
         pre.onWindowApplied(w)
+        settle()
 
-        assertEquals("应解码一次", 1, decoder.started)
-        assertEquals(Triple("/music/seven.flac", 100_000L, 200_000L), decoder.calls.single())
-        // sink 尚未 configure（格式未知）→ 音频层暂存 pending，说明 seedRing 已被调用。
-        assertTrue(controller.hasPendingSeed)
-
-        // 同一窗口重复应用：不重复解码（不重试轰炸）。
-        pre.onWindowApplied(w)
-        assertEquals(1, decoder.started)
+        // 100ms 窗口 @1kHz = 100 帧；片长 20ms = 20 帧 → 5 片，按时间顺序推进。
+        assertEquals(5, decoder.started)
+        assertEquals(
+            listOf(
+                Triple("/music/seven.flac", 100_000L, 120_000L),
+                Triple("/music/seven.flac", 120_000L, 140_000L),
+                Triple("/music/seven.flac", 140_000L, 160_000L),
+                Triple("/music/seven.flac", 160_000L, 180_000L),
+                Triple("/music/seven.flac", 180_000L, 200_000L),
+            ),
+            decoder.calls,
+        )
+        assertEquals(100L, controller.coveredFrames)
+        assertTrue(controller.isRingComplete)
+        assertEquals(0L, controller.degradeCount)
     }
 
     @Test
     fun `ring 已完整时不触发预填`() {
         val controller = newController()
-        controller.onFormatConfigured(1_000, 1, 2, false)
         val w = window()
         controller.window = w
-        assertTrue(controller.seedRing(w, ByteArray(200), 1_000, 1).isInstalled)
+        val first = newPrefiller(controller, FakeDecoder())
+        first.onWindowApplied(w)
+        settle()
         assertTrue(controller.isRingComplete)
 
         val decoder = FakeDecoder()
@@ -137,134 +146,120 @@ class LoopRingPrefillerTest {
     // ---------------------------------------------------------------- 取消
 
     @Test
-    fun `窗口清空会取消进行中的预填`() {
+    fun `窗口清空会取消进行中的分片`() {
         val controller = newController()
-        val decoder = FakeDecoder(block = true)
+        val w = window()
+        controller.window = w
+        // 第一片成功落地，第二片阻塞在解码里，等待外部取消。
+        val decoder = FakeDecoder(blockFrom = 2)
         val pre = newPrefiller(controller, decoder)
 
-        pre.onWindowApplied(window())
-        assertEquals(1, decoder.started)
+        pre.onWindowApplied(w)
         assertTrue(pre.hasActiveJobForTest)
+        // 第一片已落地，第二片正在解码（阻塞中）。
+        assertEquals(2, decoder.started)
+        assertEquals(20L, controller.coveredFrames)
 
         pre.onWindowApplied(null)
         settle()
 
         assertEquals("进行中的解码应被取消", 1, decoder.cancelled)
-        assertEquals("取消后不应再发起解码", 1, decoder.started)
+        assertEquals("取消后不再解码后续片", 2, decoder.started)
         assertFalse(pre.hasActiveJobForTest)
     }
 
     @Test
-    fun `窗口切换会取消旧任务并开始新的预填`() {
+    fun `切歌（窗口 songId 变化）会取消旧任务并按新路径重新开始`() {
         val controller = newController()
-        val decoder = FakeDecoder(block = true)
-        val pre = newPrefiller(controller, decoder)
-
-        pre.onWindowApplied(window(aMs = 100L, bMs = 200L))
-        assertEquals(1, decoder.started)
-
-        pre.onWindowApplied(window(aMs = 300L, bMs = 400L))
-        settle()
-
-        assertEquals(1, decoder.cancelled)
-        assertEquals(2, decoder.started)
-        assertEquals(300_000L, decoder.calls[1].second)
-        assertEquals(400_000L, decoder.calls[1].third)
-        assertTrue(pre.hasActiveJobForTest)
-    }
-
-    @Test
-    fun `切歌时按新歌路径预填并取消旧任务`() {
-        val controller = newController()
-        val decoder = FakeDecoder(block = true)
-        val pre = newPrefiller(controller, decoder)
-
-        pre.onWindowApplied(window())
-        pre.onWindowApplied(window(songId = otherSongId))
-        settle()
-
-        assertEquals(1, decoder.cancelled)
-        assertEquals(2, decoder.started)
-        assertEquals("/music/nine.flac", decoder.calls[1].first)
-        assertEquals(otherSongId, window(songId = otherSongId).songId)
-    }
-
-    // ---------------------------------------------------------------- 落点/失败
-
-    @Test
-    fun `预填完成安装 ring 且不产生降级`() {
-        val controller = newController()
-        controller.onFormatConfigured(1_000, 1, 2, false)
-        val w = window()
-        controller.window = w
-        val decoder = FakeDecoder(frames = 100L)
-        val pre = newPrefiller(controller, decoder)
-
-        pre.onWindowApplied(w)
-        settle()
-
-        assertEquals(1, decoder.started)
-        assertTrue(controller.isRingComplete)
-        assertTrue(controller.isRingPrefilled)
-        assertFalse(controller.hasPendingSeed)
-        assertEquals(0L, controller.degradeCount)
-    }
-
-    @Test
-    fun `解码失败只记日志且同一窗口不重试`() {
-        val controller = newController()
-        val decoder = FakeDecoder(fail = true)
-        val pre = newPrefiller(controller, decoder)
-        val w = window()
-
-        pre.onWindowApplied(w)
-        settle()
-
-        assertEquals(1, decoder.started)
-        assertFalse(controller.isRingComplete)
-        assertFalse(controller.isRingPrefilled)
-
-        // 同一窗口再次应用（例如 row 刷新）：不重复解码。
-        pre.onWindowApplied(w)
-        assertEquals(1, decoder.started)
-    }
-
-    @Test
-    fun `路径缺失时跳过且不污染 ring`() {
-        val controller = newController()
-        val decoder = FakeDecoder()
-        val pre = newPrefiller(controller, decoder, paths = emptyMap())
-
-        pre.onWindowApplied(window())
-        settle()
-
-        assertEquals(0, decoder.started)
-        assertFalse(controller.isRingComplete)
-        assertFalse(controller.isRingPrefilled)
-        assertFalse(controller.hasPendingSeed)
-    }
-
-    @Test
-    fun `解码期间窗口变化则丢弃结果`() {
-        val controller = newController()
-        controller.onFormatConfigured(1_000, 1, 2, false)
         val w1 = window()
         controller.window = w1
-        val gate = CompletableDeferred<Unit>()
-        val decoder = FakeDecoder(frames = 100L).also { it.gate = gate }
+        val decoder = FakeDecoder(blockFrom = 1)
         val pre = newPrefiller(controller, decoder)
 
         pre.onWindowApplied(w1)
         assertEquals(1, decoder.started)
 
-        // 解码未完成时窗口被换掉（比较并设置：旧结果必须丢弃）。
+        val w2 = window(songId = otherSongId, aMs = 300L, bMs = 400L)
+        controller.window = w2
+        pre.onWindowApplied(w2)
+        settle()
+
+        assertEquals(1, decoder.cancelled)
+        assertEquals(2, decoder.started)
+        assertEquals("/music/nine.flac", decoder.calls[1].first)
+        assertEquals(300_000L, decoder.calls[1].second)
+    }
+
+    @Test
+    fun `预填期间窗口变化则丢弃该片`() {
+        val controller = newController()
+        val w1 = window()
+        controller.window = w1
+        val gate = CompletableDeferred<Unit>()
+        val decoder = FakeDecoder().also { it.gate = gate }
+        val pre = newPrefiller(controller, decoder)
+
+        pre.onWindowApplied(w1)
+        assertEquals(1, decoder.started)
+
+        // 解码未完成时窗口被换掉：旧片必须丢弃，不能污染新窗口的 ring。
         val w2 = window(aMs = 300L, bMs = 400L)
         controller.window = w2
         gate.complete(Unit)
         settle()
 
-        assertFalse("旧窗口的预填结果必须丢弃", controller.isRingComplete)
-        assertFalse(controller.isRingPrefilled)
+        assertEquals(0L, controller.coveredFrames)
+        assertFalse(controller.isRingComplete)
+    }
+
+    // ---------------------------------------------------------------- 失败
+
+    @Test
+    fun `单片解码失败后停止且保留已灌入前缀`() {
+        val controller = newController()
+        val w = window()
+        controller.window = w
+        val decoder = FakeDecoder()
+        // 第一片成功、第二片失败：只保留前 20 帧前缀。
+        var calls = 0
+        val pre = LoopRingPrefiller(
+            audio = controller,
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined),
+            decode = { path, startUs, endUs ->
+                calls += 1
+                if (calls == 2) throw IllegalStateException("decode boom")
+                decoder.decode(path, startUs, endUs)
+            },
+            resolvePath = { id -> mapOf(songId to "/music/seven.flac")[id] },
+            dispatcher = Dispatchers.Unconfined,
+            chunkMs = chunkMs,
+        )
+
+        pre.onWindowApplied(w)
+        settle()
+
+        assertEquals(20L, controller.coveredFrames)
+        assertFalse(controller.isRingComplete)
+
+        // 同一窗口再次应用：不重试轰炸。
+        pre.onWindowApplied(w)
+        assertEquals(2, calls)
+    }
+
+    @Test
+    fun `路径缺失时跳过且不污染 ring`() {
+        val controller = newController()
+        val w = window()
+        controller.window = w
+        val decoder = FakeDecoder()
+        val pre = newPrefiller(controller, decoder, paths = emptyMap())
+
+        pre.onWindowApplied(w)
+        settle()
+
+        assertEquals(0, decoder.started)
+        assertEquals(0L, controller.coveredFrames)
+        assertFalse(controller.isRingComplete)
     }
 }
 

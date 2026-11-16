@@ -15,10 +15,10 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -34,7 +34,6 @@ import com.zjr.hesimusic.ui.common.doubleScaled
 import com.zjr.hesimusic.ui.common.largeScaled
 import com.zjr.hesimusic.utils.TimeFormatter
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.launch
 import javax.inject.Inject
 import java.io.File
 import java.util.Locale
@@ -52,21 +51,32 @@ fun SongActionHost(
     onLoadMetadata: (Song, (Map<String, String>) -> Unit) -> Unit,
     onAddToQueue: ((Song) -> Unit)? = null,
     /**
-     * 「无缝循环」:菜单只发事件(契约 §1)。第二个参数 = 当前 song_loop 行的 confirmed
-     * (null = 无行/查询失败,false = 临时结果,true = 最终结果),由调用方决定
-     * 「直接播放 + REPEAT_ONE」还是「导航到分析页」。
+     * 「无缝循环」:仅当该歌 song_loop 行 confirmed=1 时显示(菜单内部按异步查询结果决定),
+     * 点击 = 调用方武装无缝意图 + 播放该歌 + REPEAT_ONE。
      */
-    onSeamlessLoop: ((Song, Boolean?) -> Unit)? = null
+    onSeamlessLoop: ((Song) -> Unit)? = null,
+    /**
+     * 「无缝分析」:始终显示(仅 CUE 分轨置灰 + 点击提示),点击导航到「分析与预览」页
+     * (已存结果直接加载,无行则自动分析)。
+     */
+    onSeamlessAnalysis: ((Song) -> Unit)? = null
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val loopEntryViewModel: LoopEntryViewModel = hiltViewModel()
     var showAddDialog by remember(selectedSong) { mutableStateOf(false) }
     var showInfoDialog by remember(selectedSong) { mutableStateOf(false) }
     var showHideConfirmDialog by remember(selectedSong) { mutableStateOf(false) }
     var showDeleteDialog by remember(selectedSong) { mutableStateOf(false) }
     var metadata by remember(selectedSong) { mutableStateOf<Map<String, String>>(emptyMap()) }
+    // 当前歌的 song_loop 行是否 confirmed=1;null = 查询中/查询失败/无行 → 按未确认处理,
+    // 即菜单只显示「无缝分析」,避免「无缝循环」先闪现再消失。
+    var loopConfirmed by remember(selectedSong) { mutableStateOf<Boolean?>(null) }
     val menuTextStyle = largeMenuTextStyle()
+
+    LaunchedEffect(selectedSong) {
+        val song = selectedSong ?: return@LaunchedEffect
+        loopConfirmed = runCatching { loopEntryViewModel.loopRow(song.id) }.getOrNull()?.confirmed
+    }
 
     if (selectedSong != null && !showAddDialog && !showInfoDialog && !showHideConfirmDialog && !showDeleteDialog) {
         AlertDialog(
@@ -122,33 +132,54 @@ fun SongActionHost(
                             }
                     )
                     Spacer(modifier = Modifier.height(12.dp))
-                    if (onSeamlessLoop != null) {
+                    if (onSeamlessLoop != null || onSeamlessAnalysis != null) {
                         // CUE 分轨不支持无缝循环(分析会拿到整文件 PCM):置灰 + 点击提示
                         val isCueTrack = selectedSong.isCue
-                        Text(
-                            text = "无缝循环",
-                            style = menuTextStyle,
-                            color = if (isCueTrack) {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            } else {
-                                MaterialTheme.colorScheme.primary
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    if (isCueTrack) {
-                                        Toast.makeText(context, "CUE 分轨暂不支持无缝循环", Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        val song = selectedSong
-                                        scope.launch {
-                                            val row = runCatching { loopEntryViewModel.loopRow(song.id) }.getOrNull()
-                                            onSeamlessLoop.invoke(song, row?.confirmed)
+                        val seamlessMenu = resolveSeamlessMenuState(isCue = isCueTrack, confirmed = loopConfirmed)
+                        if (seamlessMenu.showSeamlessLoop && onSeamlessLoop != null) {
+                            Text(
+                                text = "无缝循环",
+                                style = menuTextStyle,
+                                color = if (seamlessMenu.seamlessLoopEnabled) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        if (!seamlessMenu.seamlessLoopEnabled) {
+                                            Toast.makeText(context, "CUE 分轨暂不支持无缝循环", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            onSeamlessLoop.invoke(selectedSong)
                                             onDismiss()
                                         }
                                     }
-                                }
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                        }
+                        if (seamlessMenu.showSeamlessAnalysis && onSeamlessAnalysis != null) {
+                            Text(
+                                text = "无缝分析",
+                                style = menuTextStyle,
+                                color = if (seamlessMenu.seamlessAnalysisEnabled) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        if (!seamlessMenu.seamlessAnalysisEnabled) {
+                                            Toast.makeText(context, "CUE 分轨暂不支持无缝循环", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            onSeamlessAnalysis.invoke(selectedSong)
+                                            onDismiss()
+                                        }
+                                    }
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                        }
                     }
                     Text(
                         text = "从曲库中隐藏歌曲",
@@ -261,7 +292,7 @@ fun SongActionHost(
 }
 
 /**
- * 菜单侧只读查询 song_loop 行(仅决定「无缝循环」三态:无行 / 临时 / 最终)。
+ * 菜单侧只读查询 song_loop 行(仅决定「无缝循环」是否显示:confirmed=1 才显示)。
  * **不做任何播放/写库动作** —— 菜单只发事件(契约 §1)。
  */
 @HiltViewModel
@@ -381,4 +412,28 @@ private fun formatSize(size: Long): String {
 @Composable
 private fun largeMenuTextStyle(): TextStyle {
     return androidx.compose.material3.MaterialTheme.typography.bodyLarge.largeScaled()
+}
+
+/**
+ * 「无缝」两项菜单的显示/可用决策(纯函数,单测见 SeamlessMenuStateTest)。
+ *
+ * - 「无缝分析」:始终显示,仅 CUE 分轨置灰;
+ * - 「无缝循环」:仅 song_loop 行 confirmed=1 时显示;null(查询中/查询失败/无行)
+ *   一律按未确认处理,避免菜单先闪出「无缝循环」再消失。
+ */
+internal data class SeamlessMenuState(
+    val showSeamlessLoop: Boolean,
+    val seamlessLoopEnabled: Boolean,
+    val showSeamlessAnalysis: Boolean,
+    val seamlessAnalysisEnabled: Boolean,
+)
+
+internal fun resolveSeamlessMenuState(isCue: Boolean, confirmed: Boolean?): SeamlessMenuState {
+    val confirmedFinal = confirmed == true
+    return SeamlessMenuState(
+        showSeamlessLoop = confirmedFinal,
+        seamlessLoopEnabled = confirmedFinal && !isCue,
+        showSeamlessAnalysis = true,
+        seamlessAnalysisEnabled = !isCue,
+    )
 }

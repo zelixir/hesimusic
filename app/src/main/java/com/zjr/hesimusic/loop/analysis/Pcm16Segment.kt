@@ -8,6 +8,33 @@ class Pcm16Segment(
     val frames: Long,
 ) {
     val bytesPerFrame: Int get() = channels * 2
+
+    /**
+     * 只保留前 [frames] 帧（裁剪片尾多余整帧；[frames] >= 本段帧数时原样返回）。
+     *
+     * 预填按环长度裁剪时用：区间长度换算的“严格帧数”可能比环帧数多 1。
+     */
+    fun takeFrames(frames: Long): Pcm16Segment {
+        if (frames >= this.frames) return this
+        if (frames <= 0L) return Pcm16Segment(ByteArray(0), sampleRate, channels, 0L)
+        val bytes = (frames * bytesPerFrame).toInt()
+        return Pcm16Segment(data.copyOf(bytes), sampleRate, channels, frames)
+    }
+
+    /**
+     * 丢弃前 [frames] 帧（跳过播放捕获已覆盖的前缀；<=0 原样返回）。
+     */
+    fun dropFrames(frames: Long): Pcm16Segment {
+        if (frames <= 0L) return this
+        if (frames >= this.frames) return Pcm16Segment(ByteArray(0), sampleRate, channels, 0L)
+        val offsetBytes = (frames * bytesPerFrame).toInt()
+        return Pcm16Segment(
+            data = data.copyOfRange(offsetBytes, data.size),
+            sampleRate = sampleRate,
+            channels = channels,
+            frames = this.frames - frames,
+        )
+    }
 }
 
 /**

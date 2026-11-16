@@ -1,0 +1,625 @@
+package com.zjr.hesimusic.ui.loop.state
+
+import com.zjr.hesimusic.loop.LoopWindow
+import com.zjr.hesimusic.loop.analysis.LoopCandidateKt
+import kotlin.math.roundToLong
+
+/**
+ * 分析/预览页的**纯模型**状态机（第一轮：只做模型与矩阵测试，不接 UI）。
+ *
+ * 设计目标：把原先散落在 LoopViewModel 多个 `mutableStateOf`/`StateFlow` 字段里的
+ * mode / isPlaying / ringPreparing / candidates / selectedCandidate / A-B / dragging /
+ * confirmed / prefill / position 收敛成**一个不可变状态**，所有副作用只以
+ * [LoopPageEffect] 声明，由 [LoopPageReducer] 纯函数计算。
+ *
+ * 本文件禁止依赖 Android / 播放器 / DB：只允许 [LoopWindow] 与 [LoopCandidateKt]
+ * 这两个纯数据模型。
+ */
+
+/** 四种试听模式。与 ui/loop/PreviewPlayer.kt 的 PreviewMode 一一对应（接 UI 时做映射）。 */
+enum class LoopPageMode {
+    FULL,
+    LOOP_ONLY,
+    SEAM,
+    FREE,
+}
+
+/** 拖拽手柄。 */
+enum class LoopHandle { A, B }
+
+/** 分析阶段：解码（0→0.5）/ 候选分析（0.5→1.0）。 */
+enum class AnalysisPhase { DECODING, ANALYZING }
+
+/**
+ * 后台环缓冲预填状态。
+ *
+ * - [NotStarted]：未开始（无候选 / 刚进入 Ready 且没有窗口）；
+ * - [InProgress]：解码预填中（UI 可显示「正在准备环缓冲…」）；
+ * - [Ready]：当前提交窗口的 ring 已完整；
+ * - [Failed]：预填失败（UI 保留降级路径，不阻塞试听）。
+ */
+sealed interface PrefillState {
+    data object NotStarted : PrefillState
+    data class InProgress(val progress: Float = 0f) : PrefillState
+    data object Ready : PrefillState
+    data class Failed(val message: String) : PrefillState
+}
+
+/**
+ * 播放状态。
+ *
+ * [AwaitingPrefill] 是 00009 的核心建模：换窗口/换候选后，位置可以继续插值推进，
+ * 但**不允许**声称有音频输出；预填就绪（或失败降级）后 **必须** 产生 [LoopPageEffect.Play]。
+ */
+sealed interface PlaybackState {
+    data object Stopped : PlaybackState
+    data object Playing : PlaybackState
+    data object Paused : PlaybackState
+    data class AwaitingPrefill(
+        val resumeMode: LoopPageMode,
+        val resumeAtMs: Long,
+    ) : PlaybackState
+}
+
+/** 拖拽状态。拖动中只改视觉 A/B，松手后的 CommitWindow 才应用窗口。 */
+sealed interface DragState {
+    data object Idle : DragState
+    data class Dragging(val handle: LoopHandle, val ms: Long) : DragState
+}
+
+/**
+ * 页面顶层状态。
+ *
+ * 关键不变量（见 LoopPageReducerTest 的矩阵不变量测试）：
+ * - [Ready] 中 `0 <= aMs < bMs <= durationMs` 且 `bMs - aMs >= MIN_LOOP_LENGTH_MS`；
+ * - `positionMs in [0, durationMs]`；
+ * - 有候选时 `selectedCandidate in candidates.indices`，无候选时为 0；
+ * - `drag == Dragging(A, ms)` 时 `aMs == ms`，B 同理；
+ * - `playback is AwaitingPrefill` 时 `prefill is InProgress`（因此必定有一个后续
+ *   PrefillReady/PrefillFailed 会补发 Play，杜绝「位置在动但无输出」）。
+ */
+sealed interface LoopPageState {
+    /** 首帧骨架 / 入口解析中（歌曲查询、song_loop 查询）。 */
+    data object Loading : LoopPageState
+
+    /** 解码 / 分析中。进度已 clamp 到 [0,1]。 */
+    data class Analyzing(
+        val phase: AnalysisPhase,
+        val progress: Float,
+    ) : LoopPageState
+
+    /** 结果页（可试听、可拖拽、可保存）。 */
+    data class Ready(
+        val songId: Long,
+        val durationMs: Long,
+        val sampleRate: Int,
+        val mode: LoopPageMode,
+        val aMs: Long,
+        val bMs: Long,
+        val candidates: List<LoopCandidateKt>,
+        val selectedCandidate: Int,
+        val confirmed: Boolean,
+        val prefill: PrefillState,
+        val playback: PlaybackState,
+        val positionMs: Long,
+        val drag: DragState,
+    ) : LoopPageState
+
+    /** 分析失败 / 入口守卫失败（未找到歌曲、CUE 分轨等）。 */
+    data class Failed(val message: String) : LoopPageState
+}
+
+/** 页面事件（UI 只派发事件，不直接改状态）。 */
+sealed interface LoopPageEvent {
+    /**
+     * 进入页面。
+     *
+     * @param hasSavedResult true = 已有 song_loop 行，VM 会加载后派发 [AnalysisDone]；
+     *                       false = 无行，reducer 直接进入 Analyzing 并要求 [LoopPageEffect.RestartAnalysis]。
+     */
+    data class Enter(val hasSavedResult: Boolean) : LoopPageEvent
+
+    data class AnalysisProgress(
+        val phase: AnalysisPhase,
+        val progress: Float,
+    ) : LoopPageEvent
+
+    data class AnalysisDone(
+        val songId: Long,
+        val candidates: List<LoopCandidateKt>,
+        val sampleRate: Int,
+        val durationMs: Long,
+        val confirmed: Boolean = false,
+    ) : LoopPageEvent
+
+    data class AnalysisFailed(val message: String) : LoopPageEvent
+
+    data object Retry : LoopPageEvent
+
+    data class SelectCandidate(val index: Int) : LoopPageEvent
+
+    data class DragAStart(val ms: Long) : LoopPageEvent
+    data class DragAMove(val ms: Long) : LoopPageEvent
+    data object DragAEnd : LoopPageEvent
+    data class DragBStart(val ms: Long) : LoopPageEvent
+    data class DragBMove(val ms: Long) : LoopPageEvent
+    data object DragBEnd : LoopPageEvent
+
+    /** 松手后应用当前 A/B（拖拽期间只改视觉，不发窗口副作用）。 */
+    data object CommitWindow : LoopPageEvent
+
+    data class SwitchMode(val mode: LoopPageMode) : LoopPageEvent
+
+    data object TogglePlay : LoopPageEvent
+
+    /** 播放器位置 tick（展示口径）。 */
+    data class Tick(val positionMs: Long) : LoopPageEvent
+
+    data object PrefillStarted : LoopPageEvent
+    data class PrefillProgress(val progress: Float) : LoopPageEvent
+    data object PrefillReady : LoopPageEvent
+    data class PrefillFailed(val message: String) : LoopPageEvent
+
+    data object ConfirmAndSave : LoopPageEvent
+    data object Demote : LoopPageEvent
+    data object Delete : LoopPageEvent
+    data object Back : LoopPageEvent
+
+    /** 波形点击 / 「◀ A」/「◀ B−5s」等显式 seek（不自动开始播放）。 */
+    data class Seek(val positionMs: Long) : LoopPageEvent
+}
+
+/** 页面要执行的副作用（由接 UI 层的 effect runner 执行；模型自身不执行）。 */
+sealed interface LoopPageEffect {
+    /** 按模式从 startMs 起播。 */
+    data class Play(val mode: LoopPageMode, val startMs: Long) : LoopPageEffect
+
+    data object Pause : LoopPageEffect
+
+    /** 展示口径 seek。 */
+    data class SeekTo(val positionMs: Long) : LoopPageEffect
+
+    /** 为 window 启动后台环缓冲预填。 */
+    data class StartPrefill(val window: LoopWindow) : LoopPageEffect
+
+    /** 取消正在进行的预填（新窗口/新候选会让旧预填失效）。 */
+    data object CancelPrefill : LoopPageEffect
+
+    data class PersistConfirm(val songId: Long, val window: LoopWindow) : LoopPageEffect
+    data class PersistDemote(val songId: Long) : LoopPageEffect
+    data class PersistDelete(val songId: Long) : LoopPageEffect
+
+    data class Toast(val text: String) : LoopPageEffect
+
+    data object NavigateBack : LoopPageEffect
+
+    data object RestartAnalysis : LoopPageEffect
+}
+
+/**
+ * 页面 reducer：**纯函数**，不碰 Android / 播放器 / DB。
+ *
+ * 约定：
+ * - 非法/重复/过期事件一律返回**同一个 state 实例** + 空 effect（矩阵测试用 assertSame 断言恒等）；
+ * - 允许的转换返回新 state + 有序 effect 列表；
+ * - [LoopPageEvent.Back] 对所有状态都有效，返回原 state + [LoopPageEffect.NavigateBack]。
+ */
+object LoopPageReducer {
+
+    /** 与 PreviewPlayer.MIN_LOOP_LENGTH_MS 保持一致。 */
+    const val MIN_LOOP_LENGTH_MS = 500L
+
+    /** 与 PreviewPlayer.SEAM_LEAD_MS 保持一致：接缝检查从 B−5s 起播。 */
+    const val SEAM_LEAD_MS = 5_000L
+
+    /** 与 PreviewPlayer.LOOP_PREROLL_MS 保持一致。 */
+    const val LOOP_PREROLL_MS = 300L
+
+    /** 预填失败降级播放时的提示文案。 */
+    const val PREFILL_FALLBACK_TOAST = "环缓冲准备失败，已按直通播放"
+
+    fun reduce(
+        state: LoopPageState,
+        event: LoopPageEvent,
+    ): Pair<LoopPageState, List<LoopPageEffect>> {
+        if (event is LoopPageEvent.Back) {
+            return state to listOf(LoopPageEffect.NavigateBack)
+        }
+        return when (state) {
+            is LoopPageState.Loading -> reduceLoading(state, event)
+            is LoopPageState.Analyzing -> reduceAnalyzing(state, event)
+            is LoopPageState.Ready -> reduceReady(state, event)
+            is LoopPageState.Failed -> reduceFailed(state, event)
+        }
+    }
+
+    // ------------------------------------------------------------------ 非 Ready
+
+    private fun reduceLoading(
+        state: LoopPageState.Loading,
+        event: LoopPageEvent,
+    ): Pair<LoopPageState, List<LoopPageEffect>> = when (event) {
+        is LoopPageEvent.Enter -> if (event.hasSavedResult) {
+            noEffects(state)
+        } else {
+            LoopPageState.Analyzing(AnalysisPhase.DECODING, 0f) to listOf(LoopPageEffect.RestartAnalysis)
+        }
+
+        is LoopPageEvent.AnalysisProgress ->
+            LoopPageState.Analyzing(event.phase, clampProgress(event.progress)) to emptyList()
+
+        is LoopPageEvent.AnalysisDone -> analysisDone(event)
+
+        is LoopPageEvent.AnalysisFailed -> LoopPageState.Failed(event.message) to emptyList()
+
+        else -> noEffects(state)
+    }
+
+    private fun reduceAnalyzing(
+        state: LoopPageState.Analyzing,
+        event: LoopPageEvent,
+    ): Pair<LoopPageState, List<LoopPageEffect>> = when (event) {
+        is LoopPageEvent.AnalysisProgress ->
+            LoopPageState.Analyzing(event.phase, clampProgress(event.progress)) to emptyList()
+
+        is LoopPageEvent.AnalysisDone -> analysisDone(event)
+
+        is LoopPageEvent.AnalysisFailed -> LoopPageState.Failed(event.message) to emptyList()
+
+        else -> noEffects(state)
+    }
+
+    private fun reduceFailed(
+        state: LoopPageState.Failed,
+        event: LoopPageEvent,
+    ): Pair<LoopPageState, List<LoopPageEffect>> = when (event) {
+        LoopPageEvent.Retry ->
+            LoopPageState.Analyzing(AnalysisPhase.DECODING, 0f) to listOf(LoopPageEffect.RestartAnalysis)
+
+        else -> noEffects(state)
+    }
+
+    private fun analysisDone(
+        event: LoopPageEvent.AnalysisDone,
+    ): Pair<LoopPageState, List<LoopPageEffect>> {
+        val duration = maxOf(event.durationMs, MIN_LOOP_LENGTH_MS + 1L)
+        val first = event.candidates.firstOrNull()
+        val (aMs, bMs) = if (first != null) {
+            candidateWindowMs(first, event.sampleRate, duration)
+        } else {
+            0L to duration
+        }
+        val ready = LoopPageState.Ready(
+            songId = event.songId,
+            durationMs = duration,
+            sampleRate = event.sampleRate,
+            mode = LoopPageMode.FULL,
+            aMs = aMs,
+            bMs = bMs,
+            candidates = event.candidates,
+            selectedCandidate = 0,
+            confirmed = event.confirmed,
+            prefill = if (first != null) PrefillState.InProgress(0f) else PrefillState.NotStarted,
+            playback = PlaybackState.Stopped,
+            positionMs = 0L,
+            drag = DragState.Idle,
+        )
+        val effects = if (first != null) {
+            listOf(LoopPageEffect.StartPrefill(ready.window()))
+        } else {
+            emptyList()
+        }
+        return ready to effects
+    }
+
+    // ------------------------------------------------------------------ Ready
+
+    private fun reduceReady(
+        state: LoopPageState.Ready,
+        event: LoopPageEvent,
+    ): Pair<LoopPageState, List<LoopPageEffect>> = when (event) {
+        is LoopPageEvent.SelectCandidate -> selectCandidate(state, event.index)
+
+        is LoopPageEvent.DragAStart -> dragStart(state, LoopHandle.A, event.ms)
+        is LoopPageEvent.DragAMove -> dragMove(state, LoopHandle.A, event.ms)
+        LoopPageEvent.DragAEnd -> dragEnd(state, LoopHandle.A)
+
+        is LoopPageEvent.DragBStart -> dragStart(state, LoopHandle.B, event.ms)
+        is LoopPageEvent.DragBMove -> dragMove(state, LoopHandle.B, event.ms)
+        LoopPageEvent.DragBEnd -> dragEnd(state, LoopHandle.B)
+
+        LoopPageEvent.CommitWindow -> commitWindow(state)
+
+        is LoopPageEvent.SwitchMode -> switchMode(state, event.mode)
+
+        LoopPageEvent.TogglePlay -> togglePlay(state)
+
+        is LoopPageEvent.Tick -> tick(state, event.positionMs)
+
+        LoopPageEvent.PrefillStarted -> prefillStarted(state)
+        is LoopPageEvent.PrefillProgress -> prefillProgress(state, event.progress)
+        LoopPageEvent.PrefillReady -> prefillReady(state)
+        is LoopPageEvent.PrefillFailed -> prefillFailed(state, event.message)
+
+        LoopPageEvent.ConfirmAndSave -> confirmAndSave(state)
+
+        LoopPageEvent.Demote -> demote(state)
+        LoopPageEvent.Delete -> delete(state)
+
+        is LoopPageEvent.Seek -> seek(state, event.positionMs)
+
+        else -> noEffects(state)
+    }
+
+    private fun selectCandidate(
+        state: LoopPageState.Ready,
+        index: Int,
+    ): Pair<LoopPageState, List<LoopPageEffect>> {
+        val candidate = state.candidates.getOrNull(index) ?: return noEffects(state)
+        val (aMs, bMs) = candidateWindowMs(candidate, state.sampleRate, state.durationMs)
+        val startMs = modeStartMs(state.mode, aMs, bMs)
+        val next = state.copy(
+            selectedCandidate = index,
+            aMs = aMs,
+            bMs = bMs,
+            positionMs = startMs,
+            drag = DragState.Idle,
+            prefill = PrefillState.InProgress(0f),
+            // 00009:换窗口后先显式“等待预填”,预填就绪/失败时由 reducer 补发 Play。
+            playback = PlaybackState.AwaitingPrefill(state.mode, startMs),
+        )
+        return next to listOf(
+            LoopPageEffect.CancelPrefill,
+            LoopPageEffect.StartPrefill(next.window()),
+            LoopPageEffect.SeekTo(startMs),
+        )
+    }
+
+    private fun dragStart(
+        state: LoopPageState.Ready,
+        handle: LoopHandle,
+        ms: Long,
+    ): Pair<LoopPageState, List<LoopPageEffect>> {
+        if (state.drag != DragState.Idle) return noEffects(state)
+        return when (handle) {
+            LoopHandle.A -> {
+                val aMs = clampA(state, ms)
+                state.copy(aMs = aMs, drag = DragState.Dragging(LoopHandle.A, aMs)) to emptyList()
+            }
+
+            LoopHandle.B -> {
+                val bMs = clampB(state, ms)
+                state.copy(bMs = bMs, drag = DragState.Dragging(LoopHandle.B, bMs)) to emptyList()
+            }
+        }
+    }
+
+    private fun dragMove(
+        state: LoopPageState.Ready,
+        handle: LoopHandle,
+        ms: Long,
+    ): Pair<LoopPageState, List<LoopPageEffect>> {
+        val dragging = state.drag as? DragState.Dragging ?: return noEffects(state)
+        if (dragging.handle != handle) return noEffects(state)
+        return when (handle) {
+            LoopHandle.A -> {
+                val aMs = clampA(state, ms)
+                state.copy(aMs = aMs, drag = DragState.Dragging(LoopHandle.A, aMs)) to emptyList()
+            }
+
+            LoopHandle.B -> {
+                val bMs = clampB(state, ms)
+                state.copy(bMs = bMs, drag = DragState.Dragging(LoopHandle.B, bMs)) to emptyList()
+            }
+        }
+    }
+
+    private fun dragEnd(
+        state: LoopPageState.Ready,
+        handle: LoopHandle,
+    ): Pair<LoopPageState, List<LoopPageEffect>> {
+        val dragging = state.drag as? DragState.Dragging ?: return noEffects(state)
+        if (dragging.handle != handle) return noEffects(state)
+        return state.copy(drag = DragState.Idle) to emptyList()
+    }
+
+    private fun commitWindow(
+        state: LoopPageState.Ready,
+    ): Pair<LoopPageState, List<LoopPageEffect>> {
+        val startMs = modeStartMs(state.mode, state.aMs, state.bMs)
+        val next = state.copy(
+            positionMs = startMs,
+            drag = DragState.Idle,
+            prefill = PrefillState.InProgress(0f),
+            // 00009:新窗口会让旧 ring 失效。播放中/已在等预填 → 继续等新预填,
+            // 预填完成后补发 Play;暂停/停止态保持原状(只应用窗口,不擅自起播)。
+            playback = when (state.playback) {
+                PlaybackState.Playing, is PlaybackState.AwaitingPrefill ->
+                    PlaybackState.AwaitingPrefill(state.mode, startMs)
+
+                else -> state.playback
+            },
+        )
+        return next to listOf(
+            LoopPageEffect.CancelPrefill,
+            LoopPageEffect.StartPrefill(next.window()),
+            LoopPageEffect.SeekTo(startMs),
+        )
+    }
+
+    private fun switchMode(
+        state: LoopPageState.Ready,
+        mode: LoopPageMode,
+    ): Pair<LoopPageState, List<LoopPageEffect>> {
+        // 拖拽中的模式点击非法:先松手再切模式,避免丢拖拽状态。
+        if (state.drag != DragState.Idle) return noEffects(state)
+
+        // 00008:同一模式重复点击是幂等操作 —— 已经在该模式播放/等待预填时,
+        // 不再产生 SeekTo/Play。否则 B−5s 会被再次映射到当前轮次,落点漂到区段中间。
+        val active = state.playback is PlaybackState.Playing ||
+            state.playback is PlaybackState.AwaitingPrefill
+        if (mode == state.mode && active) return noEffects(state)
+
+        val startMs = modeStartMs(mode, state.aMs, state.bMs)
+        val next = state.copy(
+            mode = mode,
+            playback = PlaybackState.Playing,
+            positionMs = startMs,
+        )
+        return next to listOf(
+            LoopPageEffect.SeekTo(startMs),
+            LoopPageEffect.Play(mode, startMs),
+        )
+    }
+
+    private fun togglePlay(
+        state: LoopPageState.Ready,
+    ): Pair<LoopPageState, List<LoopPageEffect>> = when (state.playback) {
+        PlaybackState.Playing -> state.copy(playback = PlaybackState.Paused) to listOf(LoopPageEffect.Pause)
+        is PlaybackState.AwaitingPrefill -> state.copy(playback = PlaybackState.Paused) to listOf(LoopPageEffect.Pause)
+        PlaybackState.Paused, PlaybackState.Stopped ->
+            state.copy(playback = PlaybackState.Playing) to
+                listOf(LoopPageEffect.Play(state.mode, state.positionMs))
+    }
+
+    private fun tick(
+        state: LoopPageState.Ready,
+        positionMs: Long,
+    ): Pair<LoopPageState, List<LoopPageEffect>> =
+        state.copy(positionMs = positionMs.coerceIn(0L, state.durationMs)) to emptyList()
+
+    private fun prefillStarted(
+        state: LoopPageState.Ready,
+    ): Pair<LoopPageState, List<LoopPageEffect>> = when (state.prefill) {
+        PrefillState.NotStarted, is PrefillState.Failed ->
+            state.copy(prefill = PrefillState.InProgress(0f)) to emptyList()
+
+        else -> noEffects(state)
+    }
+
+    private fun prefillProgress(
+        state: LoopPageState.Ready,
+        progress: Float,
+    ): Pair<LoopPageState, List<LoopPageEffect>> = when (state.prefill) {
+        PrefillState.Ready -> noEffects(state)
+        else -> state.copy(prefill = PrefillState.InProgress(clampProgress(progress))) to emptyList()
+    }
+
+    private fun prefillReady(
+        state: LoopPageState.Ready,
+    ): Pair<LoopPageState, List<LoopPageEffect>> {
+        if (state.prefill == PrefillState.Ready) return noEffects(state)
+        val awaiting = state.playback as? PlaybackState.AwaitingPrefill
+            ?: return state.copy(prefill = PrefillState.Ready) to emptyList()
+
+        // 00009:预填完成必须补发 Play(从 await 起点),否则就是“位置在动但无输出”。
+        val next = state.copy(
+            prefill = PrefillState.Ready,
+            playback = PlaybackState.Playing,
+            positionMs = awaiting.resumeAtMs,
+        )
+        return next to listOf(LoopPageEffect.Play(awaiting.resumeMode, awaiting.resumeAtMs))
+    }
+
+    private fun prefillFailed(
+        state: LoopPageState.Ready,
+        message: String,
+    ): Pair<LoopPageState, List<LoopPageEffect>> {
+        if (state.prefill == PrefillState.Ready) return noEffects(state)
+        val awaiting = state.playback as? PlaybackState.AwaitingPrefill
+            ?: return state.copy(prefill = PrefillState.Failed(message)) to emptyList()
+
+        // 预填失败不能留下静默等待:降级为直通播放并提示用户。
+        val next = state.copy(
+            prefill = PrefillState.Failed(message),
+            playback = PlaybackState.Playing,
+            positionMs = awaiting.resumeAtMs,
+        )
+        return next to listOf(
+            LoopPageEffect.Play(awaiting.resumeMode, awaiting.resumeAtMs),
+            LoopPageEffect.Toast(PREFILL_FALLBACK_TOAST),
+        )
+    }
+
+    private fun confirmAndSave(
+        state: LoopPageState.Ready,
+    ): Pair<LoopPageState, List<LoopPageEffect>> =
+        state.copy(confirmed = true) to
+            listOf(LoopPageEffect.PersistConfirm(state.songId, state.window()))
+
+    private fun demote(
+        state: LoopPageState.Ready,
+    ): Pair<LoopPageState, List<LoopPageEffect>> {
+        if (!state.confirmed) return noEffects(state)
+        return state.copy(confirmed = false) to listOf(LoopPageEffect.PersistDemote(state.songId))
+    }
+
+    private fun delete(
+        state: LoopPageState.Ready,
+    ): Pair<LoopPageState, List<LoopPageEffect>> {
+        if (state.candidates.isEmpty()) return noEffects(state)
+        val next = state.copy(
+            candidates = emptyList(),
+            selectedCandidate = 0,
+            confirmed = false,
+            drag = DragState.Idle,
+            prefill = PrefillState.NotStarted,
+            // 取消预填后不能再停留在 AwaitingPrefill(否则永远等不到补发 Play)。
+            playback = if (state.playback is PlaybackState.AwaitingPrefill) {
+                PlaybackState.Paused
+            } else {
+                state.playback
+            },
+        )
+        return next to listOf(
+            LoopPageEffect.CancelPrefill,
+            LoopPageEffect.PersistDelete(state.songId),
+        )
+    }
+
+    private fun seek(
+        state: LoopPageState.Ready,
+        positionMs: Long,
+    ): Pair<LoopPageState, List<LoopPageEffect>> {
+        val target = positionMs.coerceIn(0L, state.durationMs)
+        return state.copy(positionMs = target) to listOf(LoopPageEffect.SeekTo(target))
+    }
+
+    // ------------------------------------------------------------------ 纯工具
+
+    private fun noEffects(state: LoopPageState): Pair<LoopPageState, List<LoopPageEffect>> =
+        state to emptyList()
+
+    private fun clampProgress(progress: Float): Float = progress.coerceIn(0f, 1f)
+
+    private fun clampA(state: LoopPageState.Ready, ms: Long): Long =
+        ms.coerceIn(0L, (state.bMs - MIN_LOOP_LENGTH_MS).coerceAtLeast(0L))
+
+    private fun clampB(state: LoopPageState.Ready, ms: Long): Long {
+        val minB = (state.aMs + MIN_LOOP_LENGTH_MS).coerceAtMost(state.durationMs)
+        return ms.coerceIn(minB, state.durationMs)
+    }
+
+    private fun candidateWindowMs(
+        candidate: LoopCandidateKt,
+        sampleRate: Int,
+        durationMs: Long,
+    ): Pair<Long, Long> {
+        val sr = sampleRate.takeIf { it > 0 } ?: 44_100
+        val maxA = (durationMs - MIN_LOOP_LENGTH_MS).coerceAtLeast(0L)
+        val aMs = (candidate.startSamples * 1000.0 / sr).roundToLong().coerceIn(0L, maxA)
+        val bMs = (candidate.endSamples * 1000.0 / sr).roundToLong()
+            .coerceIn(aMs + MIN_LOOP_LENGTH_MS, durationMs)
+        return aMs to bMs
+    }
+
+    private fun modeStartMs(mode: LoopPageMode, aMs: Long, bMs: Long): Long = when (mode) {
+        LoopPageMode.FULL -> 0L
+        LoopPageMode.LOOP_ONLY -> (aMs - LOOP_PREROLL_MS).coerceAtLeast(0L)
+        LoopPageMode.SEAM -> (bMs - SEAM_LEAD_MS).coerceAtLeast(0L)
+        LoopPageMode.FREE -> 0L
+    }
+
+    private fun LoopPageState.Ready.window(): LoopWindow =
+        LoopWindow(songId, aMs * 1000L, bMs * 1000L)
+}

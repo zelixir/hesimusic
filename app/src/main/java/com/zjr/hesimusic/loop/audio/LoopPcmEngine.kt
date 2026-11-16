@@ -52,6 +52,8 @@ class LoopPcmEngine {
         REJECTED_WINDOW,
         REJECTED_FORMAT,
         REJECTED_SIZE,
+        REJECTED_GAP,
+        REJECTED_BOUNDS,
         REJECTED_BUSY,
         REJECTED_RELEASED,
     }
@@ -126,8 +128,14 @@ class LoopPcmEngine {
     var ringFrames: Long = 0L
         private set
 
+    /** 所有已覆盖帧数（可能含不连续区间）；保留给旧 UI/测试。 */
     @Volatile
     var capturedFrames: Long = 0L
+        private set
+
+    /** 连续前缀覆盖帧数：[0, coveredFrames) 有效。分片预填只允许从这里追加。 */
+    @Volatile
+    var coveredFrames: Long = 0L
         private set
 
     @Volatile
@@ -180,6 +188,13 @@ class LoopPcmEngine {
     /** flush/discontinuity 后的首个输入是否可用于“区间内部 seek”相位定位。 */
     private var pendingPostFlushPhase = false
 
+    /** 最近一次输入 buffer 的绝对帧范围（用于 seed 安装时对齐当前播放相位）。 */
+    private var lastInputStartFrameAbs: Long? = null
+    private var lastInputEndFrameAbs: Long? = null
+
+    /** 追尾回退时的覆盖前缀；在覆盖增长前禁止重新进入重放，避免循环降级。 */
+    private var underrunCoveredFrames = -1L
+
     /** 侧车 seam.iter：每次进入重放从 1 开始，折返递增。 */
     private var seamIteration = 0L
 
@@ -225,6 +240,8 @@ class LoopPcmEngine {
         }
         format = newFormat
         released = false
+        lastInputStartFrameAbs = null
+        lastInputEndFrameAbs = null
         invalidateRegionLocked()
     }
 
@@ -232,6 +249,12 @@ class LoopPcmEngine {
     @Synchronized
     fun setWindow(newWindow: LoopWindow?) {
         if (window == newWindow) return
+        // 换歌（songId 变化）时清掉旧输入的相位，避免 seed 安装按上一首的位置对齐。
+        // 同一首歌换循环窗口（改候选）必须保留，用于无缝续播。
+        if (window?.songId != newWindow?.songId) {
+            lastInputStartFrameAbs = null
+            lastInputEndFrameAbs = null
+        }
         window = newWindow
         invalidateRegionLocked()
     }
@@ -275,6 +298,8 @@ class LoopPcmEngine {
         coverage = Coverage()
         ringFrames = plan.loopFrames
         capturedFrames = 0L
+        coveredFrames = 0L
+        underrunCoveredFrames = -1L
         isRingComplete = false
         isRingPrefilled = false
         incompleteDegraded = false
@@ -385,19 +410,185 @@ class LoopPcmEngine {
         coverage = Coverage().apply { add(0L, plan.loopFrames, plan.loopFrames) }
         ringFrames = plan.loopFrames
         capturedFrames = plan.loopFrames
+        coveredFrames = plan.loopFrames
+        underrunCoveredFrames = -1L
         isRingComplete = true
         isRingPrefilled = true
         incompleteDegraded = false
         replayUnavailable = false
         degradeCallbackArmed = true
         unavailableWindow = null
-        cursorFrames = 0L
-        round = 1L
         pendingChunk = null
         pendingConsumedBytes = 0
         pendingAdvancedFrames = 0L
-        state = State.CAPTURING
+        // 安装必须与当前播放相位一致：前奏中继续捕获；已在区间内/已越过 B 时
+        // 直接用最新输入的 PTS 对齐重放游标，不能重置到 cursor=0（否则回到 A）。
+        applySeedPhaseLocked(Region(window, fmt, plan.aFrame, plan.bFrame))
         return SeedResult(SeedStatus.INSTALLED, frames = plan.loopFrames)
+    }
+
+    /**
+     * 分片预填：只支持从连续前缀尾部追加（[startFrame] 必须等于当前 coveredFrames）。
+     * 不重置重放游标/状态，不打断正在进行的输出；覆盖不足时由重放门槛决定是否进入。
+     */
+    @Synchronized
+    fun seedRingRange(
+        window: LoopWindow,
+        startFrame: Long,
+        pcm16: ByteArray,
+        sampleRate: Int,
+        channels: Int,
+    ): SeedResult {
+        if (!window.isValid()) {
+            return SeedResult(SeedStatus.REJECTED_WINDOW, detail = "invalid window=$window")
+        }
+        if (sampleRate <= 0 || channels <= 0) {
+            return SeedResult(
+                SeedStatus.REJECTED_FORMAT,
+                detail = "invalid sampleRate=$sampleRate channels=$channels",
+            )
+        }
+        if (pcm16.isEmpty()) return SeedResult(SeedStatus.REJECTED_SIZE, detail = "empty pcm16")
+        if (startFrame < 0L) {
+            return SeedResult(SeedStatus.REJECTED_BOUNDS, detail = "negative startFrame=$startFrame")
+        }
+        if (released) return SeedResult(SeedStatus.REJECTED_RELEASED, detail = "sink released")
+        val fmt = format ?: return SeedResult(SeedStatus.PENDING, detail = "format unknown")
+        if (this.window != window) {
+            return SeedResult(
+                SeedStatus.REJECTED_WINDOW,
+                detail = "window mismatch current=" + this.window,
+            )
+        }
+        if (fmt.sampleRate != sampleRate || fmt.channelCount != channels) {
+            return SeedResult(
+                SeedStatus.REJECTED_FORMAT,
+                detail = "format mismatch sr=$sampleRate ch=$channels engine=" +
+                    fmt.sampleRate + "/" + fmt.channelCount,
+            )
+        }
+        if (fmt.pcmIsFloat || fmt.bytesPerFrame != channels * 2) {
+            return SeedResult(
+                SeedStatus.REJECTED_FORMAT,
+                detail = "output not pcm16 bpf=" + fmt.bytesPerFrame +
+                    " float=" + fmt.pcmIsFloat,
+            )
+        }
+        val plan = planRing(window, fmt) ?: return SeedResult(
+            SeedStatus.REJECTED_WINDOW,
+            detail = "planRing unavailable (too long/too large) window=$window",
+        )
+        if (startFrame != coveredFrames) {
+            return SeedResult(
+                SeedStatus.REJECTED_GAP,
+                frames = coveredFrames,
+                detail = "startFrame=$startFrame != coveredFrames=$coveredFrames",
+            )
+        }
+        val srcBpf = channels * 2
+        val pcmFrames = pcm16.size.toLong() / srcBpf
+        if (pcmFrames <= 0L) return SeedResult(SeedStatus.REJECTED_SIZE, detail = "zero frames")
+        val endFrame = startFrame + pcmFrames
+        if (endFrame > plan.loopFrames) {
+            return SeedResult(
+                SeedStatus.REJECTED_BOUNDS,
+                frames = pcmFrames,
+                detail = "end=$endFrame > loopFrames=" + plan.loopFrames,
+            )
+        }
+        val byteSize = (plan.loopFrames * fmt.bytesPerFrame).toInt()
+        if (byteSize <= 0) return SeedResult(SeedStatus.REJECTED_WINDOW, detail = "zero byteSize")
+        if (ring == null || ring!!.size != byteSize ||
+            region?.window != window || region?.format != fmt
+        ) {
+            ring = ByteArray(byteSize)
+            region = Region(window, fmt, plan.aFrame, plan.bFrame)
+            regionDirty = false
+            coverage = Coverage()
+        }
+        val bytes = ring!!
+        val destOffset = (startFrame * fmt.bytesPerFrame).toInt()
+        val copyBytes = (pcmFrames * srcBpf).toInt()
+        if (destOffset < 0 || destOffset + copyBytes > bytes.size) {
+            return SeedResult(SeedStatus.REJECTED_BOUNDS, detail = "dest out of range")
+        }
+        System.arraycopy(pcm16, 0, bytes, destOffset, copyBytes)
+        coverage.add(startFrame, endFrame, plan.loopFrames)
+        ringFrames = plan.loopFrames
+        capturedFrames = coverage.coveredFrames
+        coveredFrames = coverage.prefixFrames
+        if (underrunCoveredFrames >= 0L && coveredFrames > underrunCoveredFrames) {
+            underrunCoveredFrames = -1L
+        }
+        isRingComplete = coverage.coversFull(plan.loopFrames)
+        isRingPrefilled = true
+        incompleteDegraded = false
+        replayUnavailable = false
+        degradeCallbackArmed = true
+        unavailableWindow = null
+        if (state == State.PASS_THROUGH) state = State.CAPTURING
+        if (state == State.CAPTURING) applySeedPhaseLocked(region!!)
+        return SeedResult(SeedStatus.INSTALLED, frames = pcmFrames)
+    }
+
+    /**
+     * seed 安装后的相位映射：
+     * - 最近输入还停在前奏（end < A）→ 保持 CAPTURING，等正常跨 B；
+     * - 最近输入已进入区间（A <= end < B）→ cursor=end-A，round=0；
+     * - 最近输入跨过 B（start < B <= end）→ 从 B 开始（cursor=0/round=1）；
+     * - 最近输入已整体越过 B（start >= B）→ 用 entry 相位（round 保证 PTS 连续）。
+     * 这样后台预填完成时不会把正在播放的位置打回 A。
+     */
+    private fun applySeedPhaseLocked(r: Region) {
+        pendingPostFlushPhase = false
+        val s = lastInputStartFrameAbs
+        val e = lastInputEndFrameAbs
+        if (s == null || e == null) {
+            state = State.CAPTURING
+            cursorFrames = 0L
+            round = 1L
+            return
+        }
+        val anchor = when {
+            s >= r.bFrame -> s
+            e >= r.bFrame -> r.bFrame
+            else -> e
+        }
+        val desiredCursor: Long
+        val desiredRound: Long
+        when {
+            anchor < r.aFrame -> {
+                desiredCursor = 0L
+                desiredRound = 1L
+            }
+            s >= r.bFrame -> {
+                // 分片未完整时也要能按输入 PTS 定位；门槛由 canStartReplayAt 把关。
+                desiredCursor = Math.floorMod(s - r.aFrame, r.loopFrames)
+                desiredRound = (s - r.bFrame) / r.loopFrames + 1L
+            }
+            anchor >= r.bFrame -> {
+                desiredCursor = 0L
+                desiredRound = 1L
+            }
+            else -> {
+                desiredCursor = (anchor - r.aFrame).coerceIn(0L, r.loopFrames - 1L)
+                desiredRound = 0L
+            }
+        }
+        if (anchor >= r.aFrame && canStartReplayAt(desiredCursor, r)) {
+            state = State.REPLAYING
+            cursorFrames = desiredCursor
+            round = desiredRound
+        } else {
+            state = State.CAPTURING
+            cursorFrames = 0L
+            round = 1L
+        }
+        pendingChunk = null
+        pendingConsumedBytes = 0
+        pendingAdvancedFrames = 0L
+        seamIteration = 0L
+        if (state == State.REPLAYING && cursorFrames == 0L) notifySeamLocked()
     }
 
     /**
@@ -556,35 +747,31 @@ class LoopPcmEngine {
 
         val startFrameAbs = frameFromUsRounded(frameTimeUs, fmt.sampleRate)
         val endFrameAbs = startFrameAbs + availableFrames
+        val prevInputEnd = lastInputEndFrameAbs
+        lastInputStartFrameAbs = startFrameAbs
+        lastInputEndFrameAbs = endFrameAbs
 
         // flush/discontinuity 后：ring 完整且下一段输入直接落在 [A,B) 内部时，
         // 立即按输入 PTS 的相位进入重放（不捕获、不改 ring）。典型场景:播放中 seek。
         if (pendingPostFlushPhase) {
             if (isRingComplete && startFrameAbs >= r.aFrame && startFrameAbs < r.bFrame) {
                 pendingPostFlushPhase = false
-                state = State.REPLAYING
-                cursorFrames = startFrameAbs - r.aFrame
-                // round=0 表示“从 B 前的一个不完整轮次开始”：
-                // PTS = B + (0-1)L + cursor = A + cursor = 输入 PTS，保证连续。
-                round = 0L
-                pendingChunk = null
-                pendingConsumedBytes = 0
-                pendingAdvancedFrames = 0L
-                // 只有从整轮起点(A)进入才记 seam；区间中部 seek 的首个部分是
-                // 不完整轮次，不该被 A2 当作正常接缝。
-                if (cursorFrames == 0L) notifySeamLocked()
-                return BufferPlan(
-                    forwardOffset = srcPos,
-                    forwardLength = 0,
-                    forwardFrames = 0,
-                    discard = true,
-                    enterReplayWhenDrained = false,
-                    entryCursorFrames = cursorFrames,
-                    entryRound = 0L,
-                )
+                enterReplayAtInteriorLocked(startFrameAbs, r)
+                return discardPlan(srcPos, cursorFrames, 0L)
             }
             // 前奏/≥B/ring 不完整等:本次不适用相位入口，正常走原有路径。
             pendingPostFlushPhase = false
+        } else if (
+            isRingComplete &&
+            prevInputEnd != null &&
+            startFrameAbs >= r.aFrame &&
+            startFrameAbs < r.bFrame &&
+            kotlin.math.abs(startFrameAbs - prevInputEnd) > seekJumpFrames(fmt.sampleRate)
+        ) {
+            // 没有 flush 标记、但输入 PTS 出现明显跳变（拖进度条/换源）：
+            // 仍按当前 PTS 对齐相位，避免落到 A。
+            enterReplayAtInteriorLocked(startFrameAbs, r)
+            return discardPlan(srcPos, cursorFrames, 0L)
         }
 
         // 先把 [A,B) 内的帧捕获到 ring（不改变 src 的 position）。
@@ -635,7 +822,22 @@ class LoopPcmEngine {
         if (!plan.enterReplayWhenDrained) return
         if (state == State.REPLAYING) return
         val r = ensureRegionLocked() ?: return
-        if (!isRingComplete) {
+        val entryCursor = if (r.loopFrames > 0L) {
+            plan.entryCursorFrames.coerceIn(0L, r.loopFrames - 1L)
+        } else {
+            0L
+        }
+        if (!canStartReplayAt(entryCursor, r)) {
+            if (isRingPrefilled) {
+                // 分片预填还没追到门槛：继续捕获/直通，等下一片到了再进。
+                state = State.CAPTURING
+                cursorFrames = 0L
+                round = 1L
+                pendingChunk = null
+                pendingConsumedBytes = 0
+                pendingAdvancedFrames = 0L
+                return
+            }
             if (!incompleteDegraded) {
                 incompleteDegraded = true
                 degradeCount += 1L
@@ -648,11 +850,7 @@ class LoopPcmEngine {
             return
         }
         state = State.REPLAYING
-        cursorFrames = if (r.loopFrames > 0L) {
-            plan.entryCursorFrames.coerceIn(0L, r.loopFrames - 1L)
-        } else {
-            0L
-        }
+        cursorFrames = entryCursor
         round = plan.entryRound.coerceAtLeast(1L)
         pendingChunk = null
         pendingConsumedBytes = 0
@@ -675,8 +873,12 @@ class LoopPcmEngine {
         // seek/flush 后还没看到新输入：不能先按 0 进入重放，否则会把 seek 落点吞成 A。
         if (pendingPostFlushPhase) return false
         if (replayUnavailable) return false
-        ensureRegionLocked() ?: return false
-        if (!isRingComplete) {
+        val r = ensureRegionLocked() ?: return false
+        if (!canStartReplayAt(0L, r)) {
+            if (isRingPrefilled) {
+                state = State.CAPTURING
+                return false
+            }
             if (!incompleteDegraded) {
                 incompleteDegraded = true
                 degradeCount += 1L
@@ -718,8 +920,18 @@ class LoopPcmEngine {
             seamCount += 1L
             notifySeamLocked()
         }
+        val availableAhead = coveredFrames - cursorFrames
+        if (!isRingComplete && availableAhead <= 0L) {
+            fallbackFromUnderrunLocked()
+            return null
+        }
         val maxFrames = maxOf(1, maxBytes / bpf).toLong()
-        val frames = minOf(maxFrames, r.loopFrames - cursorFrames).toInt()
+        val contiguous = if (isRingComplete) {
+            r.loopFrames - cursorFrames
+        } else {
+            minOf(r.loopFrames - cursorFrames, availableAhead)
+        }
+        val frames = minOf(maxFrames, contiguous).toInt()
         if (frames <= 0) return null
         val byteLength = frames * bpf
         val chunk = ReplayChunk(
@@ -785,6 +997,7 @@ class LoopPcmEngine {
         degradeCallbackArmed = true
         pendingPostFlushPhase = true
         seamIteration = 0L
+        underrunCoveredFrames = -1L
         pendingChunk = null
         pendingConsumedBytes = 0
         pendingAdvancedFrames = 0L
@@ -809,6 +1022,8 @@ class LoopPcmEngine {
         released = true
         pendingPostFlushPhase = false
         seamIteration = 0L
+        lastInputStartFrameAbs = null
+        lastInputEndFrameAbs = null
         pendingChunk = null
         pendingConsumedBytes = 0
         pendingAdvancedFrames = 0L
@@ -883,6 +1098,8 @@ class LoopPcmEngine {
             ring = null
             ringFrames = 0L
             capturedFrames = 0L
+            coveredFrames = 0L
+            underrunCoveredFrames = -1L
             isRingComplete = false
             state = State.PASS_THROUGH
             return null
@@ -895,6 +1112,8 @@ class LoopPcmEngine {
             ring = null
             ringFrames = 0L
             capturedFrames = 0L
+            coveredFrames = 0L
+            underrunCoveredFrames = -1L
             isRingComplete = false
             state = State.PASS_THROUGH
             if (unavailableWindow != w) {
@@ -926,6 +1145,8 @@ class LoopPcmEngine {
                 ring = null
                 ringFrames = plan.loopFrames
                 capturedFrames = 0L
+                coveredFrames = 0L
+                underrunCoveredFrames = -1L
                 isRingComplete = false
                 state = State.PASS_THROUGH
                 return null
@@ -939,6 +1160,8 @@ class LoopPcmEngine {
                 ring = null
                 ringFrames = plan.loopFrames
                 capturedFrames = 0L
+                coveredFrames = 0L
+                underrunCoveredFrames = -1L
                 isRingComplete = false
                 state = State.PASS_THROUGH
                 if (unavailableWindow != w) {
@@ -955,6 +1178,8 @@ class LoopPcmEngine {
         coverage = Coverage()
         ringFrames = plan.loopFrames
         capturedFrames = 0L
+        coveredFrames = 0L
+        underrunCoveredFrames = -1L
         isRingComplete = false
         isRingPrefilled = false
         incompleteDegraded = false
@@ -981,6 +1206,8 @@ class LoopPcmEngine {
         coverage = Coverage()
         ringFrames = 0L
         capturedFrames = 0L
+        coveredFrames = 0L
+        underrunCoveredFrames = -1L
         isRingComplete = false
         isRingPrefilled = false
         incompleteDegraded = false
@@ -1033,7 +1260,25 @@ class LoopPcmEngine {
             total = r.loopFrames,
         )
         capturedFrames = coverage.coveredFrames
+        coveredFrames = coverage.prefixFrames
+        if (underrunCoveredFrames >= 0L && coveredFrames > underrunCoveredFrames) {
+            underrunCoveredFrames = -1L
+        }
         isRingComplete = coverage.coversFull(r.loopFrames)
+    }
+
+    /** 重放追尾（解码/预填跟不上）：不得输出环内未覆盖的静音，退回捕获/直通。 */
+    private fun fallbackFromUnderrunLocked() {
+        degradeCount += 1L
+        incompleteDegraded = true
+        underrunCoveredFrames = coveredFrames
+        state = State.CAPTURING
+        cursorFrames = 0L
+        round = 1L
+        pendingChunk = null
+        pendingConsumedBytes = 0
+        pendingAdvancedFrames = 0L
+        notifyDegradeLocked()
     }
 
     private fun advanceReplayCursorLocked(frames: Long) {
@@ -1065,6 +1310,41 @@ class LoopPcmEngine {
      * 进入重放时的初始游标：仅当 ring 完整且输入 PTS 已到/越过 B 时，按 PTS 在
      * [A,B) 内的折返相位定位；常规跨越 B 的输入（PTS < B）维持 0。
      */
+    /** 区间内部进入重放：cursor=PTS-A，round=0 保证首 chunk PTS=输入 PTS。 */
+    private fun enterReplayAtInteriorLocked(startFrameAbs: Long, r: Region) {
+        state = State.REPLAYING
+        cursorFrames = (startFrameAbs - r.aFrame).coerceIn(0L, (r.loopFrames - 1L).coerceAtLeast(0L))
+        round = 0L
+        pendingChunk = null
+        pendingConsumedBytes = 0
+        pendingAdvancedFrames = 0L
+        seamIteration = 0L
+        if (cursorFrames == 0L) notifySeamLocked()
+    }
+
+    private fun discardPlan(srcPos: Int, cursorFrames: Long, round: Long): BufferPlan =
+        BufferPlan(
+            forwardOffset = srcPos,
+            forwardLength = 0,
+            forwardFrames = 0,
+            discard = true,
+            enterReplayWhenDrained = false,
+            entryCursorFrames = cursorFrames,
+            entryRound = round,
+        )
+
+    /** 输入 PTS 跳变阈值：>=0.5s 视为 seek/换源，而不是正常连续播放。 */
+    private fun seekJumpFrames(sampleRate: Int): Long =
+        (sampleRate / 2L).coerceAtLeast(1L)
+
+    /** 重放门槛：完整 ring，或当前游标前方至少还有 0.5s 连续数据。 */
+    private fun canStartReplayAt(cursor: Long, r: Region): Boolean {
+        if (isRingComplete) return true
+        if (underrunCoveredFrames >= 0L && coveredFrames <= underrunCoveredFrames) return false
+        val need = (r.format.sampleRate / 2L).coerceAtLeast(1L)
+        return coveredFrames - cursor >= need
+    }
+
     private fun entryCursorFramesLocked(startFrameAbs: Long, r: Region): Long {
         if (!isRingComplete || startFrameAbs < r.bFrame) return 0L
         return Math.floorMod(startFrameAbs - r.aFrame, r.loopFrames)
@@ -1109,6 +1389,14 @@ class LoopPcmEngine {
 
         var coveredFrames: Long = 0L
             private set
+
+        /** 连续前缀：[0, prefixFrames) 全部有效。 */
+        val prefixFrames: Long
+            get() {
+                if (intervals.isEmpty()) return 0L
+                val first = intervals[0]
+                return if (first[0] <= 0L) first[1].coerceAtLeast(0L) else 0L
+            }
 
         fun add(start: Long, end: Long, total: Long) {
             var ns = start.coerceIn(0L, total)

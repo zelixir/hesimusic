@@ -244,7 +244,10 @@ class LoopAudioSink(
         playToEndCalls += 1L
         if (loopEngaged()) {
             // seek/flush 后还没看到新输入：等待 handleBuffer 决定相位，不能先按 0 进重放。
-            if (engine.state == LoopPcmEngine.State.CAPTURING && engine.isPostFlushPhasePending()) {
+            if (engine.state == LoopPcmEngine.State.CAPTURING &&
+                (engine.isPostFlushPhasePending() ||
+                    (engine.isRingPrefilled && !engine.isRingComplete))
+            ) {
                 return
             }
             // 源端 EOS 兜底：最后一个 buffer 可能恰好停在 B 前一帧，没触发 crossedB。

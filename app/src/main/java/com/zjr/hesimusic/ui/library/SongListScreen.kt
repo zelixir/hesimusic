@@ -52,7 +52,8 @@ fun SongListScreen(
     onSleepTimerClick: () -> Unit,
     onLogsClick: () -> Unit,
     // 无缝循环菜单事件(仅透传;决策/播放/导航在 MainActivity)
-    onSeamlessLoop: ((Song, Boolean?) -> Unit)? = null
+    onSeamlessLoop: ((Song) -> Unit)? = null,
+    onSeamlessAnalysis: ((Song) -> Unit)? = null
 ) {
     val songsFlow = when (type) {
         "artist" -> viewModel.getSongsByArtist(value)
@@ -231,7 +232,8 @@ fun SongListScreen(
                 onAddToQueue = if (isCurrentPlayingList) { song ->
                     musicViewModel.addSongsToPlayQueue(listOf(song))
                 } else null,
-                onSeamlessLoop = onSeamlessLoop
+                onSeamlessLoop = onSeamlessLoop,
+                onSeamlessAnalysis = onSeamlessAnalysis
             )
             if (showBatchAddDialog) {
                 AddToPlaylistDialog(
