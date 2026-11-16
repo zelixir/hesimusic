@@ -23,3 +23,6 @@ _codeql_detected_source_root
 # 引擎 CLI 本地构建与测试音频(体积大,不入库)
 tools/loop-engine-cli/build/
 tools/loop-engine-cli/*.wav
+# 本地协调记录与构建日志(不入库)
+/.issue/
+/build-*.log
