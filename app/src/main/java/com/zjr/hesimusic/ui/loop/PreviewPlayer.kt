@@ -186,6 +186,10 @@ class PreviewPlayer @Inject constructor(
         val duration = _durationMs.value.coerceAtLeast(0L)
         degradeRetryUsed = false
         seekRaw(startMs.coerceIn(0L, duration))
+        if (p.playbackState == Player.STATE_IDLE) {
+            Log.w(TAG, "play from IDLE -> prepare()")
+            p.prepare()
+        }
         p.play()
         updatePositionOnce()
         Log.d(
@@ -212,6 +216,13 @@ class PreviewPlayer @Inject constructor(
         this.mode = mode
         if (mode == PreviewMode.FREE) applyFreeShape() else applyLoopShape(song)
         degradeRetryUsed = false
+        // 播放器处于 IDLE(被 stop/release 过、或首帧还没 prepare)时,单靠 play() 不会重新起播:
+        // 必须补一次 prepare()。真机复现:连点「接缝检查」第三次后 state=IDLE、位置冻结在 B-5s,
+        // 而 UI 侧仍显示暂停按钮(状态机与实际播放器脱节)。
+        if (p.playbackState == Player.STATE_IDLE) {
+            Log.w(TAG, "playFromCurrent from IDLE -> prepare()")
+            p.prepare()
+        }
         p.play()
         updatePositionOnce()
         Log.d(TAG, "playFromCurrent mode=" + mode + " window=" + window)
