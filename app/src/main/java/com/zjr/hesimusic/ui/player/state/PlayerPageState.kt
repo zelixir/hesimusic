@@ -557,12 +557,11 @@ object PlayerPageReducer {
             listOf(PlayerPageEffect.PlayerPause),
         )
 
+        // 首个 tick（即使位置是 0）说明播放器已经能报告位置；Buffering 只应存在于
+        // 切歌瞬间。若 0 位置仍停留 Buffering，影子双跑在“切歌后位置 0”的 READY 快照
+        // 上无法与投影对齐（投影按 isPlaying 映射 Playing/Paused）。
         is PlayerPageEvent.PositionTick ->
-            if (event.positionMs > 0L) {
-                applied(PlayerPageState.Playing(clamp(state, event.positionMs), state.mode))
-            } else {
-                applied(state)
-            }
+            applied(PlayerPageState.Playing(clamp(state, event.positionMs), state.mode))
 
         is PlayerPageEvent.PlaybackError -> playbackError(state, state.mode, event.message)
 

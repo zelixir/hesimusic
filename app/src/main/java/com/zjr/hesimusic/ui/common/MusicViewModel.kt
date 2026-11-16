@@ -22,9 +22,17 @@ import com.zjr.hesimusic.data.preferences.PlaylistContext
 import com.zjr.hesimusic.data.repository.FavoriteRepository
 import com.zjr.hesimusic.data.repository.SongRepository
 import com.zjr.hesimusic.data.scanner.TagLibHelper
+import com.zjr.hesimusic.loop.LoopIntent
 import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.service.MusicService
+import com.zjr.hesimusic.ui.player.state.PlayerPageShadow
+import com.zjr.hesimusic.ui.player.state.PlayerPageShadowDiagnostics
+import com.zjr.hesimusic.ui.player.state.PlayerPageShadowGate
+import com.zjr.hesimusic.ui.player.state.PlayerSnapshot
+import com.zjr.hesimusic.ui.player.state.RepeatMode
+import com.zjr.hesimusic.ui.player.state.SeamlessIntent
+import com.zjr.hesimusic.ui.player.state.SnapshotPlaybackState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -49,11 +57,13 @@ class MusicViewModel @Inject constructor(
     private val songRepository: SongRepository,
     private val favoriteRepository: FavoriteRepository,
     private val tagLibHelper: TagLibHelper,
-    private val loopRuntime: LoopRuntime
+    private val loopRuntime: LoopRuntime,
+    private val loopIntent: LoopIntent
 ) : ViewModel() {
 
     companion object {
         private const val TAG = "MusicViewModel"
+        private const val TAG_SHADOW = "PlayerPageShadow"
 
         /** seek 后强制刷新位置的时长:足够覆盖 MediaController 返回新 PlaybackState 的延迟。 */
         private const val POSITION_REFRESH_WINDOW_MS = 2_000L
@@ -61,6 +71,14 @@ class MusicViewModel @Inject constructor(
 
     private var mediaControllerFuture: ListenableFuture<MediaController>? = null
     private var mediaController: MediaController? = null
+
+    /**
+     * 播放页状态机的 debug 影子双跑：只读取播放器快照、不执行 effect、不写 UI 字段。
+     *
+     * 开关由 debug 源集的 DebugInitProvider 置位；release 构建永远为 null。
+     */
+    private val playerPageShadow: PlayerPageShadow? =
+        if (PlayerPageShadowGate.enabled) PlayerPageShadow() else null
 
     private val _uiState = MutableStateFlow(MusicUiState())
     val uiState: StateFlow<MusicUiState> = _uiState.asStateFlow()
@@ -297,6 +315,7 @@ class MusicViewModel @Inject constructor(
             val shuffleModeEnabled = controller.shuffleModeEnabled
             val bufferedPosition = controller.bufferedPosition
             val controllerDuration = controller.duration
+            val playerError = controller.playerError?.message
             
             // Helper function to update UI state with given duration
             fun performStateUpdate(duration: Long) {
@@ -317,6 +336,16 @@ class MusicViewModel @Inject constructor(
                         currentPlayingSongId = currentPlayingSongId
                     )
                 }
+                observePlayerPageShadow(
+                    songId = currentPlayingSongId?.toLongOrNull(),
+                    isPlaying = isPlaying,
+                    playbackState = playbackState,
+                    repeatMode = repeatMode,
+                    shuffle = shuffleModeEnabled,
+                    positionMs = safePosition,
+                    durationMs = duration,
+                    errorMessage = playerError,
+                )
             }
             
             // If controller.duration is negative (C.TIME_UNSET), get duration from database
@@ -330,6 +359,74 @@ class MusicViewModel @Inject constructor(
                 performStateUpdate(controllerDuration.coerceAtLeast(0L))
             }
         }
+    }
+
+    /**
+     * debug 影子双跑的唯一入口：读取快照、喂状态机、记差异；**不执行 effect、不改 UI 字段**。
+     */
+    private fun observePlayerPageShadow(
+        songId: Long?,
+        isPlaying: Boolean,
+        playbackState: Int,
+        repeatMode: Int,
+        shuffle: Boolean,
+        positionMs: Long,
+        durationMs: Long,
+        errorMessage: String?,
+    ) {
+        val shadow = playerPageShadow ?: return
+        val now = SystemClock.elapsedRealtime()
+        val armed = loopIntent.armed.value
+        val seamless = armed?.takeIf {
+            songId != null &&
+                it.songId == songId &&
+                repeatMode == Player.REPEAT_MODE_ONE &&
+                !shuffle
+        }?.let {
+            SeamlessIntent(
+                songId = it.songId,
+                previousRepeat = it.previousRepeatMode.toPlayerPageRepeatMode(),
+                previousShuffle = it.previousShuffleEnabled,
+            )
+        }
+        val snapshot = PlayerSnapshot(
+            songId = songId,
+            isPlaying = isPlaying,
+            positionMs = positionMs.coerceAtLeast(0L),
+            durationMs = durationMs,
+            repeat = repeatMode.toPlayerPageRepeatMode(),
+            shuffle = shuffle,
+            playbackState = playbackState.toSnapshotPlaybackState(),
+            errorMessage = errorMessage,
+            seamlessIntent = seamless,
+            nowMs = now,
+        )
+        val observation = try {
+            shadow.observe(snapshot)
+        } catch (t: Throwable) {
+            Log.w(TAG_SHADOW, "shadow observe failed", t)
+            return
+        }
+        PlayerPageShadowDiagnostics.record(observation, now)
+        if (observation.mismatches.isNotEmpty()) {
+            Log.w(
+                TAG_SHADOW,
+                "mismatch #" + shadow.mismatchCount + ": " + observation.mismatches.joinToString("; "),
+            )
+        }
+    }
+
+    private fun Int.toPlayerPageRepeatMode(): RepeatMode = when (this) {
+        Player.REPEAT_MODE_ONE -> RepeatMode.ONE
+        Player.REPEAT_MODE_ALL -> RepeatMode.ALL
+        else -> RepeatMode.OFF
+    }
+
+    private fun Int.toSnapshotPlaybackState(): SnapshotPlaybackState = when (this) {
+        Player.STATE_BUFFERING -> SnapshotPlaybackState.BUFFERING
+        Player.STATE_READY -> SnapshotPlaybackState.READY
+        Player.STATE_ENDED -> SnapshotPlaybackState.ENDED
+        else -> SnapshotPlaybackState.IDLE
     }
 
     fun play(song: Song) {
@@ -412,6 +509,8 @@ class MusicViewModel @Inject constructor(
 
     fun seekTo(position: Long) {
         mediaController?.seekTo(position)
+        // 影子只观测：记录 seek 请求，2s 内抑制对比（MediaController 快照收敛窗口）。
+        playerPageShadow?.onSeekRequested(position.coerceAtLeast(0L), SystemClock.elapsedRealtime())
         // 让进度循环在接下来 2s 内持续刷新,覆盖 MediaController 返回新位置之前的空窗,
         // 这样暂停态拖动也能在一次 tick 内显示到目标位置。
         positionRefreshUntilMs = SystemClock.elapsedRealtime() + POSITION_REFRESH_WINDOW_MS

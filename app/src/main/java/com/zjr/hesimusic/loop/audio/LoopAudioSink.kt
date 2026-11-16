@@ -124,6 +124,7 @@ class LoopAudioSink(
     private var seamState = SeamRouteState.NORMAL
     private var seamPrepared = false
     private var seamSeekIssued = false
+    private var seamBypass = false
     private var pendingSeam: PendingSeam? = null
     private val seamQueue = ArrayDeque<PendingSeam>()
     private var seamDiscontinuityCount = 0L
@@ -347,7 +348,10 @@ class LoopAudioSink(
             return pendingSeam == null
         }
         val mediaPts = presentationTimeUs - outputStreamOffsetUs
-
+        if (seamBypass) {
+            buffer.position(inputStart)
+            return writeSourceSlice(buffer, mediaPts, buffer.remaining(), originalLimit)
+        }
 
         // 先写掉 delegate 没吃完的 S/源片段，背压优先。
         if (pendingSeam != null) {
@@ -401,6 +405,11 @@ class LoopAudioSink(
             }
             buffer.position(originalLimit)
             pumpSeam()
+            if (seamBypass) {
+                buffer.position(inputStart)
+                buffer.limit(originalLimit)
+                return writeSourceSlice(buffer, mediaPts, buffer.remaining(), originalLimit)
+            }
             return pendingSeam == null
         }
 
@@ -474,6 +483,7 @@ class LoopAudioSink(
             seamLog("skip reason=BEGIN x=" + seam.isPrefixReady + " y=" + seam.isSuffixReady)
             return false
         }
+        resetDelegateForSeam("enter")
         seamState = SeamRouteState.SEAM
         seamSwitchCount += 1L
         seamSeekIssued = false
@@ -483,13 +493,16 @@ class LoopAudioSink(
                 frameToUsCeil(seam.windowStartFrame + seam.deltaFrames),
             )
         }
-        queueSeam(seam.seamPrefixBytes(), frameToUsCeil(seam.windowEndFrame - seam.deltaFrames))
-        queueSeam(seam.seamSuffixBytes(), frameToUsCeil(seam.windowEndFrame))
+        val xPts = frameToUsCeil(seam.windowEndFrame - seam.deltaFrames)
+        val yPts = frameToUsCeil(seam.windowEndFrame)
+        seamLog("begin pts=" + xPts + " bytes=" + seam.seamPrefixBytes().size + "+" + seam.seamSuffixBytes().size)
+        queueSeam(seam.seamPrefixBytes(), xPts)
+        queueSeam(seam.seamSuffixBytes(), yPts)
         seamLog("route switch=" + seamSwitchCount + " seek=" + (seam.windowStartFrame + seam.deltaFrames))
         return true
     }
 
-    private fun switchSeamToSource() {
+    private fun resetDelegateForSeam(reason: String) {
         try {
             super.handleDiscontinuity()
         } catch (_: Throwable) {
@@ -497,16 +510,14 @@ class LoopAudioSink(
         lastDelegatePtsUs = Long.MIN_VALUE
         lastInputPtsUs = Long.MIN_VALUE
         seamDiscontinuityCount += 1L
+        seamLog("discontinuity reason=" + reason + " count=" + seamDiscontinuityCount)
+    }
+
+    private fun switchSeamToSource() {
+        resetDelegateForSeam("resume")
         seamState = SeamRouteState.NORMAL
         seamSeekIssued = false
-        try {
-            Log.d(
-                "LoopPerf",
-                "seam->source discontinuity count=" + seamDiscontinuityCount +
-                    " resumeFrame=" + (seamBuffer?.resumeFrame() ?: -1L),
-            )
-        } catch (_: Throwable) {
-        }
+        seamLog("switch to source resumeFrame=" + (seamBuffer?.resumeFrame() ?: -1L))
     }
 
     private fun queueSeam(data: ByteArray, ptsUs: Long) {
@@ -528,9 +539,15 @@ class LoopAudioSink(
         val accepted = try {
             super.handleBuffer(slice, pts + outputStreamOffsetUs, 1)
         } catch (t: Throwable) {
-            Log.w("LoopPerf", "seam write failed pts=" + pts, t)
+            try {
+                Log.w("LoopPerf", "seam write failed pts=" + pts, t)
+            } catch (_: Throwable) {
+            }
             pendingSeam = null
-            seamState = SeamRouteState.FALLBACK
+            seamQueue.clear()
+            seamBypass = true
+            seamState = SeamRouteState.NORMAL
+            seamLog("fallback reason=WRITE_FAIL pts=" + pts)
             return false
         }
         val consumed = slice.position() - before
@@ -772,7 +789,8 @@ class LoopAudioSink(
             " defer=" + seamDeferCount +
             " verifyFail=" + seamVerifyFailCount +
             " gap=" + seamMaxGapFrames +
-            " bytes=" + (seamBuffer?.seamBufferBytes ?: 0L)
+            " bytes=" + (seamBuffer?.seamBufferBytes ?: 0L) +
+            " bypass=" + seamBypass
 
     // ------------------------------------------------------------------ 内部
 
@@ -860,6 +878,7 @@ class LoopAudioSink(
         seamBuffer = buffer
         pendingSeam = null
         seamSeekIssued = false
+        seamBypass = false
         seamState = SeamRouteState.NORMAL
         seamSwitchCount = 0L
         seamDeferCount = 0L
@@ -1079,7 +1098,8 @@ class LoopAudioSink(
             " seamVerifyFail=" + seamVerifyFailCount +
             " seamDiscontinuity=" + seamDiscontinuityCount +
             " seamGap=" + seamMaxGapFrames +
-            " seamBytes=" + (seamBuffer?.seamBufferBytes ?: 0L)
+            " seamBytes=" + (seamBuffer?.seamBufferBytes ?: 0L) +
+            " seamBypass=" + seamBypass
         try {
             Log.d("LoopPerf", message)
         } catch (t: Throwable) {

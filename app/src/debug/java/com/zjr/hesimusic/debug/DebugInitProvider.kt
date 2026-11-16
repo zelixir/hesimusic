@@ -6,6 +6,7 @@ import android.content.pm.ApplicationInfo
 import android.database.Cursor
 import android.net.Uri
 import android.util.Log
+import com.zjr.hesimusic.ui.player.state.PlayerPageShadowGate
 
 /**
  * debug 构建专属启动器(仅存在于 src/debug,release 源集不编译)。
@@ -31,6 +32,8 @@ class DebugInitProvider : ContentProvider() {
                 Log.w(TAG, "debug server skipped: app is not debuggable")
                 return true
             }
+            // 只在 debug 进程启用播放页状态机影子双跑（只观测，不执行 effect）。
+            PlayerPageShadowGate.enabled = true
             LoopDebugServer.start(app)
         } catch (t: Throwable) {
             // 启动失败绝不影响 app 进程

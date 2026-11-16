@@ -17,6 +17,7 @@ import com.zjr.hesimusic.loop.analysis.AnalysisState
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
 import com.zjr.hesimusic.loop.analysis.LoopCandidateKt
 import com.zjr.hesimusic.loop.analysis.ParallelDecodeHooks
+import com.zjr.hesimusic.ui.player.state.PlayerPageShadowDiagnostics
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -374,7 +375,7 @@ object LoopDebugServer {
         return linkedMapOf(
             "screen" to lastRoute,
             "analysis" to analysisSummary(d),
-            "playback" to playbackMapForState(),
+            "playback" to playbackMapForState().withShadowDiagnostics(),
             "loop" to loop,
             "library" to library,
             "server" to linkedMapOf(
@@ -388,6 +389,12 @@ object LoopDebugServer {
             ),
         )
     }
+
+    /** 播放页状态机影子双跑计数（只读；main 源集的纯 Kotlin 诊断对象）。 */
+    private fun Map<String, Any?>.withShadowDiagnostics(): Map<String, Any?> =
+        LinkedHashMap(this).apply {
+            put("shadow", PlayerPageShadowDiagnostics.snapshotMap())
+        }
 
     private fun analysisSummary(d: DebugEntryPoint): Map<String, Any?> {
         val state = d.loopAnalysisManager().state.value
