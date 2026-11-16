@@ -194,6 +194,16 @@ class LoopAudioController @Inject constructor() {
         channels: Int,
     ): LoopPcmEngine.SeedResult {
         val result = engine.seedRingRange(window, startFrame, pcm16, sampleRate, channels)
+        if (result.isInstalled) {
+            try {
+                Log.d(
+                    "LoopPerf",
+                    "seedRange start=" + startFrame + " frames=" + result.frames +
+                        " " + engine.debugStateString(),
+                )
+            } catch (_: Throwable) {
+            }
+        }
         logSeedResult("seedRingRange", window, result)
         return result
     }

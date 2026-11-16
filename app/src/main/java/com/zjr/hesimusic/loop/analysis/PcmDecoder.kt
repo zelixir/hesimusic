@@ -13,7 +13,9 @@ import kotlinx.coroutines.Dispatchers
 import javax.inject.Singleton
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.Collections
 import javax.inject.Inject
 import kotlin.coroutines.coroutineContext
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -22,11 +24,30 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 class MonoPcm(val data: FloatArray, val sampleRate: Int, val frames: Long)
 
 /**
+ * 测试/诊断用并行解码开关(生产不设置)。
+ *
+ * - [segmentCountOverride]:强制段数(1 = 强制单线程),真机对照测试用;
+ * - [disableParallel]:完全关闭并行解码。
+ */
+internal object ParallelDecodeHooks {
+    @Volatile
+    var segmentCountOverride: Int? = null
+
+    @Volatile
+    var disableParallel: Boolean = false
+}
+
+/**
  * MediaExtractor + MediaCodec 同步解码器(契约 §2.4)。
  *
  * - 支持 Android 系统可解码的一切音频格式(ogg vorbis / flac / mp3 / m4a / aac / opus / wav 等)
  * - 整轨解码进内存;超过 maxSeconds 抛 LoopException("曲目过长")
  * - 仅提供分析用 mono 解码;播放链不使用本解码器(PCM 环回由播放侧实现)
+ *
+ * v7 §decode-parallel:整曲分析解码按时间切成 2~4 段,每段独立
+ * MediaExtractor+MediaCodec 并行解码(段内仍复用“seek 前 1s + PTS 追赶 + 严格帧数”
+ * 精确对齐),拼接前做接缝逐样本校验;任一环节不一致/失败即回退单线程解码,并把该
+ * mime 记为不可并行(进程内缓存)。
  */
 @Singleton
 class PcmDecoder @Inject constructor(@ApplicationContext private val context: Context) {
@@ -34,13 +55,102 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
     /** MediaCodec 输出的原始 16bit 交错 PCM(声道数可为源声道数)。 */
     private class RawPcm(val data: ShortArray, val channels: Int, val sampleRate: Int, val frames: Long)
 
-    /** 分析用:mono float(16bit 满幅尺度,引擎内部归一化),所有声道平均下混。
-     *  onProgress ∈ [0,1](≤20Hz,完成必报 1.0);超过 maxSeconds 抛 [LoopException]。 */
+    /** 探测到的音轨元信息(并行切段用)。 */
+    private class TrackProbe(
+        val mime: String,
+        val sampleRate: Int,
+        val channels: Int,
+        val durationUs: Long,
+    )
+
+    /** 最近一次 decodeMono 是否走了并行路径(诊断/真机测试断言用)。 */
+    @Volatile
+    internal var lastDecodeUsedParallel: Boolean = false
+        private set
+
+    /** 最近一次 decodeMono 的段数(1 = 单线程)。 */
+    @Volatile
+    internal var lastDecodeSegmentCount: Int = 1
+        private set
+
+    /**
+     * 分析用:mono float(16bit 满幅尺度,引擎内部归一化),所有声道平均下混。
+     *  onProgress ∈ [0,1](≤20Hz,完成必报 1.0);超过 maxSeconds 抛 [LoopException]。
+     */
     suspend fun decodeMono(
         path: String,
         maxSeconds: Int = 900,
         onProgress: ((Float) -> Unit)? = null,
     ): MonoPcm = withContext(Dispatchers.Default) {
+        lastDecodeUsedParallel = false
+        lastDecodeSegmentCount = 1
+
+        val probe = if (!ParallelDecodeHooks.disableParallel) {
+            try {
+                probeTrack(path)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+        } else {
+            null
+        }
+
+        if (probe != null && probe.durationUs > maxSeconds * 1_000_000L) {
+            throw LoopException("曲目过长")
+        }
+        if (probe != null) {
+            val cores = Runtime.getRuntime().availableProcessors()
+            val requested = ParallelDecodeHooks.segmentCountOverride
+                ?: SegmentPlanner.segmentCount(cores, probe.durationUs)
+            val canParallel = requested >= 2 && !isParallelUnsafe(probe.mime)
+            if (canParallel) {
+                // 估算总帧数(仅用于切段/进度;尾段以 EOS 为准,不影响拼接总长)。
+                val estimate = probe.durationUs * probe.sampleRate / Pcm16Frames.US_PER_SECOND
+                if (estimate > 0L) {
+                    val plan = SegmentPlanner.plan(
+                        totalFrames = estimate,
+                        sampleRate = probe.sampleRate,
+                        channels = probe.channels,
+                        segmentCount = requested,
+                        overlapFrames = OVERLAP_FRAMES,
+                    )
+                    val started = System.currentTimeMillis()
+                    val result = try {
+                        ParallelMonoDecode.decode(
+                            plan = plan,
+                            decoder = MediaCodecSegmentDecoder(path, plan),
+                            onProgress = onProgress,
+                        )
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.w(TAG, "parallel decode threw; fall back to serial: " + e.message, e)
+                        null
+                    }
+                    if (result is ParallelDecodeResult.Success) {
+                        lastDecodeUsedParallel = true
+                        lastDecodeSegmentCount = plan.segmentCount
+                        val mono = result.mono
+                        onProgress?.invoke(1f)
+                        Log.d(
+                            "LoopPerf",
+                            "pcm parallel decode=" + (System.currentTimeMillis() - started) +
+                                "ms frames=" + mono.size + " segments=" + plan.segmentCount +
+                                " ch=" + probe.channels + " sr=" + probe.sampleRate,
+                        )
+                        return@withContext MonoPcm(mono, probe.sampleRate, mono.size.toLong())
+                    }
+                    if (result is ParallelDecodeResult.Rejected) {
+                        Log.w(TAG, "parallel decode rejected (" + result.reason + "); fall back to serial")
+                    }
+                    markParallelUnsafe(probe.mime)
+                }
+            }
+        }
+
+        // ---- 单线程回退(原路径,语义不变) ----
         val raw = decodeInternal(
             path,
             maxSeconds,
@@ -87,19 +197,8 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
             if (startUs < 0L) throw LoopException("区间起点非法")
             if (endUs <= startUs) throw LoopException("区间长度非法")
             if (endUs - startUs > MAX_PCM16_RANGE_US) throw LoopException("区间过长")
-            val tid = Process.myTid()
-            val originalPriority = try {
-                Process.getThreadPriority(tid)
-            } catch (_: Exception) {
-                0
-            }
-            try {
-                Process.setThreadPriority(tid, Process.THREAD_PRIORITY_BACKGROUND)
-            } catch (_: Exception) {}
-            try {
-                decodePcm16Internal(path, startUs, endUs)
-            } finally {
-                try { Process.setThreadPriority(tid, originalPriority) } catch (_: Exception) {}
+            withBackgroundPriority {
+                decodePcm16Internal(path, startUs, endUs = endUs)
             }
         }
 
@@ -107,10 +206,129 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
     suspend fun decodePcm16(path: String, startUs: Long, endUs: Long): Pcm16Segment =
         decodePcm16Range(path, startUs, endUs)
 
+    private suspend fun <T> withBackgroundPriority(block: suspend () -> T): T {
+        val tid = Process.myTid()
+        val originalPriority = try {
+            Process.getThreadPriority(tid)
+        } catch (_: Exception) {
+            0
+        }
+        try {
+            Process.setThreadPriority(tid, Process.THREAD_PRIORITY_BACKGROUND)
+        } catch (_: Exception) {}
+        try {
+            return block()
+        } finally {
+            try { Process.setThreadPriority(tid, originalPriority) } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * 单段解码(并行路径):返回该段 mono 主体 + 接缝校验用的 overlap 帧。
+     * 每次调用创建并释放独立 MediaExtractor/MediaCodec(段解完立刻释放)。
+     */
+    private inner class MediaCodecSegmentDecoder(
+        private val path: String,
+        private val plan: SegmentPlan,
+    ) : MonoSegmentDecoder {
+
+        override suspend fun decode(
+            segment: DecodeSegment,
+            onFrames: (Long) -> Unit,
+        ): DecodedSegment = withBackgroundPriority {
+            val started = System.currentTimeMillis()
+            val target = if (segment.toEos) null else segment.frameCount + plan.overlapFrames
+            val pcm = decodePcm16Internal(
+                path = path,
+                startUs = plan.startUs(segment),
+                endUs = null,
+                targetFramesOverride = target,
+                toEos = segment.toEos,
+                onFrames = onFrames,
+                keepFromStart = segment.index == 0,
+            )
+            if (pcm.sampleRate != plan.sampleRate || pcm.channels != plan.channels) {
+                throw LoopException(
+                    "解码输出格式与探测不一致: sr=" + pcm.sampleRate + "/" + plan.sampleRate +
+                        " ch=" + pcm.channels + "/" + plan.channels,
+                )
+            }
+            val frames = pcm.frames.toInt()
+            val monoAll = downmixToMono(pcm.data, pcm.channels, frames)
+            val mainFrames = if (segment.toEos) monoAll.size else segment.frameCount.toInt()
+            if (mainFrames > monoAll.size) {
+                throw LoopException("并行段解码不足: 需要 " + mainFrames + " 帧,实际 " + monoAll.size)
+            }
+            val mono = if (mainFrames == monoAll.size) monoAll else monoAll.copyOf(mainFrames)
+            val overlap = if (segment.toEos) {
+                FloatArray(0)
+            } else {
+                val n = minOf(plan.overlapFrames.toInt(), monoAll.size - mainFrames)
+                if (n <= 0) FloatArray(0) else monoAll.copyOfRange(mainFrames, mainFrames + n)
+            }
+            Log.d(
+                "LoopPerf",
+                "pcm segment=" + segment.index + " startFrame=" + segment.startFrame +
+                    " frames=" + mono.size + " overlap=" + overlap.size +
+                    " ms=" + (System.currentTimeMillis() - started),
+            )
+            DecodedSegment(segment, mono, overlap)
+        }
+    }
+
+    /** PCM16 交错 buffer -> mono float(与单线程路径逐样本相同的下混公式)。 */
+    private fun downmixToMono(data: ByteArray, channels: Int, frames: Int): FloatArray {
+        val mono = FloatArray(frames)
+        if (frames <= 0) return mono
+        val shorts = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+        if (channels == 1) {
+            for (i in 0 until frames) mono[i] = shorts.get(i).toFloat()
+        } else {
+            var idx = 0
+            for (f in 0 until frames) {
+                var acc = 0L
+                for (c in 0 until channels) acc += shorts.get(idx++).toInt()
+                mono[f] = acc.toFloat() / channels
+            }
+        }
+        return mono
+    }
+
+    /** 探测音轨元信息(不启动解码器)。失败返回 null -> 单线程路径。 */
+    private fun probeTrack(path: String): TrackProbe? {
+        val extractor = MediaExtractor()
+        try {
+            openExtractor(extractor, path)
+            for (i in 0 until extractor.trackCount) {
+                val f = extractor.getTrackFormat(i)
+                val mime = f.getString(MediaFormat.KEY_MIME) ?: continue
+                if (!mime.startsWith("audio/")) continue
+                if (!f.containsKey(MediaFormat.KEY_SAMPLE_RATE) ||
+                    !f.containsKey(MediaFormat.KEY_CHANNEL_COUNT) ||
+                    !f.containsKey(MediaFormat.KEY_DURATION)
+                ) {
+                    return null
+                }
+                val sr = f.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                val ch = f.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                val durationUs = f.getLong(MediaFormat.KEY_DURATION)
+                if (sr <= 0 || ch <= 0 || durationUs <= 0L) return null
+                return TrackProbe(mime, sr, ch, durationUs)
+            }
+            return null
+        } finally {
+            try { extractor.release() } catch (_: Exception) {}
+        }
+    }
+
     private suspend fun decodePcm16Internal(
         path: String,
         startUs: Long,
-        endUs: Long,
+        endUs: Long?,
+        targetFramesOverride: Long? = null,
+        toEos: Boolean = false,
+        onFrames: ((Long) -> Unit)? = null,
+        keepFromStart: Boolean = false,
     ): Pcm16Segment {
         val decodeStartMs = System.currentTimeMillis()
         val extractor = MediaExtractor()
@@ -140,7 +358,13 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
             }
 
             // 先 seek 再 start：解码器从 [startUs − 1s, ...) 开始产出，保证覆盖区间起点。
-            extractor.seekTo((startUs - SEEK_BACK_US).coerceAtLeast(0L), MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+            // keepFromStart（并行解码第 0 段）不 seek：从文件头连续解码 == 单线程前缀。
+            if (!keepFromStart) {
+                extractor.seekTo(
+                    (startUs - SEEK_BACK_US).coerceAtLeast(0L),
+                    MediaExtractor.SEEK_TO_PREVIOUS_SYNC,
+                )
+            }
             codec.configure(format, null, null, 0)
             codec.start()
 
@@ -148,9 +372,10 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
             var sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
             checkPcmFormat(format, channels, sampleRate)
 
-            var targetFrames = -1L
+            var targetFrames = targetFramesOverride ?: -1L
             var bytesPerFrame = channels * 2
             var out: ByteArray? = null
+            var outStream: java.io.ByteArrayOutputStream? = null
             var outOffset = 0
             var keptFrames = 0L
             var anchorUs = Long.MIN_VALUE
@@ -162,7 +387,7 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
 
             while (!outputDone) {
                 coroutineContext.ensureActive()
-                if (targetFrames > 0L && keptFrames >= targetFrames) break
+                if (!toEos && targetFrames > 0L && keptFrames >= targetFrames) break
 
                 // 1) 喂入:extractor → codec
                 if (!inputDone) {
@@ -206,35 +431,53 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
                                 if (frames > 0L) {
                                     if (anchorUs == Long.MIN_VALUE) {
                                         anchorUs = info.presentationTimeUs
-                                        if (anchorUs > startUs) {
+                                        if (!keepFromStart && anchorUs > startUs) {
                                             throw LoopException(
                                                 "解码起点晚于区间起点: anchorUs=" + anchorUs +
                                                     " startUs=" + startUs,
                                             )
                                         }
-                                        targetFrames = Pcm16Frames.framesForUsCeil(
-                                            endUs - startUs,
-                                            sampleRate,
-                                        )
-                                        if (targetFrames <= 0L) throw LoopException("区间不足一帧")
-                                        val targetBytes = targetFrames * bytesPerFrame
-                                        if (targetBytes > MAX_PCM16_BYTES) {
-                                            throw LoopException("区间过长")
+                                        if (!toEos && targetFramesOverride == null) {
+                                            val end = endUs ?: throw LoopException("区间终点缺失")
+                                            targetFrames = Pcm16Frames.framesForUsCeil(
+                                                end - startUs,
+                                                sampleRate,
+                                            )
                                         }
-                                        out = ByteArray(targetBytes.toInt())
-                                        keepStartFrame = Pcm16Frames.frameAtOrAfterUs(
-                                            startUs - anchorUs,
-                                            sampleRate,
+                                        if (!toEos) {
+                                            if (targetFrames <= 0L) throw LoopException("区间不足一帧")
+                                            val targetBytes = targetFrames * bytesPerFrame
+                                            if (targetBytes > MAX_PCM16_BYTES) {
+                                                throw LoopException("区间过长")
+                                            }
+                                            out = ByteArray(targetBytes.toInt())
+                                        } else {
+                                            outStream = java.io.ByteArrayOutputStream(
+                                                (sampleRate * bytesPerFrame).coerceAtLeast(1024),
+                                            )
+                                        }
+                                        keepStartFrame = if (keepFromStart) {
+                                            0L
+                                        } else {
+                                            Pcm16Frames.frameAtOrAfterUs(
+                                                startUs - anchorUs,
+                                                sampleRate,
+                                            )
+                                        }
+                                    }
+                                    val clip = if (toEos) {
+                                        val from = maxOf(streamFrame, keepStartFrame)
+                                        val to = streamFrame + frames
+                                        if (to > from) from until to else null
+                                    } else {
+                                        Pcm16Frames.clipBuffer(
+                                            bufferStartFrame = streamFrame,
+                                            bufferFrames = frames,
+                                            keepStartFrame = keepStartFrame,
+                                            keepFrames = targetFrames,
                                         )
                                     }
-                                    val clip = Pcm16Frames.clipBuffer(
-                                        bufferStartFrame = streamFrame,
-                                        bufferFrames = frames,
-                                        keepStartFrame = keepStartFrame,
-                                        keepFrames = targetFrames,
-                                    )
-                                    val dst = out
-                                    if (clip != null && dst != null) {
+                                    if (clip != null) {
                                         val srcFrame = (clip.first - streamFrame).toInt()
                                         val len = ((clip.last - clip.first + 1L) * bytesPerFrame).toInt()
                                         val dup = buffer.duplicate()
@@ -247,9 +490,16 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
                                         }
                                         dup.position(srcStart)
                                         dup.limit(srcEnd)
-                                        dup.get(dst, outOffset, len)
-                                        outOffset += len
+                                        if (toEos) {
+                                            val chunk = ByteArray(len)
+                                            dup.get(chunk, 0, len)
+                                            outStream!!.write(chunk)
+                                        } else {
+                                            dup.get(out!!, outOffset, len)
+                                            outOffset += len
+                                        }
                                         keptFrames += clip.last - clip.first + 1L
+                                        onFrames?.invoke(keptFrames)
                                     }
                                     streamFrame += frames
                                 }
@@ -261,6 +511,12 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
                 }
             }
 
+            if (toEos) {
+                val data = outStream?.toByteArray() ?: ByteArray(0)
+                val frames = data.size.toLong() / bytesPerFrame
+                if (frames <= 0L) throw LoopException("解码结果为空")
+                return Pcm16Segment(data, sampleRate, channels, frames)
+            }
             if (targetFrames <= 0L) throw LoopException("解码结果为空")
             if (keptFrames < targetFrames) {
                 throw LoopException(
@@ -271,7 +527,7 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
                 "LoopPerf",
                 "pcm16 decode=" + (System.currentTimeMillis() - decodeStartMs) +
                     "ms frames=" + keptFrames + " ch=" + channels + " sr=" + sampleRate +
-                    " startUs=" + startUs + " endUs=" + endUs,
+                    " startUs=" + startUs + " endUs=" + (endUs ?: -1L),
             )
             return Pcm16Segment(out!!, sampleRate, channels, keptFrames)
         } catch (e: CancellationException) {
@@ -478,7 +734,15 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
         }
     }
 
+    private fun isParallelUnsafe(mime: String): Boolean = parallelUnsafeMimes.contains(mime)
+
+    private fun markParallelUnsafe(mime: String) {
+        parallelUnsafeMimes.add(mime)
+        Log.w(TAG, "decode-parallel disabled for mime=" + mime + " (process-wide)")
+    }
+
     private companion object {
+        const val TAG = "PcmDecoder"
         const val TIMEOUT_US = 10_000L
 
         /** 预填解码提前量：从 startUs − 1s 开始 seek，给 MP3/AAC sync 帧留余量。 */
@@ -489,5 +753,12 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
 
         /** 预填 PCM 上限：64MB（与引擎 ring 上限一致）。 */
         const val MAX_PCM16_BYTES = 64L * 1024L * 1024L
+
+        /** 接缝校验额外帧（约 85ms @48k）：覆盖编码器延迟/帧边界错位。 */
+        const val OVERLAP_FRAMES = 4096L
+
+        /** 已验证不可并行(或首次并行失败)的 mime;进程内缓存,后续直接单线程。 */
+        val parallelUnsafeMimes: MutableSet<String> =
+            Collections.synchronizedSet(mutableSetOf<String>())
     }
 }

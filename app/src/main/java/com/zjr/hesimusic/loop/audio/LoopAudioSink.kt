@@ -87,6 +87,9 @@ class LoopAudioSink(
     /** 最近一次成功交给 delegate 的起始媒体 PTS（含 offset 域）；用于拒绝倒退重放。 */
     private var lastDelegatePtsUs: Long = Long.MIN_VALUE
 
+    /** 最近一次输入 buffer 的媒体 PTS；用于自动识别 seek 大跳变。 */
+    private var lastInputPtsUs: Long = Long.MIN_VALUE
+
     /** 上一次同步给引擎的窗口；窗口变化时丢弃旧窗口的 pending 重放 chunk。 */
     private var observedWindow: LoopWindow? = null
 
@@ -127,6 +130,7 @@ class LoopAudioSink(
         stuckReplayAttempts = 0
         stuckReplaySinceNanos = 0L
         lastDelegatePtsUs = Long.MIN_VALUE
+        lastInputPtsUs = Long.MIN_VALUE
 
         controller.onFormatConfigured(sampleRate, channelCount, bpf, pcmIsFloat)
         observedWindow = controller.window
@@ -183,6 +187,37 @@ class LoopAudioSink(
 
         // 引擎只看媒体时间（0 起）；delegate 仍看“媒体时间 + 当前 output offset”。
         val mediaPts = presentationTimeUs - outputStreamOffsetUs
+        val stateBefore = engine.state
+        val prevInputPts = lastInputPtsUs
+        lastInputPtsUs = mediaPts
+        if (prevInputPts != Long.MIN_VALUE &&
+            kotlin.math.abs(mediaPts - prevInputPts) > INPUT_PTS_JUMP_US
+        ) {
+            // ExoPlayer 偶尔不在 seek 后调 handleDiscontinuity；输入 PTS 大跳变
+            // 等价于时间戳不连续，主动重置 delegate 基线，否则后续重放 PTS 会被拒收。
+            lastDelegatePtsUs = Long.MIN_VALUE
+            try {
+                super.handleDiscontinuity()
+                Log.w(
+                    "LoopPerf",
+                    "input pts jump " + prevInputPts + "->" + mediaPts +
+                        " -> delegate discontinuity",
+                )
+            } catch (_: Throwable) {
+            }
+        }
+        if (engine.isPostFlushPhasePending()) {
+            try {
+                Log.d(
+                    "LoopPerf",
+                    "input pendingPhase rawPts=" + presentationTimeUs +
+                        " offset=" + outputStreamOffsetUs +
+                        " mediaPts=" + mediaPts +
+                        " " + engine.debugStateString(),
+                )
+            } catch (_: Throwable) {
+            }
+        }
 
         // 重放态节流：只有 pump() 真的写出 >0 帧，才消费/丢弃这个输入 buffer。
         // 否则返回 false 让 renderer 重试（重试即再次泵），解码器不会被喂到 EOS。
@@ -207,6 +242,7 @@ class LoopAudioSink(
                 if (engine.state != LoopPcmEngine.State.REPLAYING) {
                     pendingReplay = null
                 }
+                logInputState("rephase", mediaPts, stateBefore)
                 if (engine.state == LoopPcmEngine.State.REPLAYING) {
                     val written = pump()
                     if (written > 0L) {
@@ -220,9 +256,11 @@ class LoopAudioSink(
         }
 
         val plan = engine.onBuffer(mediaPts, frames, buffer)
+        logInputState("onBuffer", mediaPts, stateBefore)
         if (plan.discard || plan.forwardLength <= 0) {
             buffer.position(buffer.limit())
             engine.onInputDrained(plan)
+            logInputState("onDrained", mediaPts, stateBefore)
             if (plan.enterReplayWhenDrained) {
                 pump()
             } else if (engine.state == LoopPcmEngine.State.REPLAYING) {
@@ -250,6 +288,7 @@ class LoopAudioSink(
         if (after >= end) {
             pendingInput = null
             engine.onInputDrained(plan)
+            logInputState("onDrained", mediaPts, stateBefore)
             if (plan.enterReplayWhenDrained) {
                 pump()
             }
@@ -332,6 +371,7 @@ class LoopAudioSink(
     override fun handleDiscontinuity() {
         // delegate 已被告知时间戳不连续：允许后续重放从更早的位置重新开始。
         lastDelegatePtsUs = Long.MIN_VALUE
+        lastInputPtsUs = Long.MIN_VALUE
         engine.onInputDiscontinuity()
         super.handleDiscontinuity()
     }
@@ -347,6 +387,7 @@ class LoopAudioSink(
         stuckReplayAttempts = 0
         stuckReplaySinceNanos = 0L
         lastDelegatePtsUs = Long.MIN_VALUE
+        lastInputPtsUs = Long.MIN_VALUE
         preallocRetries = 0
         engine.onFlush()
         controller.onSinkFlush()
@@ -359,6 +400,7 @@ class LoopAudioSink(
         stuckReplayAttempts = 0
         stuckReplaySinceNanos = 0L
         lastDelegatePtsUs = Long.MIN_VALUE
+        lastInputPtsUs = Long.MIN_VALUE
         preallocRetries = 0
         engine.onReset()
         controller.onSinkReset()
@@ -373,6 +415,7 @@ class LoopAudioSink(
         stuckReplayAttempts = 0
         stuckReplaySinceNanos = 0L
         lastDelegatePtsUs = Long.MIN_VALUE
+        lastInputPtsUs = Long.MIN_VALUE
         preallocRetries = 0
         engine.onRelease()
         controller.onSinkRelease()
@@ -559,6 +602,19 @@ class LoopAudioSink(
     }
 
     /** 1Hz 低频诊断：确认 EOS 后 renderer 是否还在调 playToEndOfStream/isEnded。 */
+    private fun logInputState(tag: String, mediaPts: Long, before: LoopPcmEngine.State) {
+        if (before == engine.state) return
+        try {
+            Log.d(
+                "LoopPerf",
+                "input " + tag + " mediaPts=" + mediaPts +
+                    " state " + before + "->" + engine.state +
+                    " " + engine.debugStateString(),
+            )
+        } catch (_: Throwable) {
+        }
+    }
+
     private fun maybeLogPerf() {
         val now = System.nanoTime()
         if (now - lastPerfLogNanos < PERF_LOG_INTERVAL_NANOS) return
@@ -611,6 +667,9 @@ class LoopAudioSink(
 
         /** 预分配背压上限：约 2s（renderer ~100Hz 轮询）。 */
         const val MAX_PREALLOC_RETRIES = 200
+
+        /** 输入 PTS 跳变超过 0.5s 视为 seek/discontinuity。 */
+        const val INPUT_PTS_JUMP_US: Long = 500_000L
 
         /** pendingReplay 连续零消费多少轮后判定卡死。 */
         const val MAX_STUCK_REPLAY_WRITES: Int = 20

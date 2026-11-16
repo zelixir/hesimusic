@@ -656,17 +656,25 @@ object PlayerPageReducer {
         val seamless = mode.seamless
         if (seamless != null) {
             // 规则 3：无缝意图下 repeat 固定为 ONE，重复设置是恒等 no-op；
-            // 用户改成非 ONE = 显式退出意图（repeat 用用户目标值，shuffle 恢复原值）。
+            // 用户改成非 ONE = 显式退出意图。按 00004 裁决（LoopIntentDecision）：
+            // - repeat 已是用户刚写的值，不再重复写（ModeRestore.repeatMode = null）；
+            // - shuffle 保持无缝期间的 false，**不恢复**进入前的值（不写 shuffle）。
             if (repeat == RepeatMode.ONE) return applied(state)
-            val restored = PlayMode(seamless.previousRepeat, seamless.previousShuffle, null)
-            val target = restored.copy(repeat = repeat)
-            return applied(withMode(target), modeEffects(mode, target))
+            val target = PlayMode(repeat = repeat, shuffle = false, seamless = null)
+            return applied(withMode(target), emptyList())
         }
 
+        // 用户已经把 repeat 写到播放器（事件是对已生效模式的观测），这里只补
+        // 归一化所需的写：单曲循环 + 随机 是非法组合，必须补一次 SetShuffle(false)。
         val shuffle = if (repeat == RepeatMode.ONE && mode.shuffle) false else mode.shuffle
         val target = mode.copy(repeat = repeat, shuffle = shuffle)
         if (target == mode) return applied(state)
-        return applied(withMode(target), modeEffects(mode, target))
+        val effects = if (shuffle != mode.shuffle) {
+            listOf(PlayerPageEffect.SetShuffle(shuffle))
+        } else {
+            emptyList()
+        }
+        return applied(withMode(target), effects)
     }
 
     private fun setShuffle(
@@ -678,18 +686,31 @@ object PlayerPageReducer {
         val seamless = mode.seamless
         if (seamless != null) {
             // 规则 3：无缝期间 shuffle 固定 false；用户打开 shuffle = 显式退出意图。
+            // 按 00004 裁决：shuffle 保留用户的新值（不重复写，ModeRestore.shuffleEnabled = null）；
+            // repeat 恢复进入前的值，若进入前恰为 ONE 则按全局不变量改写成 ALL。
             if (!enabled) return applied(state)
             val restored = PlayMode(seamless.previousRepeat, seamless.previousShuffle, null)
             val repeat = if (restored.repeat == RepeatMode.ONE) RepeatMode.ALL else restored.repeat
-            val target = restored.copy(repeat = repeat, shuffle = true)
-            return applied(withMode(target), modeEffects(mode, target))
+            val target = PlayMode(repeat = repeat, shuffle = true, seamless = null)
+            val effects = if (repeat != mode.repeat) {
+                listOf(PlayerPageEffect.SetRepeat(repeat))
+            } else {
+                emptyList()
+            }
+            return applied(withMode(target), effects)
         }
 
         if (mode.shuffle == enabled) return applied(state)
-        // 规则 4：shuffle + repeat=ONE 自相矛盾，打开 shuffle 时把 repeat 归一到 ALL。
+        // 全局不变量：shuffle=true ⇒ repeat != ONE。用户打开 shuffle 时把 repeat 归一到 ALL；
+        // shuffle 本身是用户刚写的值，不重复下发；关闭 shuffle 不触发任何强制。
         val repeat = if (enabled && mode.repeat == RepeatMode.ONE) RepeatMode.ALL else mode.repeat
         val target = mode.copy(repeat = repeat, shuffle = enabled)
-        return applied(withMode(target), modeEffects(mode, target))
+        val effects = if (repeat != mode.repeat) {
+            listOf(PlayerPageEffect.SetRepeat(repeat))
+        } else {
+            emptyList()
+        }
+        return applied(withMode(target), effects)
     }
 
     private fun enterSeamless(
@@ -861,6 +882,11 @@ object PlayerPageReducer {
         val mode = modeOf(state) ?: return emptyList()
         val intent = mode.seamless
         return buildList {
+            // 全局不变量：shuffle=true ⇒ repeat != ONE（UI 显示优先级是 shuffle > repeat，
+            // 两者同时成立时「显示 = 实际」会自相矛盾）。
+            if (mode.shuffle && mode.repeat == RepeatMode.ONE) {
+                add("播放模式自相矛盾：shuffle=true ⇒ repeat != ONE（实际 repeat=ONE）")
+            }
             if (intent != null) {
                 if (mode.repeat != RepeatMode.ONE || mode.shuffle) {
                     add(
@@ -870,8 +896,6 @@ object PlayerPageReducer {
                 if (intent.songId <= 0L) {
                     add("无缝意图 songId 非法：${intent.songId}")
                 }
-            } else if (mode.shuffle && mode.repeat == RepeatMode.ONE) {
-                add("播放模式自相矛盾：shuffle=true 且 repeat=ONE 且不在无缝意图中")
             }
         }
     }

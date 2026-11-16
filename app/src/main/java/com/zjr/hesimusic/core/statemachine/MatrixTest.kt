@@ -5,7 +5,9 @@ package com.zjr.hesimusic.core.statemachine
  *
  * 对 [StateMachineSpec.states] × [StateMachineSpec.events] 的每一个组合执行并校验：
  * 1. 未声明的组合必须返回 [Transition.Rejected]，且**返回同一个 state 实例**；
- * 2. 声明的组合必须返回 [Transition.Applied]，且落点仍在合法状态域内；
+ * 2. 声明的组合必须返回 [Transition.Applied]，且落点仍在合法状态域内
+ *    （合法状态域按**状态类型**判定：states 是代表实例，结果与某个代表同类型即视为在域内，
+ *    字段级合法性由 invariants 负责；需要更细粒度域划分时，请拆成不同的 sealed 子类型）；
  * 3. 每次转换后所有 [Invariant] 必须通过（包括 Rejected 返回的 state）；
  * 4. 每个 effect 的具体类型必须在 [StateMachineSpec.effectTypes] 内；
  * 5. 若 reducer / allowed 抛异常，也作为矩阵失败报告，而不是让 JUnit 只看到堆栈。
@@ -89,6 +91,8 @@ class MatrixTest<S : SmState, E : SmEvent, F : SmEffect>(
                             if (!allowed) {
                                 problems += "allowed=false，但 reducer 返回了 Applied：未声明的组合必须 Rejected 且保持 state 实例不变"
                             }
+                            // states 是代表实例：按状态类型判定是否仍在合法域内，
+                            // 具体字段值由 invariants 校验（否则 Playing(position) 永远无法换位置）。
                             if (spec.states.none { it::class == transition.state::class }) {
                                 problems += "Applied 落出合法状态域：${transition.state}（类型 ${transition.state::class.simpleName}）不在 states 中（矩阵遗漏了一个状态？）"
                             }

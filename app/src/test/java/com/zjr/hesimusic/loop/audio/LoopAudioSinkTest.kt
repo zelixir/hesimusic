@@ -617,6 +617,43 @@ class LoopAudioSinkTest {
     }
 
     @Test
+    fun `前缀只覆盖到 A+2s 时 seek 35s 仍从 35s 源输入播放`() {
+        val w = window(20000, 50000)
+        val (controller, sink, fake) = rig(w)
+        // 首片只覆盖 A..A+2s
+        assertTrue(
+            controller.seedRingRange(
+                w,
+                0L,
+                PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(20000, 2000)),
+                PcmTestSupport.SAMPLE_RATE,
+                1,
+            ).isInstalled,
+        )
+        // 模拟 seek flush 后，解码器从 35s 喂入
+        sink.flush()
+        val ptsUs = 35_000_000L
+        val before = fake.feeds.size
+        assertTrue(
+            sink.handleBuffer(
+                PcmTestSupport.pcm16Buffer(35000, 10),
+                ptsUs,
+                1,
+            )
+        )
+
+        assertFalse("前缀覆盖不到 35s 时不得提前进入 A 的重放", controller.isReplaying)
+        val feed = fake.feeds.drop(before).firstOrNull { it.ptsUs >= ptsUs }
+        assertTrue("必须转发 35s 源输入", feed != null)
+        assertEquals("源输入 PTS 必须保持 35s", ptsUs, feed!!.ptsUs)
+        assertArrayEquals(
+            "必须输出源 35s 的样本",
+            PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(35000, 10)),
+            feed.bytes.copyOfRange(0, 20),
+        )
+    }
+
+    @Test
     fun `flush 后输入 PTS 落在区间内部时从该相位继续`() {
         val (controller, sink, fake) = rig()
         assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(0, 250), 0L))
@@ -869,6 +906,33 @@ class LoopAudioSinkTest {
             file.delete()
             sidecar.delete()
         }
+    }
+
+    @Test
+    fun `输入 PTS 大跳变主动重置 delegate 时间戳基线`() {
+        val (controller, sink, fake) = rig(window(1000, 2000))
+        assertTrue(
+            controller.seedRing(
+                window(1000, 2000),
+                PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(1000, 1000)),
+                PcmTestSupport.SAMPLE_RATE,
+                1,
+            ).isInstalled,
+        )
+        sink.playToEndOfStream()
+        assertTrue(controller.isReplaying)
+
+        // 第一次输入建立 lastInputPts
+        assertTrue(sink.handleBuffer(PcmTestSupport.pcm16Buffer(1500, 10), 1_500_000L, 1))
+        val before = fake.discontinuityCalls
+
+        // 跨过 0.5s 跳变（模拟 seek），必须主动通知 delegate
+        assertTrue(sink.handleBuffer(PcmTestSupport.pcm16Buffer(3000, 10), 3_000_000L, 1))
+
+        assertTrue(
+            "输入 PTS 大跳变应主动调用 delegate.handleDiscontinuity",
+            fake.discontinuityCalls > before,
+        )
     }
 
     @Test

@@ -381,7 +381,17 @@ class LoopPcmEngineTest {
         assertEquals("写失败不得触发降级 seek", 0, targets.size)
         assertEquals("写失败不得累计 degradeCount", 0L, engine.degradeCount)
         assertEquals("写失败计数", 1L, engine.replayFailureCount)
-        assertEquals("不得进入前奏", false, engine.currentPositionUs() < 1_000_000L)
+
+        // 封锁期间源输入必须整段直通，不能再次进重放
+        val blocked = engine.onBuffer(2_500_000L, 10, PcmTestSupport.pcm16Buffer(2500, 10))
+        assertEquals("封锁时不得丢尾部", 10, blocked.forwardFrames)
+        assertFalse("封锁时不得再进重放", blocked.enterReplayWhenDrained)
+
+        // flush 后解除封锁，可重新进入重放
+        engine.onFlush()
+        val atB = engine.onBuffer(2_000_000L, 10, PcmTestSupport.pcm16Buffer(2000, 10))
+        engine.onInputDrained(atB)
+        assertEquals("flush 后应可恢复重放", LoopPcmEngine.State.REPLAYING, engine.state)
     }
 
     @Test

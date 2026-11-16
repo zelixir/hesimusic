@@ -118,7 +118,6 @@ class PlayerPageMatrixGateTest {
             val result = PlayerPageReducer.reduce(case.state, case.event)
             if (result !is Transition.Applied) continue
 
-            val oldMode = PlayerPageReducer.modeOf(case.state)
             val newMode = PlayerPageReducer.modeOf(result.state)
             val repeatEffects = result.effects.filterIsInstance<PlayerPageEffect.SetRepeat>()
             val shuffleEffects = result.effects.filterIsInstance<PlayerPageEffect.SetShuffle>()
@@ -140,14 +139,9 @@ class PlayerPageMatrixGateTest {
                 }
             }
 
-            if (oldMode != null && newMode != null) {
-                if (oldMode.repeat != newMode.repeat) {
-                    assertTrue("$case：repeat 变了却没有 SetRepeat effect", repeatEffects.isNotEmpty())
-                }
-                if (oldMode.shuffle != newMode.shuffle) {
-                    assertTrue("$case：shuffle 变了却没有 SetShuffle effect", shuffleEffects.isNotEmpty())
-                }
-            }
+            // 模式事件（SetRepeat / SetShuffle）被视为「用户已写、reducer 观测到」的事实；
+            // 因此不要求每次模式变化都产生 effect，但任何补写 effect 的值必须等于新状态。
+            // 其它路径（进入/退出无缝、切歌、归一化）由各自的命名用例断言完整 effect。
         }
     }
 
@@ -362,9 +356,11 @@ class PlayerPageRuleTest {
         assertTrue(mode.shuffle)
         assertEquals("退出后 repeat 恢复进入前的 ALL", RepeatMode.ALL, mode.repeat)
         assertEquals(
-            listOf(PlayerPageEffect.SetRepeat(RepeatMode.ALL), PlayerPageEffect.SetShuffle(true)),
+            "shuffle 是用户刚写的值，不得重复下发；只需补写恢复的 repeat",
+            listOf(PlayerPageEffect.SetRepeat(RepeatMode.ALL)),
             effects,
         )
+        assertTrue("用户改 shuffle 不得产生 SetShuffle effect", effects.none { it is PlayerPageEffect.SetShuffle })
 
         // 00004 实测 bug：无缝前是单曲循环时，退出后绝不允许 shuffle+ONE 自相矛盾
         val fromSingleLoop = applied(
@@ -380,7 +376,7 @@ class PlayerPageRuleTest {
     }
 
     @Test
-    fun rule00004_userRepeatChangeWhileSeamlessExitsIntentAndRestoresShuffle() {
+    fun rule00004_userRepeatChangeWhileSeamlessKeepsShuffleOffWithoutWritingIt() {
         val seamless = applied(
             PlayerPageState.Playing(30_000L, PlayMode(repeat = RepeatMode.ALL, shuffle = true)),
             PlayerPageEvent.EnterSeamless(42L),
@@ -390,11 +386,9 @@ class PlayerPageRuleTest {
         val mode = (next as PlayerPageState.Playing).mode
         assertNull(mode.seamless)
         assertEquals("用户显式选择的 repeat 生效", RepeatMode.OFF, mode.repeat)
-        assertEquals("shuffle 恢复进入前的值", true, mode.shuffle)
-        assertEquals(
-            listOf(PlayerPageEffect.SetRepeat(RepeatMode.OFF), PlayerPageEffect.SetShuffle(true)),
-            effects,
-        )
+        assertEquals("shuffle 保持无缝期间的 false，不恢复进入前的 true", false, mode.shuffle)
+        assertTrue("用户改 repeat 退出：ModeRestore 两个字段都为 null，不得写任何模式", effects.isEmpty())
+        assertTrue("尤其不得写 shuffle", effects.none { it is PlayerPageEffect.SetShuffle })
     }
 
     @Test
@@ -511,7 +505,8 @@ class PlayerPageRuleTest {
         )
         assertEquals(PlayMode(repeat = RepeatMode.ONE, shuffle = false), (repeatOne as PlayerPageState.Paused).mode)
         assertEquals(
-            listOf(PlayerPageEffect.SetShuffle(false), PlayerPageEffect.SetRepeat(RepeatMode.ONE)),
+            "repeat 是用户刚写的值，不重复下发；只补写归一化的 shuffle=false",
+            listOf(PlayerPageEffect.SetShuffle(false)),
             repeatEffects,
         )
 
@@ -522,8 +517,51 @@ class PlayerPageRuleTest {
         )
         assertEquals(PlayMode(repeat = RepeatMode.ALL, shuffle = true), (shuffled as PlayerPageState.Paused).mode)
         assertEquals(
-            listOf(PlayerPageEffect.SetRepeat(RepeatMode.ALL), PlayerPageEffect.SetShuffle(true)),
+            "shuffle 是用户刚写的值，不重复下发；只补写归一化的 repeat=ALL",
+            listOf(PlayerPageEffect.SetRepeat(RepeatMode.ALL)),
             shuffleEffects,
+        )
+    }
+
+    @Test
+    fun rule00004_closingShuffleNeverForcesRepeat() {
+        // 非无缝：关闭 shuffle 只保留 repeat，不触发任何不变量强制
+        val (closed, effects) = applied(
+            PlayerPageState.Paused(0L, PlayMode(repeat = RepeatMode.OFF, shuffle = true)),
+            PlayerPageEvent.SetShuffle(false),
+        )
+        assertEquals(PlayMode(repeat = RepeatMode.OFF, shuffle = false), (closed as PlayerPageState.Paused).mode)
+        assertTrue("关闭 shuffle 不需要任何模式补写", effects.isEmpty())
+
+        // 无缝态：shuffle 本来就是 false，关闭是恒等 no-op，不得清掉无缝意图
+        val seamless = applied(
+            PlayerPageState.Playing(30_000L, PlayMode(repeat = RepeatMode.ALL, shuffle = false)),
+            PlayerPageEvent.EnterSeamless(42L),
+        ).first
+        assertSame(
+            "无缝期间关闭已为 false 的 shuffle 必须是恒等 no-op",
+            seamless,
+            applied(seamless, PlayerPageEvent.SetShuffle(false)).first,
+        )
+        assertEquals(
+            SeamlessIntent(songId = 42L, previousRepeat = RepeatMode.ALL, previousShuffle = false),
+            PlayerPageReducer.modeOf(seamless)!!.seamless,
+        )
+    }
+
+    @Test
+    fun rule00004_globalInvariantShuffleImpliesNotSingleLoop() {
+        for (state in PlayerPageStateMachine.states) {
+            val mode = PlayerPageReducer.modeOf(state) ?: continue
+            if (mode.shuffle) {
+                assertTrue("$state：shuffle=true 时 repeat 不得为 ONE", mode.repeat != RepeatMode.ONE)
+            }
+        }
+        val illegal = PlayerPageState.Paused(0L, PlayMode(repeat = RepeatMode.ONE, shuffle = true))
+        assertTrue(
+            "全局不变量必须能独立识别 shuffle+ONE（即使没有无缝意图）",
+            PlayerPageReducer.INVARIANTS.mapNotNull { it.violation(illegal) }
+                .any { it.contains("shuffle=true") },
         )
     }
 
@@ -955,15 +993,20 @@ object PlayerPageMatrix {
         val seamless = mode.seamless
         if (seamless != null) {
             if (repeat == RepeatMode.ONE) return applied(state)
-            val restored = PlayMode(seamless.previousRepeat, seamless.previousShuffle, null)
-            val target = restored.copy(repeat = repeat)
-            return applied(withMode(target), modeDiff(mode, target))
+            // 00004 裁决：repeat 保留用户新值且不重复写；shuffle 保持 false，不恢复 prev。
+            val target = PlayMode(repeat = repeat, shuffle = false, seamless = null)
+            return applied(withMode(target))
         }
 
         val shuffle = if (repeat == RepeatMode.ONE && mode.shuffle) false else mode.shuffle
         val target = mode.copy(repeat = repeat, shuffle = shuffle)
         if (target == mode) return applied(state)
-        return applied(withMode(target), modeDiff(mode, target))
+        val effects = if (shuffle != mode.shuffle) {
+            listOf(PlayerPageEffect.SetShuffle(shuffle))
+        } else {
+            emptyList()
+        }
+        return applied(withMode(target), effects)
     }
 
     private fun setShuffleExpected(
@@ -977,14 +1020,24 @@ object PlayerPageMatrix {
             if (!enabled) return applied(state)
             val restored = PlayMode(seamless.previousRepeat, seamless.previousShuffle, null)
             val repeat = if (restored.repeat == RepeatMode.ONE) RepeatMode.ALL else restored.repeat
-            val target = restored.copy(repeat = repeat, shuffle = true)
-            return applied(withMode(target), modeDiff(mode, target))
+            val target = PlayMode(repeat = repeat, shuffle = true, seamless = null)
+            val effects = if (repeat != mode.repeat) {
+                listOf(PlayerPageEffect.SetRepeat(repeat))
+            } else {
+                emptyList()
+            }
+            return applied(withMode(target), effects)
         }
 
         if (mode.shuffle == enabled) return applied(state)
         val repeat = if (enabled && mode.repeat == RepeatMode.ONE) RepeatMode.ALL else mode.repeat
         val target = mode.copy(repeat = repeat, shuffle = enabled)
-        return applied(withMode(target), modeDiff(mode, target))
+        val effects = if (repeat != mode.repeat) {
+            listOf(PlayerPageEffect.SetRepeat(repeat))
+        } else {
+            emptyList()
+        }
+        return applied(withMode(target), effects)
     }
 
     private fun enterSeamlessExpected(
