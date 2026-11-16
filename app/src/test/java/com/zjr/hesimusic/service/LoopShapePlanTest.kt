@@ -26,9 +26,9 @@ class LoopShapePlanTest {
         target: LoopWindow? = window,
         applied: LoopWindow? = null,
         rawUs: Long = 15_000_000L,
-        isRingComplete: Boolean = false,
+        ringCoveredFrames: Long = 0L,
         wasReplaying: Boolean = false,
-    ) = LoopShapePlan.plan(songId, target, applied, rawUs, isRingComplete, wasReplaying)
+    ) = LoopShapePlan.plan(songId, target, applied, rawUs, ringCoveredFrames, wasReplaying)
 
     // ---------------------------------------------------------------- 窗口归属
 
@@ -45,19 +45,19 @@ class LoopShapePlanTest {
     @Test
     fun noop_whenWindowUnchanged() {
         // 同一窗口（含 A/B 与 songId）连续 refresh：连音频层都不重复写
-        val p = plan(target = window, applied = window, rawUs = 15_000_000L, isRingComplete = false)
+        val p = plan(target = window, applied = window, rawUs = 15_000_000L, ringCoveredFrames = 0L)
         assertEquals(LoopShapePlan.Kind.NOOP, p.kind)
         assertEquals(window, p.window)
         assertNull(p.seekRawUs)
         // 重放中（raw 已越过 B）也是 NOOP：不能因为位置在 B 之后就再 seek 一次
-        val replaying = plan(target = window, applied = window, rawUs = 45_000_000L, isRingComplete = false)
+        val replaying = plan(target = window, applied = window, rawUs = 45_000_000L, ringCoveredFrames = 0L)
         assertEquals(LoopShapePlan.Kind.NOOP, replaying.kind)
         assertNull(replaying.seekRawUs)
     }
 
     @Test
     fun enter_isPureStateWrite_whenRingAlreadyComplete() {
-        val p = plan(target = window, applied = null, rawUs = 15_000_000L, isRingComplete = true)
+        val p = plan(target = window, applied = null, rawUs = 15_000_000L, ringCoveredFrames = 1L)
         assertEquals(LoopShapePlan.Kind.ENTER, p.kind)
         assertEquals(window, p.window)
         assertNull("进入时 ring 已完整 → 只写窗口，不 seek", p.seekRawUs)
@@ -66,11 +66,11 @@ class LoopShapePlanTest {
     @Test
     fun enter_isPureStateWrite_whenPositionOutsideWindow() {
         // 前奏期起播：会自然流经 [A,B)，不需要预卷
-        val prelude = plan(target = window, applied = null, rawUs = 5_000_000L, isRingComplete = false)
+        val prelude = plan(target = window, applied = null, rawUs = 5_000_000L, ringCoveredFrames = 0L)
         assertEquals(LoopShapePlan.Kind.ENTER, prelude.kind)
         assertNull(prelude.seekRawUs)
         // raw 已越过 B（且没有旧窗口可折返）：同样只写窗口
-        val beyond = plan(target = window, applied = null, rawUs = 45_000_000L, isRingComplete = false)
+        val beyond = plan(target = window, applied = null, rawUs = 45_000_000L, ringCoveredFrames = 0L)
         assertEquals(LoopShapePlan.Kind.ENTER, beyond.kind)
         assertNull(beyond.seekRawUs)
     }
@@ -80,14 +80,14 @@ class LoopShapePlanTest {
     @Test
     fun preRoll_whenEnteringInsideWindowWithIncompleteRing() {
         // display 15s ∈ [A,B)，k = 0 → 本轮起点 A → 预卷 A - 250ms
-        val p = plan(target = window, applied = null, rawUs = 15_000_000L, isRingComplete = false)
+        val p = plan(target = window, applied = null, rawUs = 15_000_000L, ringCoveredFrames = 0L)
         assertEquals(LoopShapePlan.Kind.PRE_ROLL, p.kind)
         assertEquals(window, p.window)
         assertEquals(9_750_000L, p.seekRawUs)
         // 恰在 A
         assertEquals(
             9_750_000L,
-            plan(target = window, applied = null, rawUs = A, isRingComplete = false).seekRawUs,
+            plan(target = window, applied = null, rawUs = A, ringCoveredFrames = 0L).seekRawUs,
         )
     }
 
@@ -95,7 +95,7 @@ class LoopShapePlanTest {
     fun preRoll_keepsCurrentIteration() {
         // 旧窗口 W（A=10,B=20）下 raw 45s → display 15s；新窗口 W2(5..30)，k = (45-5)/25 = 1
         // → 正常映射 5 + 25 + (15-5) = 40s → 本轮起点 30s → 预卷 29.75s
-        val p = plan(target = widerWindow, applied = window, rawUs = 45_000_000L, isRingComplete = false)
+        val p = plan(target = widerWindow, applied = window, rawUs = 45_000_000L, ringCoveredFrames = 0L)
         assertEquals(LoopShapePlan.Kind.PRE_ROLL, p.kind)
         assertEquals(widerWindow, p.window)
         assertEquals(29_750_000L, p.seekRawUs)
@@ -104,7 +104,7 @@ class LoopShapePlanTest {
     @Test
     fun preRoll_clampedAtZeroWhenLoopStartIsTiny() {
         val early = LoopWindow(songId = 7L, loopStartUs = 100_000L, loopEndUs = 10_100_000L)
-        val p = plan(target = early, applied = null, rawUs = 5_000_000L, isRingComplete = false)
+        val p = plan(target = early, applied = null, rawUs = 5_000_000L, ringCoveredFrames = 0L)
         assertEquals(LoopShapePlan.Kind.PRE_ROLL, p.kind)
         assertEquals(0L, p.seekRawUs)
     }

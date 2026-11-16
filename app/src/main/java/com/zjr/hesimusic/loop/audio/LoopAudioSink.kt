@@ -80,6 +80,13 @@ class LoopAudioSink(
     private var positionPumpCalls: Long = 0L
     private var lastPerfLogNanos: Long = 0L
 
+    // 活性看门狗：pendingReplay 连续多轮零消费时自愈，绝不永久卡 REPLAYING。
+    private var stuckReplayAttempts: Int = 0
+    private var stuckReplaySinceNanos: Long = 0L
+
+    /** 最近一次成功交给 delegate 的起始媒体 PTS（含 offset 域）；用于拒绝倒退重放。 */
+    private var lastDelegatePtsUs: Long = Long.MIN_VALUE
+
     /** 上一次同步给引擎的窗口；窗口变化时丢弃旧窗口的 pending 重放 chunk。 */
     private var observedWindow: LoopWindow? = null
 
@@ -117,6 +124,9 @@ class LoopAudioSink(
         // 重置会把 sink 时间轴打回媒体时间，导致 PTS 与 A/B 不同域、捕获永不命中。
         pendingInput = null
         pendingReplay = null
+        stuckReplayAttempts = 0
+        stuckReplaySinceNanos = 0L
+        lastDelegatePtsUs = Long.MIN_VALUE
 
         controller.onFormatConfigured(sampleRate, channelCount, bpf, pcmIsFloat)
         observedWindow = controller.window
@@ -177,21 +187,36 @@ class LoopAudioSink(
         // 重放态节流：只有 pump() 真的写出 >0 帧，才消费/丢弃这个输入 buffer。
         // 否则返回 false 让 renderer 重试（重试即再次泵），解码器不会被喂到 EOS。
         if (engine.state == LoopPcmEngine.State.REPLAYING) {
-            // discontinuity 未伴随 flush 时，用第一段新输入 PTS 重新定位相位。
-            if (engine.isPostFlushPhasePending() && engine.tryRephaseFromInput(mediaPts)) {
-                buffer.position(buffer.limit())
-                pump()
-                return true
+            // 不变量：重放态收到 PTS < A 的输入（降级 seek 把播放头拉到前奏）时，
+            // 必须立刻退出重放转 CAPTURING，否则 pump 无有效帧会永久卡死。
+            val w = controller.window
+            if (w != null && mediaPts < w.loopStartUs && engine.onPreludeInput(mediaPts)) {
+                pendingReplay = null
+                try {
+                    Log.w("LoopPerf", "replay->capture prelude mediaPtsUs=" + mediaPts + " A=" + w.loopStartUs)
+                } catch (_: Throwable) {
+                }
             }
             if (engine.state == LoopPcmEngine.State.REPLAYING) {
-                val written = pump()
-                if (written > 0L) {
+                // discontinuity 未伴随 flush 时，用第一段新输入 PTS 重新定位相位。
+                if (engine.isPostFlushPhasePending() && engine.tryRephaseFromInput(mediaPts)) {
                     buffer.position(buffer.limit())
+                    pump()
                     return true
                 }
-                return false
+                if (engine.state != LoopPcmEngine.State.REPLAYING) {
+                    pendingReplay = null
+                }
+                if (engine.state == LoopPcmEngine.State.REPLAYING) {
+                    val written = pump()
+                    if (written > 0L) {
+                        buffer.position(buffer.limit())
+                        return true
+                    }
+                    return false
+                }
+                // tryRephaseFromInput 把状态切回 CAPTURING（seek 到前奏）：落到下面正常处理。
             }
-            // tryRephaseFromInput 把状态切回 CAPTURING（seek 到前奏）：落到下面正常处理。
         }
 
         val plan = engine.onBuffer(mediaPts, frames, buffer)
@@ -218,6 +243,7 @@ class LoopAudioSink(
         )
         val after = buffer.position()
         if (after > before) {
+            lastDelegatePtsUs = mediaPts + outputStreamOffsetUs
             controller.tapPcm(buffer, before, after - before)
         }
 
@@ -316,6 +342,9 @@ class LoopAudioSink(
     override fun flush() {
         pendingInput = null
         pendingReplay = null
+        stuckReplayAttempts = 0
+        stuckReplaySinceNanos = 0L
+        lastDelegatePtsUs = Long.MIN_VALUE
         preallocRetries = 0
         engine.onFlush()
         controller.onSinkFlush()
@@ -325,6 +354,9 @@ class LoopAudioSink(
     override fun reset() {
         pendingInput = null
         pendingReplay = null
+        stuckReplayAttempts = 0
+        stuckReplaySinceNanos = 0L
+        lastDelegatePtsUs = Long.MIN_VALUE
         preallocRetries = 0
         engine.onReset()
         controller.onSinkReset()
@@ -336,6 +368,9 @@ class LoopAudioSink(
         disabled = true
         pendingInput = null
         pendingReplay = null
+        stuckReplayAttempts = 0
+        stuckReplaySinceNanos = 0L
+        lastDelegatePtsUs = Long.MIN_VALUE
         preallocRetries = 0
         engine.onRelease()
         controller.onSinkRelease()
@@ -379,6 +414,7 @@ class LoopAudioSink(
         )
         val after = buffer.position()
         if (after > before) {
+            lastDelegatePtsUs = mediaPtsUs + outputStreamOffsetUs
             controller.tapPcm(buffer, before, after - before)
         }
 
@@ -440,27 +476,81 @@ class LoopAudioSink(
     private fun writePendingReplay(pending: PendingReplay): Boolean {
         val bb = pending.buffer
         val before = bb.position()
+        val delegatePtsUs = pending.ptsUs + outputStreamOffsetUs
+        val oneFrameUs = 1_000_000L / sampleRate.coerceAtLeast(1)
+        if (lastDelegatePtsUs != Long.MIN_VALUE &&
+            delegatePtsUs < lastDelegatePtsUs - oneFrameUs
+        ) {
+            try {
+                Log.w(
+                    "LoopPerf",
+                    "replay timestamp backward pts=" + delegatePtsUs +
+                        " last=" + lastDelegatePtsUs +
+                        " " + engine.debugStateString(),
+                )
+            } catch (_: Throwable) {
+            }
+            engine.onReplayTimestampBackward()
+            pendingReplay = null
+            return false
+        }
         try {
             // pending.ptsUs 是引擎媒体时间；delegate 必须看到同一 offset 域。
-            super.handleBuffer(bb, pending.ptsUs + outputStreamOffsetUs, 1)
+            super.handleBuffer(bb, delegatePtsUs, 1)
         } catch (t: Throwable) {
+            try {
+                Log.w("LoopPerf", "replay write failed pts=" + delegatePtsUs + " " + engine.debugStateString(), t)
+            } catch (_: Throwable) {
+            }
             engine.onReplayFailure()
             pendingReplay = null
             throw t
         }
         val consumed = bb.position() - before
         if (consumed > 0) {
+            lastDelegatePtsUs = delegatePtsUs
+            stuckReplayAttempts = 0
+            stuckReplaySinceNanos = 0L
             controller.tapPcm(bb, before, consumed)
             // 逐次上报已消费字节，让引擎位置/接缝打点与 delegate 实际进度一致。
             engine.onReplayChunkConsumed(consumed)
         }
         if (bb.hasRemaining()) {
+            if (consumed <= 0) {
+                val now = System.nanoTime()
+                if (stuckReplaySinceNanos == 0L) stuckReplaySinceNanos = now
+                stuckReplayAttempts += 1
+                if (stuckReplayAttempts >= MAX_STUCK_REPLAY_WRITES ||
+                    now - stuckReplaySinceNanos >= STUCK_REPLAY_TIMEOUT_NANOS
+                ) {
+                    try {
+                        Log.w(
+                            "LoopPerf",
+                            "replay stuck recovery attempts=" + stuckReplayAttempts +
+                                " ptsUs=" + pending.ptsUs +
+                                " remaining=" + bb.remaining() +
+                                " " + engine.debugStateString(),
+                        )
+                    } catch (_: Throwable) {
+                    }
+                    engine.onReplayStuck()
+                    pendingReplay = null
+                    stuckReplayAttempts = 0
+                    stuckReplaySinceNanos = 0L
+                    return false
+                }
+            } else {
+                stuckReplayAttempts = 0
+                stuckReplaySinceNanos = 0L
+            }
             val frames = consumed / bytesPerFrame
             if (frames > 0) {
                 pending.ptsUs += frames.toLong() * 1_000_000L / sampleRate
             }
             return false
         }
+        stuckReplayAttempts = 0
+        stuckReplaySinceNanos = 0L
         return true
     }
 
@@ -478,7 +568,15 @@ class LoopAudioSink(
             " playToEnd=" + playToEndCalls +
             " isEndedCalls=" + isEndedCalls +
             " lastDelegateEnded=" + lastDelegateEnded +
-            " posPumps=" + positionPumpCalls
+            " posPumps=" + positionPumpCalls +
+            " stallCount=" + engine.stallCount +
+            " covered=" + engine.coveredFrames +
+            " cursor=" + engine.currentCursorFrames() +
+            " pendingInputBytes=" + (pendingInput?.buffer?.remaining() ?: 0) +
+            " pendingReplayBytes=" + (pendingReplay?.buffer?.remaining() ?: 0) +
+            " selfHeal=" + engine.replaySelfHealCount +
+            " replayReject=" + engine.replayRejectCount +
+            " writeFail=" + engine.replayFailureCount
         try {
             Log.d("LoopPerf", message)
         } catch (t: Throwable) {
@@ -509,6 +607,12 @@ class LoopAudioSink(
 
         /** 预分配背压上限：约 2s（renderer ~100Hz 轮询）。 */
         const val MAX_PREALLOC_RETRIES = 200
+
+        /** pendingReplay 连续零消费多少轮后判定卡死。 */
+        const val MAX_STUCK_REPLAY_WRITES: Int = 20
+
+        /** pendingReplay 零消费持续多久后判定卡死。 */
+        const val STUCK_REPLAY_TIMEOUT_NANOS: Long = 200_000_000L
 
         /** LoopPerf 诊断日志间隔。 */
         const val PERF_LOG_INTERVAL_NANOS = 1_000_000_000L

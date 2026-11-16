@@ -189,7 +189,8 @@ class LoopRingSeedTest {
         // 输入整体越过 B(2530)，ring 未完整 → 原有路径降级
         val plan = engine.onBuffer(2_530_000L, 10, PcmTestSupport.pcm16Buffer(2530, 10))
         engine.onInputDrained(plan)
-        assertEquals(LoopPcmEngine.State.PASS_THROUGH, engine.state)
+        assertEquals("无前缀时停在捕获", LoopPcmEngine.State.CAPTURING, engine.state)
+        assertEquals("未完整不得降级", 0L, engine.degradeCount)
 
         val result = engine.seedRing(w, seedBytes(100, 100), 1000, 1)
         assertEquals(LoopPcmEngine.SeedStatus.INSTALLED, result.status)
@@ -198,6 +199,32 @@ class LoopRingSeedTest {
         val chunk = engine.pumpChunk(1 shl 20)!!
         assertEquals(30L, chunk.frameOffsetInRound)
         assertEquals(2_530_000L, chunk.ptsUs)
+    }
+
+    @Test
+    fun `REPLAYING 中收到前奏输入转捕获`() {
+        val engine = newEngine()
+        val w = window(1000, 2000)
+        engine.setWindow(w)
+        assertTrue(
+            engine.seedRing(
+                w,
+                seedBytes(1000, 1000),
+                1000,
+                1,
+            ).isInstalled,
+        )
+        assertTrue(engine.onInputEnded())
+        assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
+
+        assertTrue("前奏输入必须退出重放", engine.onPreludeInput(900_000L))
+        assertEquals(LoopPcmEngine.State.CAPTURING, engine.state)
+
+        // 转捕获后前奏可以正常转发，不会卡在重放空泵
+        val plan = engine.onBuffer(900_000L, 10, PcmTestSupport.pcm16Buffer(900, 10))
+        assertEquals(10, plan.forwardFrames)
+        engine.onInputDrained(plan)
+        assertEquals(LoopPcmEngine.State.CAPTURING, engine.state)
     }
 
     @Test
@@ -274,28 +301,56 @@ class LoopRingSeedTest {
     }
 
     @Test
-    fun `门槛不足不进重放且补片后自动进入`() {
+    fun `无前缀到 B 停在捕获 首片落地即进入重放`() {
         val engine = newEngine()
         val w = window(1000, 2000)
         engine.setWindow(w)
-        engine.seedRingRange(w, 0L, seedBytes(1000, 300), 1000, 1)
 
-        // 300 帧 < 500 帧门槛；输入越过 B 也只能停在捕获
+        // 没有任何连续覆盖：越过 B 也不能凭空重放，停在捕获且不降级
         val plan = engine.onBuffer(1_990_000L, 10, PcmTestSupport.pcm16Buffer(1990, 10))
         engine.onInputDrained(plan)
-
         assertEquals(LoopPcmEngine.State.CAPTURING, engine.state)
-        assertEquals("门槛不足不得记降级", 0L, engine.degradeCount)
+        assertEquals("未完整不得降级", 0L, engine.degradeCount)
         assertFalse(engine.isRingComplete)
 
-        // 补到 700 帧后，离 B 的门槛已满足，自动进入重放
-        engine.seedRingRange(w, 300L, seedBytes(1300, 400), 1000, 1)
-        assertEquals(700L, engine.coveredFrames)
+        // 第一片 300 帧落地后，前缀非空即可进入重放（不再等 0.5s 门槛）
+        engine.seedRingRange(w, 0L, seedBytes(1000, 300), 1000, 1)
+        assertEquals(300L, engine.coveredFrames)
         assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
+        assertEquals("不得降级", 0L, engine.degradeCount)
     }
 
     @Test
-    fun `重放追尾回退降级并在补片后恢复`() {
+    fun `seek 到区间内且前缀不足时不向后降级`() {
+        val engine = newEngine()
+        val w = window(1000, 4000)
+        engine.setWindow(w)
+        val targets = mutableListOf<Long>()
+        engine.onDegrade = { targets.add(it) }
+        // 第一片只有 0.6s，覆盖不到 seek 目标 2.5s
+        engine.seedRingRange(w, 0L, seedBytes(1000, 600), 1000, 1)
+
+        val plan = engine.onBuffer(2_500_000L, 1500, PcmTestSupport.pcm16Buffer(2500, 1500))
+        assertEquals("应转发到 B", 1_500, plan.forwardFrames)
+        engine.onInputDrained(plan)
+
+        assertEquals("必须进入重放而不是向后 seek", LoopPcmEngine.State.REPLAYING, engine.state)
+        assertEquals("不得触发降级回调", 0, targets.size)
+        assertEquals("不得累计降级", 0L, engine.degradeCount)
+
+        // 从 A 播到当前前缀尽头后原地等待
+        val chunk = engine.pumpChunk(1 shl 20)!!
+        assertEquals(600, chunk.frames)
+        engine.onReplayChunkConsumed(chunk.byteLength)
+        assertEquals(null, engine.pumpChunk(1 shl 20))
+        assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
+        assertEquals(1L, engine.stallCount)
+        assertEquals(0L, engine.degradeCount)
+        assertEquals(0, targets.size)
+    }
+
+    @Test
+    fun `覆盖耗尽原地等待并补片后继续`() {
         val engine = newEngine()
         val w = window(1000, 2000)
         engine.setWindow(w)
@@ -311,18 +366,18 @@ class LoopRingSeedTest {
         assertEquals(600L, engine.totalReplayFrames)
 
         assertEquals(null, engine.pumpChunk(1 shl 20))
-        assertEquals(LoopPcmEngine.State.CAPTURING, engine.state)
-        assertEquals("追尾应记一次降级", 1L, engine.degradeCount)
-
-        // 覆盖没有增长前，不能拿旧数据再次进入重放（否则会在 0..600 之间循环降级）
-        engine.onInputDrained(plan)
-        assertEquals(LoopPcmEngine.State.CAPTURING, engine.state)
-        assertEquals("不得重复降级", 1L, engine.degradeCount)
+        assertEquals("覆盖耗尽必须保持重放等待", LoopPcmEngine.State.REPLAYING, engine.state)
+        assertEquals("等待不得降级/seek", 0L, engine.degradeCount)
+        assertEquals("等待应记 stallCount", 1L, engine.stallCount)
 
         engine.seedRingRange(w, 600L, seedBytes(1600, 400), 1000, 1)
         assertTrue(engine.isRingComplete)
-        assertEquals("补齐后应恢复重放", LoopPcmEngine.State.REPLAYING, engine.state)
-        assertEquals("降级次数不重复累计", 1L, engine.degradeCount)
+        assertEquals("补片后仍在重放", LoopPcmEngine.State.REPLAYING, engine.state)
+        assertEquals("等待不累计降级", 0L, engine.degradeCount)
+        val next = engine.pumpChunk(1 shl 20)!!
+        assertEquals(400, next.frames)
+        assertEquals(2_600_000L, next.ptsUs)
+        assertEquals("补片后不应再新增等待", 1L, engine.stallCount)
     }
 
     @Test

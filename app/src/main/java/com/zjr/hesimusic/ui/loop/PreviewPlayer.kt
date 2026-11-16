@@ -196,6 +196,43 @@ class PreviewPlayer @Inject constructor(
     }
 
     /**
+     * 从当前位置继续播放，**不 seek**。
+     *
+     * effect runner 在同一批 effect 已先执行 SeekTo 时用它，避免 Play 内部再次走
+     * [LoopPosition.rawSeekUs]（00008 的重复映射来源）。
+     */
+    fun playFromCurrent(mode: PreviewMode) {
+        val song = this.song ?: return
+        val p = ensurePlayer()
+        if (!prepared) {
+            // 尚未 prepare 时没有“当前位置”可恢复：退回普通 play，由 prepare 建窗口。
+            play(mode, 0L)
+            return
+        }
+        this.mode = mode
+        if (mode == PreviewMode.FREE) applyFreeShape() else applyLoopShape(song)
+        degradeRetryUsed = false
+        p.play()
+        updatePositionOnce()
+        Log.d(TAG, "playFromCurrent mode=" + mode + " window=" + window)
+    }
+
+    /**
+     * 预填/等待阶段先把窗口写给音频层，**不 seek、不播放**。
+     *
+     * 分片预填需要 controller.window 已写入才能 seed；若等 Play 才写，
+     * 而 Play 又等 PrefillReady，会形成“seed 等 sink / sink 等 Play”的死锁。
+     */
+    fun applyWindowForPrefill(window: LoopWindow) {
+        this.aMs = window.loopStartUs / 1000L
+        this.bMs = window.loopEndUs / 1000L
+        this.window = window
+        degradeRetryUsed = false
+        controller.window = window
+        updatePositionOnce()
+    }
+
+    /**
      * 预填目标窗口（与 [prepare] 使用同一套 sanitize/buildWindow 规则）。
      *
      * 纯函数、任意线程可调用；后台预填解码按它取 [LoopWindow] 的时间边界，

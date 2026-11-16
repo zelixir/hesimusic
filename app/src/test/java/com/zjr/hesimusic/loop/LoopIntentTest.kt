@@ -10,7 +10,7 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * 显式意图容器:只持有「武装的是哪首歌 + 进入前的 repeat」,无 DB / 无播放副作用。
+ * 显式意图容器:只持有「武装的是哪首歌 + 进入前的 repeat/shuffle」,无 DB / 无播放副作用。
  */
 class LoopIntentTest {
 
@@ -31,12 +31,27 @@ class LoopIntentTest {
     }
 
     @Test
-    fun `arm 记录目标歌与进入前 repeat`() {
+    fun `arm 记录目标歌与进入前的 repeat 和 shuffle`() {
         val intent = LoopIntent()
-        intent.arm(42L, Player.REPEAT_MODE_ALL)
+        intent.arm(42L, Player.REPEAT_MODE_ALL, previousShuffleEnabled = true)
         assertEquals(
-            "arm 应记录 songId + previousRepeatMode",
-            LoopIntent.Armed(songId = 42L, previousRepeatMode = Player.REPEAT_MODE_ALL),
+            "arm 应记录 songId + previousRepeatMode + previousShuffleEnabled",
+            LoopIntent.Armed(
+                songId = 42L,
+                previousRepeatMode = Player.REPEAT_MODE_ALL,
+                previousShuffleEnabled = true,
+            ),
+            intent.armed.value
+        )
+    }
+
+    @Test
+    fun `arm 也能记录 shuffle 关闭`() {
+        val intent = LoopIntent()
+        intent.arm(7L, Player.REPEAT_MODE_OFF, previousShuffleEnabled = false)
+        assertEquals(
+            "进入前 shuffle=false 也要如实记录(退出时按 false 恢复)",
+            LoopIntent.Armed(7L, Player.REPEAT_MODE_OFF, previousShuffleEnabled = false),
             intent.armed.value
         )
     }
@@ -44,11 +59,11 @@ class LoopIntentTest {
     @Test
     fun `重复 arm 以最后一次为准`() {
         val intent = LoopIntent()
-        intent.arm(1L, Player.REPEAT_MODE_ALL)
-        intent.arm(2L, Player.REPEAT_MODE_OFF)
+        intent.arm(1L, Player.REPEAT_MODE_ALL, previousShuffleEnabled = true)
+        intent.arm(2L, Player.REPEAT_MODE_OFF, previousShuffleEnabled = false)
         assertEquals(
-            "arm 别的歌应替换意图(不叠加)",
-            LoopIntent.Armed(songId = 2L, previousRepeatMode = Player.REPEAT_MODE_OFF),
+            "arm 别的歌应替换意图(不叠加),两个原值都更新",
+            LoopIntent.Armed(2L, Player.REPEAT_MODE_OFF, previousShuffleEnabled = false),
             intent.armed.value
         )
     }
@@ -56,9 +71,9 @@ class LoopIntentTest {
     @Test
     fun `arm 非法 songId 被忽略`() {
         val intent = LoopIntent()
-        intent.arm(0L, Player.REPEAT_MODE_ALL)
+        intent.arm(0L, Player.REPEAT_MODE_ALL, previousShuffleEnabled = true)
         assertNull("songId=0 不可能成为无缝目标,不应留下意图", intent.armed.value)
-        intent.arm(-3L, Player.REPEAT_MODE_ALL)
+        intent.arm(-3L, Player.REPEAT_MODE_ALL, previousShuffleEnabled = true)
         assertNull("负 songId 同样忽略", intent.armed.value)
     }
 
@@ -66,13 +81,13 @@ class LoopIntentTest {
     fun `clear 幂等且不重复 emit`() {
         val intent = LoopIntent()
         val seen = emissions(intent) {
-            intent.arm(1L, Player.REPEAT_MODE_ALL)
+            intent.arm(1L, Player.REPEAT_MODE_ALL, previousShuffleEnabled = true)
             intent.clear()
             intent.clear()
         }
         assertEquals(
             "null -> 武装 -> null;重复 clear 不应重复 emit",
-            listOf(null, LoopIntent.Armed(1L, Player.REPEAT_MODE_ALL), null),
+            listOf(null, LoopIntent.Armed(1L, Player.REPEAT_MODE_ALL, previousShuffleEnabled = true), null),
             seen
         )
         assertNull("clear 后应无意图", intent.armed.value)
@@ -82,12 +97,12 @@ class LoopIntentTest {
     fun `相同意图重复 arm 不重复 emit`() {
         val intent = LoopIntent()
         val seen = emissions(intent) {
-            intent.arm(1L, Player.REPEAT_MODE_ALL)
-            intent.arm(1L, Player.REPEAT_MODE_ALL)
+            intent.arm(1L, Player.REPEAT_MODE_ALL, previousShuffleEnabled = true)
+            intent.arm(1L, Player.REPEAT_MODE_ALL, previousShuffleEnabled = true)
         }
         assertEquals(
             "相同 Armed 值不应重复 emit",
-            listOf(null, LoopIntent.Armed(1L, Player.REPEAT_MODE_ALL)),
+            listOf(null, LoopIntent.Armed(1L, Player.REPEAT_MODE_ALL, previousShuffleEnabled = true)),
             seen
         )
     }

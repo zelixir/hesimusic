@@ -293,19 +293,19 @@ class LoopPcmEngineTest {
     }
 
     @Test
-    fun `ring 不完整时降级 且 flush 后可回补缺口`() {
+    fun `ring 不完整时停在捕获 且 flush 后可回补缺口`() {
         val engine = newEngine()
         engine.setWindow(window(100, 200))
 
-        // 从区间中部 seek 进来：只捕获到 [150,200)
+        // 从区间中部 seek 进来：只捕获到 [150,200)，连续前缀仍为空
         val partial = engine.onBuffer(150_000L, 100, PcmTestSupport.pcm16Buffer(150, 100))
         assertEquals("转发应裁到 B(200)", 50, partial.forwardFrames)
         engine.onInputDrained(partial)
 
         assertFalse("只捕获一半时 ring 不完整", engine.isRingComplete)
-        assertFalse("ring 不完整时应降级为不可环回", engine.isLoopConfigured())
-        assertTrue("应计入降级", engine.degradeCount >= 1L)
-        assertEquals("不应进入重放", LoopPcmEngine.State.PASS_THROUGH, engine.state)
+        assertEquals("没有连续前缀时应停在捕获", LoopPcmEngine.State.CAPTURING, engine.state)
+        assertTrue("未完整不再降级/不可环回", engine.isLoopConfigured())
+        assertEquals("未完整不得计入降级", 0L, engine.degradeCount)
 
         // 服务层 seek 回 A 之前补缺口
         engine.onFlush()
@@ -358,30 +358,30 @@ class LoopPcmEngineTest {
     }
 
     @Test
-    fun `降级回调目标为轮起点减 250ms 且同一事件只回调一次`() {
-        val engine = newEngine()
+    fun `重放写失败只回捕获 不向后 seek`() {
+        val engine = newEngine(sampleRate = 1000)
         engine.setWindow(window(1000, 2000))
         val targets = mutableListOf<Long>()
         engine.onDegrade = { targets.add(it) }
+        assertEquals(
+            LoopPcmEngine.SeedStatus.INSTALLED,
+            engine.seedRing(
+                window(1000, 2000),
+                PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(1000, 1000)),
+                1000,
+                1,
+            ).status,
+        )
+        assertTrue(engine.onInputEnded())
+        assertEquals(LoopPcmEngine.State.REPLAYING, engine.state)
 
-        // 从区间中部进来：只捕获 [1500,2000) 共 500 帧（缺前 500 帧）
-        val partial = engine.onBuffer(1_500_000L, 1000, PcmTestSupport.pcm16Buffer(1500, 1000))
-        engine.onInputDrained(partial)
+        engine.onReplayFailure()
 
-        assertEquals("降级应回调一次", 1, targets.size)
-        assertEquals("target = A - 250ms", 750_000L, targets[0])
-        assertEquals("降级计数 +1", 1L, engine.degradeCount)
-
-        // 同一事件重复消费不应重复回调
-        engine.onInputDrained(partial)
-        assertEquals("同一降级事件只回调一次", 1, targets.size)
-
-        // flush 重新 arm 后再次失败，应再次回调
-        engine.onFlush()
-        val atB = engine.onBuffer(2_000_000L, 10, PcmTestSupport.pcm16Buffer(2000, 10))
-        engine.onInputDrained(atB)
-        assertEquals("flush 后应可再次触发", 2, targets.size)
-        assertEquals("目标值仍为 A - 250ms", 750_000L, targets[1])
+        assertEquals("写失败必须退出重放", LoopPcmEngine.State.CAPTURING, engine.state)
+        assertEquals("写失败不得触发降级 seek", 0, targets.size)
+        assertEquals("写失败不得累计 degradeCount", 0L, engine.degradeCount)
+        assertEquals("写失败计数", 1L, engine.replayFailureCount)
+        assertEquals("不得进入前奏", false, engine.currentPositionUs() < 1_000_000L)
     }
 
     @Test
@@ -556,7 +556,7 @@ class LoopPcmEngineTest {
     }
 
     @Test
-    fun `ring 不完整时相位保持 0 且仍然降级`() {
+    fun `ring 不完整且无前缀时相位保持 0 并停在捕获`() {
         val engine = newEngine()
         engine.setWindow(window(100, 200))
 
@@ -577,7 +577,8 @@ class LoopPcmEngineTest {
         assertEquals("ring 不完整时轮次保持 1", 1L, seekPlan.entryRound)
 
         engine.onInputDrained(seekPlan)
-        assertEquals("ring 不完整应维持降级，不进入重放", LoopPcmEngine.State.PASS_THROUGH, engine.state)
+        assertEquals("ring 不完整且无前缀应停在捕获", LoopPcmEngine.State.CAPTURING, engine.state)
+        assertEquals("未完整不得计入降级", 0L, engine.degradeCount)
         assertFalse(engine.state == LoopPcmEngine.State.REPLAYING)
     }
 

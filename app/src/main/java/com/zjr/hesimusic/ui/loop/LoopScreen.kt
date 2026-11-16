@@ -70,7 +70,6 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
@@ -97,18 +96,22 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.lifecycle.ViewModel
 import com.zjr.hesimusic.data.model.Song
-import com.zjr.hesimusic.loop.analysis.AnalysisState
-import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
 import com.zjr.hesimusic.loop.analysis.WaveformPeaks
 import com.zjr.hesimusic.ui.common.MusicViewModel
-import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.launch
+import com.zjr.hesimusic.ui.loop.state.AnalysisPhase
+import com.zjr.hesimusic.ui.loop.state.LoopHandle
+import com.zjr.hesimusic.ui.loop.state.LoopPageEvent
+import com.zjr.hesimusic.ui.loop.state.LoopPageMode
+import com.zjr.hesimusic.ui.loop.state.LoopPageState
+import com.zjr.hesimusic.ui.loop.state.PlaybackState
+import com.zjr.hesimusic.ui.loop.state.PrefillState
 import java.util.Locale
-import javax.inject.Inject
 import kotlin.math.abs
 import kotlin.math.floor
 
@@ -172,10 +175,12 @@ fun LoopScreen(
     onSavedAndPlay: (Song) -> Unit,
     viewModel: LoopViewModel = hiltViewModel(),
 ) {
-    val screen by viewModel.screen.collectAsState()
+    val pageState by viewModel.pageState.collectAsState()
+    val peaks by viewModel.peaks.collectAsState()
     val song by viewModel.song.collectAsState()
     val notice by viewModel.notice.collectAsState()
     val context = LocalContext.current
+    val currentOnBack by rememberUpdatedState(onBack)
 
     // 一次性提示(Toast)消费
     LaunchedEffect(notice) {
@@ -186,6 +191,11 @@ fun LoopScreen(
 
     // 进入页面即暂停主播放(不改变队列/repeat;契约 §2.1 / §2.5)。
     LaunchedEffect(Unit) { musicViewModel.pause() }
+
+    // effect NavigateBack(含删除持久化成功)统一从这里回到上一页。
+    LaunchedEffect(Unit) {
+        viewModel.backRequests.collect { currentOnBack() }
+    }
 
     // 离开页面:释放预览 → 若只是预览则恢复主播放(原歌原位);保存路径由回调接管。
     DisposableEffect(Unit) {
@@ -200,7 +210,7 @@ fun LoopScreen(
             TopAppBar(
                 title = { Text("无缝循环 · 分析与预览") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = { viewModel.dispatch(LoopPageEvent.Back) }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
@@ -213,18 +223,30 @@ fun LoopScreen(
                 .fillMaxSize()
                 .padding(horizontal = 16.dp),
         ) {
-            when (val state = screen) {
-                is LoopScreenState.Skeleton -> AnalysisSkeleton(song = song, viewModel = viewModel)
-                is LoopScreenState.Failed -> FailedContent(
-                    message = state.message,
-                    onRetry = { viewModel.startAnalysis() },
-                    onBack = onBack,
+            when (val state = pageState) {
+                LoopPageState.Loading -> AnalysisSkeleton(
+                    song = song,
+                    phase = null,
+                    progress = 0f,
                 )
-                is LoopScreenState.Ready -> ResultContent(
-                    result = state.result,
+
+                is LoopPageState.Analyzing -> AnalysisSkeleton(
+                    song = song,
+                    phase = state.phase,
+                    progress = state.progress,
+                )
+
+                is LoopPageState.Failed -> FailedContent(
+                    message = state.message,
+                    onRetry = { viewModel.dispatch(LoopPageEvent.Retry) },
+                    onBack = { viewModel.dispatch(LoopPageEvent.Back) },
+                )
+
+                is LoopPageState.Ready -> ResultContent(
+                    state = state,
+                    peaks = peaks,
                     song = song,
                     viewModel = viewModel,
-                    onBack = onBack,
                     onSavedAndPlay = onSavedAndPlay,
                 )
             }
@@ -236,27 +258,24 @@ fun LoopScreen(
 // 骨架 / 进度(首帧立即渲染,任何查询/解码都异步)
 // ---------------------------------------------------------------------------
 @Composable
-private fun AnalysisSkeleton(song: Song?, viewModel: LoopViewModel) {
-    val state by viewModel.analysisState.collectAsState()
-    val current = state
+private fun AnalysisSkeleton(
+    song: Song?,
+    phase: AnalysisPhase?,
+    progress: Float,
+) {
     // 显示层再 clamp 单调(与 LoopProgress 源头单调双保险,进度条永不回退)
     val lastShown = remember { mutableFloatStateOf(0f) }
-    val rawTarget = when (current) {
-        is AnalysisState.Decoding -> current.progress
-        is AnalysisState.Analyzing -> current.progress
-        else -> 0f
-    }
-    val target = maxOf(rawTarget, lastShown.floatValue).coerceIn(0f, 1f)
+    val target = maxOf(progress, lastShown.floatValue).coerceIn(0f, 1f)
     SideEffect { lastShown.floatValue = target }
     val animated by animateFloatAsState(
         targetValue = target,
         animationSpec = tween(durationMillis = 150),
         label = "loopGlobalProgress",
     )
-    val phaseText = when (state) {
-        is AnalysisState.Analyzing -> "正在分析候选循环点…"
-        is AnalysisState.Decoding -> "正在解码音频…"
-        else -> "正在读取曲目信息…"
+    val phaseText = when (phase) {
+        AnalysisPhase.ANALYZING -> "正在分析候选循环点…"
+        AnalysisPhase.DECODING -> "正在解码音频…"
+        null -> "正在读取曲目信息…"
     }
 
     Column(
@@ -308,12 +327,6 @@ private fun AnalysisSkeleton(song: Song?, viewModel: LoopViewModel) {
                 color = Color(0xFF6E7681),
             )
         }
-        if (state is AnalysisState.Idle && song != null) {
-            // 仅手动路径(如自动分析被单飞拒绝)出现
-            Button(onClick = { viewModel.startAnalysis() }, modifier = Modifier.fillMaxWidth()) {
-                Text("开始分析")
-            }
-        }
     }
 }
 
@@ -345,30 +358,30 @@ private fun FailedContent(message: String, onRetry: () -> Unit, onBack: () -> Un
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ResultContent(
-    result: LoopResult,
+    state: LoopPageState.Ready,
+    peaks: WaveformPeaks?,
     song: Song?,
     viewModel: LoopViewModel,
-    onBack: () -> Unit,
     onSavedAndPlay: (Song) -> Unit,
 ) {
-    val aMs by viewModel.aMs.collectAsState()
-    val bMs by viewModel.bMs.collectAsState()
-    val mode by viewModel.mode.collectAsState()
-    val selectedCandidate by viewModel.selectedCandidate.collectAsState()
-    val isPlaying by viewModel.isPlaying.collectAsState()
     val buffering by viewModel.buffering.collectAsState()
     val isReplaying by viewModel.isReplaying.collectAsState()
     val ringReady by viewModel.ringReady.collectAsState()
-    val ringPreparing by viewModel.ringPreparing.collectAsState()
-    val durationMs by viewModel.durationMs.collectAsState()
 
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    // 删除走独立通道:必须等落库完成再 onBack,否则 pop 会取消 LoopViewModel 的协程(见类注释)。
-    val resultActions: LoopResultActionsViewModel = hiltViewModel()
+    val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
-    val durationSec = durationMs.coerceAtLeast(0L) / 1000.0
-    val peaks = result.peaks
+    val aMs = state.aMs
+    val bMs = state.bMs
+    val mode = state.mode
+    val selectedCandidate = state.selectedCandidate
+    val durationMs = state.durationMs
+    val candidates = state.candidates
+    val sampleRate = state.sampleRate
+    val confirmed = state.confirmed
+    val playingIntent = state.playback is PlaybackState.Playing ||
+        state.playback is PlaybackState.AwaitingPrefill
+    val ringPreparing = state.prefill is PrefillState.InProgress
+
     val loopRatio = if (durationMs > 0L) {
         ((bMs - aMs).toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
     } else {
@@ -389,11 +402,15 @@ private fun ResultContent(
     var showCandidateSheet by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
 
+    // 拖拽只在首次进入某个手柄时发 Start,之后发 Move;松手统一 End + CommitWindow。
+    var dragHandle by remember { mutableStateOf<LoopHandle?>(null) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(bottom = 16.dp),
+            // 底部留白 = 常规 16dp + 系统导航栏 inset;最后一行按钮可完整滚到可点区域。
+            .padding(bottom = 16.dp + bottomInset),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -418,9 +435,29 @@ private fun ResultContent(
             aMs = aMs,
             bMs = bMs,
             playheadMs = playheadMs,
-            onSeek = { viewModel.seekToDisplayMs(it) },
-            onDrag = { handleA, ms -> viewModel.dragTo(handleA, ms) },
-            onDragEnd = { viewModel.commitWindow() },
+            onSeek = { viewModel.dispatch(LoopPageEvent.Seek(it)) },
+            onDrag = { handleA, ms ->
+                val handle = if (handleA) LoopHandle.A else LoopHandle.B
+                if (dragHandle != handle) {
+                    viewModel.dispatch(
+                        if (handleA) LoopPageEvent.DragAStart(ms) else LoopPageEvent.DragBStart(ms),
+                    )
+                    dragHandle = handle
+                } else {
+                    viewModel.dispatch(
+                        if (handleA) LoopPageEvent.DragAMove(ms) else LoopPageEvent.DragBMove(ms),
+                    )
+                }
+            },
+            onDragEnd = {
+                when (dragHandle) {
+                    LoopHandle.A -> viewModel.dispatch(LoopPageEvent.DragAEnd)
+                    LoopHandle.B -> viewModel.dispatch(LoopPageEvent.DragBEnd)
+                    null -> Unit
+                }
+                dragHandle = null
+                viewModel.dispatch(LoopPageEvent.CommitWindow)
+            },
             modifier = Modifier
                 .fillMaxWidth()
                 .height(200.dp),
@@ -435,10 +472,10 @@ private fun ResultContent(
 
         // 播放控制行:时间文本单独 collect position(≈10Hz),只有该 Text 重组
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            FilledIconButton(onClick = { viewModel.togglePlay() }, modifier = Modifier.size(52.dp)) {
+            FilledIconButton(onClick = { viewModel.dispatch(LoopPageEvent.TogglePlay) }, modifier = Modifier.size(52.dp)) {
                 Icon(
-                    if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                    contentDescription = if (isPlaying) "暂停" else "播放",
+                    if (playingIntent) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    contentDescription = if (playingIntent) "暂停" else "播放",
                 )
             }
             FilledTonalIconButton(onClick = { viewModel.stopPreview() }, modifier = Modifier.size(44.dp)) {
@@ -448,7 +485,7 @@ private fun ResultContent(
         }
         // 状态反馈
         when {
-            buffering && !isPlaying -> Text(
+            buffering && !playingIntent -> Text(
                 "准备试听音轨…",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -468,22 +505,22 @@ private fun ResultContent(
         // 四模式(契约 §2.3):点击即试听
         SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
             val modes = PreviewMode.values()
-            modes.forEachIndexed { index, m ->
+            modes.forEachIndexed { index, previewMode ->
                 SegmentedButton(
-                    selected = mode == m,
-                    onClick = { viewModel.setMode(m) },
+                    selected = mode == previewMode.toPageMode(),
+                    onClick = { viewModel.dispatch(LoopPageEvent.SwitchMode(previewMode.toPageMode())) },
                     shape = SegmentedButtonDefaults.itemShape(index = index, count = modes.size),
                     modifier = Modifier.weight(1f),
-                    label = { Text(m.label, fontSize = 11.sp, maxLines = 1) },
+                    label = { Text(previewMode.label, fontSize = 11.sp, maxLines = 1) },
                 )
             }
         }
         Text(
-            modeHint(mode),
+            modeHint(mode.toPreviewMode()),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (mode == PreviewMode.SEAM && !ringReady && !ringPreparing) {
+        if (mode == LoopPageMode.SEAM && !ringReady && !ringPreparing) {
             Text(
                 "环缓冲区尚未就绪:请先完整试听一轮「完整循环」或「仅循环段」,接缝检查才能无缝环回",
                 style = MaterialTheme.typography.bodySmall,
@@ -544,7 +581,7 @@ private fun ResultContent(
                 onClick = { showCandidateSheet = true },
                 contentPadding = PaddingValues(horizontal = 12.dp),
             ) {
-                Text("候选(" + result.candidates.size + ")", fontSize = 12.sp)
+                Text("候选(" + candidates.size + ")", fontSize = 12.sp)
             }
         }
 
@@ -564,7 +601,8 @@ private fun ResultContent(
 
         HorizontalDivider(modifier = Modifier.padding(vertical = 2.dp))
 
-        // 底部按钮组(契约 §2.4)
+        // 底部按钮组(契约 §2.4)。按钮在滚动内容里,不覆盖上方内容;
+        // 滚动容器底部预留 nav bar inset,最后一行可完整滚到。
         Button(onClick = { viewModel.confirmAndSave { saved -> onSavedAndPlay(saved) } }, modifier = Modifier.fillMaxWidth()) {
             Text("确认并保存")
         }
@@ -572,9 +610,9 @@ private fun ResultContent(
             OutlinedButton(onClick = { viewModel.startAnalysis() }, modifier = Modifier.weight(1f)) {
                 Text("重新分析", maxLines = 1)
             }
-            if (result.confirmed) {
+            if (confirmed) {
                 OutlinedButton(
-                    onClick = { viewModel.demoteFinal() },
+                    onClick = { viewModel.dispatch(LoopPageEvent.Demote) },
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
                 ) {
@@ -583,8 +621,9 @@ private fun ResultContent(
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            // 「删除分析结果」:仅确有结果(候选已加载/已落库)时出现;删除成功后页面已无数据,直接返回列表。
-            if (result.candidates.isNotEmpty()) {
+            // 「删除分析结果」:仅确有结果(候选已加载/已落库)时出现;
+            // 删除持久化成功后由 VM effect runner 发 NavigateBack。
+            if (candidates.isNotEmpty()) {
                 OutlinedButton(
                     onClick = { showDeleteDialog = true },
                     modifier = Modifier.weight(1f),
@@ -593,14 +632,17 @@ private fun ResultContent(
                     Text("删除分析结果", maxLines = 1, fontSize = 12.sp)
                 }
             }
-            OutlinedButton(onClick = onBack, modifier = Modifier.weight(1f)) {
+            OutlinedButton(onClick = { viewModel.dispatch(LoopPageEvent.Back) }, modifier = Modifier.weight(1f)) {
                 Text("返回", maxLines = 1)
             }
         }
     }
 
     if (showCandidateSheet) {
-        // skipPartiallyExpanded:打开即全展开,避免部分展开↔全展开中间态闪烁
+        // skipPartiallyExpanded:打开即全展开,避免部分展开↔全展开中间态闪烁。
+        // 列表用 weight(1f, fill=false) 获得有界高度:1 条时贴内容,10 条时可滚动;
+        // 底部的 contentPadding + navigationBarsPadding 保证最后一行/选中项不被
+        // 系统导航栏或 sheet 底边盖住。
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ModalBottomSheet(onDismissRequest = { showCandidateSheet = false }, sheetState = sheetState) {
             Text(
@@ -611,17 +653,18 @@ private fun ResultContent(
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
-                    .padding(bottom = 24.dp),
+                    .weight(1f, fill = false)
+                    .navigationBarsPadding(),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
             ) {
-                itemsIndexed(result.candidates) { index, candidate ->
-                    val candidateAMs = if (result.sampleRate > 0) {
-                        (candidate.startSamples * 1000.0 / result.sampleRate).toLong()
+                itemsIndexed(candidates) { index, candidate ->
+                    val candidateAMs = if (sampleRate > 0) {
+                        (candidate.startSamples * 1000.0 / sampleRate).toLong()
                     } else {
                         0L
                     }
-                    val candidateBMs = if (result.sampleRate > 0) {
-                        (candidate.endSamples * 1000.0 / result.sampleRate).toLong()
+                    val candidateBMs = if (sampleRate > 0) {
+                        (candidate.endSamples * 1000.0 / sampleRate).toLong()
                     } else {
                         0L
                     }
@@ -636,11 +679,11 @@ private fun ResultContent(
                         noteDistance = candidate.noteDistance,
                         loudnessDifference = candidate.loudnessDifference,
                         onClick = {
-                            viewModel.applyCandidate(index)
+                            viewModel.dispatch(LoopPageEvent.SelectCandidate(index))
                             showCandidateSheet = false
                         },
                     )
-                    if (index < result.candidates.size - 1) HorizontalDivider()
+                    if (index < candidates.size - 1) HorizontalDivider()
                 }
             }
         }
@@ -654,19 +697,7 @@ private fun ResultContent(
             confirmButton = {
                 TextButton(onClick = {
                     showDeleteDialog = false
-                    // 先等删除落库,再返回:onBack() 会 pop 路由并 clear ViewModelStore,
-                    // 过早返回会把删除协程一起取消,列表/播放条的 A-B 标记就会残留。
-                    scope.launch {
-                        val deleted = runCatching { resultActions.deleteResult(result.songId) }
-                            .onFailure { if (it is CancellationException) throw it }
-                            .isSuccess
-                        if (deleted) {
-                            Toast.makeText(context, "已删除分析结果，下次进入将重新分析", Toast.LENGTH_SHORT).show()
-                            onBack()
-                        } else {
-                            Toast.makeText(context, "删除失败，请重试", Toast.LENGTH_SHORT).show()
-                        }
-                    }
+                    viewModel.dispatch(LoopPageEvent.Delete)
                 }) {
                     Text("删除")
                 }
@@ -680,23 +711,6 @@ private fun ResultContent(
     }
 }
 
-/**
- * 结果页「删除分析结果」的写库通道。
- *
- * 为什么不直接用 [LoopViewModel.deleteResult]:那里的删除跑在 viewModelScope 里,
- * 而「删除后必须返回列表」要求先落库再 pop —— pop 会 clear 该路由的 ViewModelStore 并
- * 取消 viewModelScope,若先返回,删除可能被中途取消(列表/播放条 A-B 标记残留)。
- * 这里只提供一个可 await 的直连入口,删除成功后由 UI 负责 toast + 返回。
- */
-@HiltViewModel
-class LoopResultActionsViewModel @Inject constructor(
-    private val analysisManager: LoopAnalysisManager,
-) : ViewModel() {
-    suspend fun deleteResult(songId: Long) {
-        analysisManager.deleteResult(songId)
-    }
-}
-
 private fun modeHint(mode: PreviewMode): String = when (mode) {
     PreviewMode.FULL -> "从前奏开始播放,越过 B 点由音频管线无缝回到 A —— 即正式播放的实际效果"
     PreviewMode.LOOP_ONLY -> "只在 A↔B 区间内循环播放"
@@ -704,7 +718,7 @@ private fun modeHint(mode: PreviewMode): String = when (mode) {
     PreviewMode.FREE -> "自由播放,不循环(适合完整听一遍)"
 }
 
-/** 候选弹层行:序号 + A→B 时间/占比色点 + 指标行;点击应用并关闭。 */
+/** 候选弹层行:序号 + A→B 时间 + 占比/指标;点击应用并关闭。 */
 @Composable
 private fun CandidateRow(
     index: Int,
@@ -737,28 +751,43 @@ private fun CandidateRow(
             fontWeight = FontWeight.SemiBold,
             color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
         )
-        Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            // 第一行只放 A→B/最佳标记;过长时省略号只影响时间,不挤掉占比。
+            Text(
+                "A " + fmtMs(aMs) + " → B " + fmtMs(bMs) +
+                    (if (isBest) " · ★最佳" else ""),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            // 第二行:占比固定在前(永远可见),指标在后(空间不足时才省略)。
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text("●", color = loopRatioColor(ratio), fontSize = 11.sp)
                 Text(
-                    "A " + fmtMs(aMs) + " → B " + fmtMs(bMs) +
-                        (if (isBest) " · ★最佳" else "") +
-                        " · 占比 " + String.format(Locale.US, "%.0f%%", ratio * 100),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                    "占比 " + String.format(Locale.US, "%.0f%%", ratio * 100),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = loopRatioColor(ratio),
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                )
+                Text(
+                    "score " + fmt2(score) + " · 音高距离 " + fmt3(noteDistance) +
+                        " · 响度比 " + fmt2(loudnessDifference),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
-                Text("●", color = loopRatioColor(ratio), fontSize = 11.sp)
             }
-            Text(
-                "score " + fmt2(score) + " · 音高距离 " + fmt3(noteDistance) +
-                    " · 响度比 " + fmt2(loudnessDifference),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
         }
         if (isSelected) {
             Icon(Icons.Filled.Check, contentDescription = "当前候选", tint = MaterialTheme.colorScheme.primary)

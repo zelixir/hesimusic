@@ -3,7 +3,10 @@
 范围:只新增纯模型与测试,不改现有 UI/播放器/DB。新增文件:
 
 - app/src/main/java/com/zjr/hesimusic/ui/loop/state/LoopPageState.kt
+- app/src/main/java/com/zjr/hesimusic/ui/loop/LoopPageEffectRunner.kt(第二轮)
+- app/src/main/java/com/zjr/hesimusic/ui/loop/LoopPageModeMapping.kt(第二轮)
 - app/src/test/java/com/zjr/hesimusic/ui/loop/LoopPageReducerTest.kt
+- app/src/test/java/com/zjr/hesimusic/ui/loop/LoopPageEffectRunnerTest.kt(第二轮)
 - docs/loop-v3-page-state-machine.md(本文件)
 
 现有 ui/loop/LoopViewModel.kt、LoopScreen.kt、PreviewPlayer.kt 本轮没有由本 agent 改动;
@@ -92,8 +95,8 @@ DragState:
 
 ## 3. 事件表
 
-共 25 种事件类型;矩阵里 Enter 拆成 Enter(noSaved)/Enter(hasSaved)、SwitchMode 拆成
-SwitchMode(SEAM)/SwitchMode(FULL),所以矩阵事件夹具为 27 个。
+共 26 种事件类型;矩阵里 Enter 拆成 Enter(noSaved)/Enter(hasSaved)、SwitchMode 拆成
+SwitchMode(SEAM)/SwitchMode(FULL),所以矩阵事件夹具为 28 个。
 
 | 事件 | 有效状态 | 主要语义 |
 |---|---|---|
@@ -102,7 +105,8 @@ SwitchMode(SEAM)/SwitchMode(FULL),所以矩阵事件夹具为 27 个。
 | AnalysisDone(...) | Loading, Analyzing | -> Ready;有候选时 A/B 取 top1 并 StartPrefill |
 | AnalysisFailed(message) | Loading, Analyzing | -> Failed(message) |
 | Retry | Failed | -> Analyzing(DECODING,0) + RestartAnalysis |
-| SelectCandidate(index) | Ready | 越界 no-op;合法 -> 应用候选 A/B、prefill=InProgress、playback=AwaitingPrefill、effects=[CancelPrefill, StartPrefill(新窗口), SeekTo(模式起点)] |
+| ManualReanalyze | Loading / Ready / Failed | -> Analyzing(DECODING,0) + RestartAnalysis;Analyzing 时 no-op(第二轮新增) |
+| SelectCandidate(index) | Ready | 越界 no-op;合法 -> 应用候选 A/B、prefill=InProgress;Playing/AwaitingPrefill -> playback=AwaitingPrefill + [CancelPrefill, StartPrefill(新窗口), SeekTo(模式起点)];Stopped/Paused -> playback=Playing + 同样 effects + Play(候选点击本身是试听动作,先起播避免 seed 等 sink 的死锁) |
 | DragAStart/DragAMove/DragAEnd | Ready | 只改视觉 A;Start 要求 drag=Idle,Move/End 要求正在拖 A;End 回到 Idle,不发副作用 |
 | DragBStart/DragBMove/DragBEnd | Ready | 同上,手柄 B |
 | CommitWindow | Ready | 应用当前 A/B;播放中/等待预填 -> AwaitingPrefill;effects=[CancelPrefill, StartPrefill(新窗口), SeekTo(模式起点)] |
@@ -167,10 +171,10 @@ CancelPrefill -> StartPrefill(新窗口) -> SeekTo(起点);预填完成后由 Pr
   8. Ready.DraggingB
   9. Ready.Confirmed.Paused
   10. Ready.Seam.Playing
-- 事件夹具:27 个(25 种事件类型;Enter 2 个、SwitchMode 2 个)
-- 参数化矩阵:10 x 27 = 270 个用例
-- 额外测试:矩阵完整性 1、全局不变量 1、bug/非法操作回归 12
-- 本轮新增测试执行数:284,全部通过
+- 事件夹具:28 个(26 种事件类型;Enter 2 个、SwitchMode 2 个)
+- 参数化矩阵:10 x 28 = 280 个用例
+- 额外测试:矩阵完整性 1、全局不变量 1、bug/非法操作回归 12、effect runner 12
+- 本轮新增测试执行数:306,全部通过
 
 ### 6.2 覆盖策略
 
@@ -178,7 +182,7 @@ CancelPrefill -> StartPrefill(新窗口) -> SeekTo(起点);预填完成后由 Pr
   如果 reducer 对某个"本应非法"的组合偷偷改了状态,用例会因 assertSame/effect 不等而红。
 - 每个组合都断言:新状态(数据类全字段相等)、effect 序列(顺序 + 内容);
   no-op 组合额外断言同一 state 实例。
-- 全局不变量测试对 270 个 reduce 结果统一检查第 5 节 1~6 条。
+- 全局不变量测试对 280 个 reduce 结果统一检查第 5 节 1~6 条。
 
 ### 6.3 已报 bug 的断言
 
@@ -350,18 +354,125 @@ PreviewPlayer.kt 保持不变;模式映射放在 UI 层:
 
 结果:
 
-- app:compileDebugKotlin 通过;
-- 新增 ui.loop.LoopPageReducer* 3 个测试类:270 + 2 + 12 = 284 个测试全部通过;
-- 全量单测 621 个:0 failed / 0 errors,BUILD SUCCESSFUL。
-
-说明:并发开发期间有一次全量运行出现过 3 个 loop/audio、service 测试失败
-(LoopAudioSinkTest / LoopPcmEngineTest / LoopRingPrefillerTest)。这些文件及其被测代码
-在本轮开始前就已被另一个 agent 修改,不属于本轮新增模型/测试的写域;本轮未改动它们。
-待并发改动稳定后重跑,621 个测试已全部通过。
+- 第二轮改动后的 :app:compileDebugKotlin 通过;
+- 新增 ui.loop 4 个测试类:LoopPageReducerTest 280 + MatrixCoverage 2 + Regression 12 +
+  LoopPageEffectRunnerTest 12 = 306 个测试全部通过;
+- 全量单测 656 个:0 failed / 0 errors,BUILD SUCCESSFUL。
+  并发开发期间一度受另一个 agent 的 LoopIntent.arm debug 调用点影响,已由 lead 修复;
+  loop/audio、service 测试的临时失败也已随并发改动收口消失。
 
 ## 10. 结论
 
 - 页面状态从 N 个可变字段收敛为 1 个不可变状态 + 1 个纯函数 + 1 组声明式 effect;
-- 270 个状态 x 事件组合 + 284 个测试执行,把"所有状态都在预期中"变成可执行断言;
-- 00008/00009 已各自变成可复现的模型断言,并在 reducer 层给出修复语义;
-- 第二轮接 UI 的路径、顺序、性能与回滚方案已明确,且不需要改 PreviewPlayer。
+- 280 个状态 x 事件组合 + 306 个测试执行,把"所有状态都在预期中"变成可执行断言;
+- 00008/00009 已各自变成可复现的模型断言,并在 reducer/effect runner 层给出修复语义;
+- 第二轮已把状态机接进 LoopViewModel/LoopScreen,并修复 00012 的候选清单/选中项/占比遮挡
+  (行内宽度竞争 + sheet/导航栏底部留白,见 §11.4)。
+
+
+## 11. 第二轮接线与 00012 布局修复(2026-11-16)
+
+### 11.1 接线后 state 与旧字段映射
+
+| 旧字段/API | 第二轮实现 |
+|---|---|
+| _screen: StateFlow<LoopScreenState> | 由 pageState + peaks 派生(仅兼容;LoopScreen 直接读 pageState) |
+| _mode: MutableStateFlow<PreviewMode> | pageState.Ready.mode;公开 mode 为派生流 |
+| _aMs / _bMs | pageState.Ready.aMs / bMs;公开 aMs/bMs 为派生流 |
+| _selectedCandidate | pageState.Ready.selectedCandidate |
+| _durationMs | pageState.Ready.durationMs |
+| _ringPreparing | pageState.Ready.prefill is InProgress;公开 ringPreparing 为派生流 |
+| previewPlayer.isPlaying | pageState.Ready.playback is Playing/AwaitingPrefill(播放键图标);buffering/isReplaying/ringReady 仍读播放器 |
+| previewPlayer.positionMs | pageState.Ready.positionMs;player 10Hz 只负责派发 Tick |
+| setMode(PreviewMode) | dispatch(SwitchMode(mode.toPageMode())) |
+| togglePlay() | dispatch(TogglePlay) |
+| stopPreview() | dispatch(TogglePlay)(若在播/等待)+ dispatch(Seek(模式起点)) |
+| seekToDisplayMs(ms) | dispatch(Seek(ms)) |
+| dragTo(handleA, ms) | dispatch(DragAStart/Move、DragBStart/Move) |
+| commitWindow() | dispatch(CommitWindow) |
+| applyCandidate(index) | dispatch(SelectCandidate(index)) |
+| confirmAndSave(onSaved) | 保存回调 + dispatch(ConfirmAndSave) |
+| demoteFinal() | dispatch(Demote) |
+| deleteResult() | dispatch(Delete);持久化成功后 effect runner 发 NavigateBack |
+| startAnalysis() | dispatch(ManualReanalyze) |
+| — | 仍保留:_notice、_peaks、prefillJob/prefillToken、anchorMs/anchorElapsedRealtime |
+
+LoopScreen 现在只 collect 一次 pageState + peaks + song + notice;播放器观测仍单独 collect
+(buffering/isReplaying/ringReady),避免整页随 10Hz position tick 重组。
+
+### 11.2 effect runner 的顺序/幂等设计
+
+1. reducer 对非法/重复事件返回空 effect,runner 天然不会被调用;
+2. 同一批 effect 严格按列表顺序执行:CancelPrefill → StartPrefill → SeekTo → Play;
+3. Play 若同批前面已有同位置 SeekTo,以 seek=false 执行;LoopViewModel 里再用
+   seekAppliedForNextPlay 确认 SeekTo 是否真的应用到已 prepare 的播放器,未应用则 Play
+   仍走普通 seek(避免“以为 seek 过、其实没 prepare”);
+4. PreviewPlayer 新增:
+   - playFromCurrent(mode):只恢复播放,不 seek;
+   - applyWindowForPrefill(window):只把窗口写给音频层,不 seek/不播放;
+5. 预填异步:StartPrefill 先 dispatch PrefillStarted(无 effect,安全),再后台分片;
+   PrefillReady/PrefillFailed 通过 viewModelScope.launch 派发,避免在 StartPrefill 的
+   effect 批次里同步重入 Play(否则 Play 可能跑到同批 SeekTo 之前)。注意 viewModelScope
+   使用 Main.immediate,launch 会同步执行到第一个挂起点,所以 fast-path 里显式 yield()
+   再 dispatch,保证外层 effect runner 先跑完;
+6. AwaitingPrefill 的收尾:
+   - PrefillReady → Playing + Play(resumeMode,resumeAtMs);
+   - PrefillFailed → Playing + Play + Toast(“环缓冲准备失败，已按直通播放”);
+7. 落库:PersistConfirm 成功 → onConfirmSaved(release + onSaved);PersistDemote 成功 →
+   Toast;PersistDelete 成功 → Toast + NavigateBack;失败只 Toast,不导航。
+
+### 11.3 00008 / 00009 真机应看到的行为
+
+00008(重复点接缝检查):
+- 第一次点「接缝检查」:从 B−5s 起播;
+- 第二次及之后点同一模式:reducer 恒等 no-op,不产生 SeekTo/Play,播放位置不再被重置;
+- logcat 里不应再出现第二次 raw seek / degradeRetryUsed 重置。
+
+00009(播放中改候选):
+- 点候选后:候选 A/B 立即更新,界面显示「正在准备环缓冲…」,播放头冻结在模式起点
+  (不再出现“进度条在动但没声音”);
+- 预填完成:自动从模式起点起播(Play),接缝检查/仅循环段都能听到声音;
+- 预填失败:自动降级直通播放 + Toast,不会停在静默等待;
+- 确认保存:无论预填是否就绪都能保存,成功后才返回并播放该歌。
+
+### 11.4 00012:候选清单/选中项/占比被遮挡
+
+代码层确认的“遮挡层”:
+
+1. **不是 zIndex/Box 覆盖**:结果页没有额外 zIndex;波形 Canvas 在自己的 Box 内且有界;
+   唯一覆盖页面的是按设计弹出的 ModalBottomSheet。
+2. **选中项/占比**:CandidateRow 原第一行把 “A→B · ★最佳 · 占比 NN%” 放进
+   Text(weight(1f), maxLines=1);选中行尾部还有 Check 图标占宽,导致行尾的“占比”被
+   省略号截掉/视觉上被勾选图标挤没。这是行内宽度竞争,不是浮层。
+3. **候选清单底部**:候选 sheet 的 LazyColumn 原来只有 padding(bottom=24dp),没有
+   navigationBars inset,也没有有界高度;10 条候选时最后一行会落到系统导航栏/sheet
+   底边下面。
+4. **结果页底部**:底部按钮本来就在 verticalScroll 内容里,不是 fixed bottom bar,不会
+   覆盖上方内容;但滚动容器只有 16dp 底 padding,最后一行按钮可能贴到导航栏。
+
+修复(全部用布局约束,没有 offset/zIndex 硬凑):
+
+- CandidateRow 拆成两行:
+  - 第一行 A→B/★最佳,超长只省略时间;
+  - 第二行“占比 NN%”固定在前(永远可见),score/音高/响度在后,空间不足才省略;
+  - 选中 Check 图标固定在行尾,不参与第二行宽度竞争。
+- 候选 sheet 的 LazyColumn:
+  - Modifier.weight(1f, fill=false):1 条时贴内容,10 条时获得有界高度并滚动;
+  - Modifier.navigationBarsPadding() + contentPadding(bottom=24dp):最后一行不被导航栏/
+    sheet 底边盖住。
+- 结果页滚动容器:padding(bottom = 16dp + WindowInsets.navigationBars 的 bottom inset),
+  最后一行按钮可完整滚到可点区域。
+- 删除确认不再用独立 ViewModel 的协程去 pop;改由 Delete effect 持久化成功后再
+  NavigateBack,避免“先返回导致删除协程被取消”。
+
+验证说明:当前环境不操作设备,无法附真机截图;以上是代码层布局约束与覆盖层排查结论。
+建议真机按“1 条候选”和“10 条候选”各开一次 sheet,确认最后一行/选中项/占比完整可见,
+并在结果页滚到底确认按钮不被导航栏遮挡。
+
+### 11.5 本轮验证
+
+- 新增/更新测试:LoopPageReducerTest 280、MatrixCoverage 2、Regression 12、
+  LoopPageEffectRunnerTest 12,合计 306,全部通过;
+- :app:compileDebugKotlin 在本轮改动后通过;
+- 全量单测 656 个,0 failed / 0 errors,BUILD SUCCESSFUL(lead 已同步修复
+  LoopIntent.arm 的 debug 调用点)。

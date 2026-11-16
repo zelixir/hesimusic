@@ -660,7 +660,10 @@ object LoopDebugServer {
             p.command { controller ->
                 // 与 UI「确认并保存」一致:先 arm 记录进入前 repeat,再 setRepeatMode(ONE)。
                 val previousRepeat = controller.repeatMode
-                loopIntent.arm(song.id, previousRepeat)
+                val previousShuffle = controller.shuffleModeEnabled
+                loopIntent.arm(song.id, previousRepeat, previousShuffle)
+                // 与 UI 一致:无缝 = 单曲循环 + 关随机(显示与实际必须一致)
+                controller.shuffleModeEnabled = false
                 controller.repeatMode = Player.REPEAT_MODE_ONE
                 prefs?.saveRepeatMode(Player.REPEAT_MODE_ONE)
                 controller.setMediaItems(mediaItems, index, 0L)
@@ -1034,7 +1037,10 @@ object LoopDebugServer {
         val loopIntent = d.loopIntent()
         val result = p.command { controller ->
             val previousRepeat = controller.repeatMode
-            loopIntent.arm(songId, previousRepeat)
+            val previousShuffle = controller.shuffleModeEnabled
+            loopIntent.arm(songId, previousRepeat, previousShuffle)
+            // 与 UI 一致:无缝 = 单曲循环 + 关随机(显示与实际必须一致)
+            controller.shuffleModeEnabled = false
             controller.repeatMode = Player.REPEAT_MODE_ONE
             prefs.saveRepeatMode(Player.REPEAT_MODE_ONE)
             if (queue != null) {

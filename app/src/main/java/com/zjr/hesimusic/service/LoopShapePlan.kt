@@ -51,7 +51,9 @@ object LoopShapePlan {
      * @param targetWindow 目标窗口（已按 songId 归属过滤）
      * @param appliedWindow 当前已生效的窗口
      * @param rawUs 引擎当前原始位置（µs；重放期 = B+(k-1)L+环内偏移）
-     * @param isRingComplete 音频层 ring 是否已覆盖 [A,B)（**写入新窗口之后**读，见调用方）
+     * @param ringCoveredFrames 音频层 ring 已连续覆盖的帧数(前缀,**写入新窗口之后**读)。
+     *   分片预填让「未覆盖完整」成为常态,只有**完全没覆盖**(0)才值得预卷;有前缀覆盖时
+     *   应当让播放继续并靠捕获/后续分片补齐,否则会把用户刚拖到的位置拽回区段开始。
      * @param wasReplaying 写入新窗口**之前**音频层是否处于重放态（写 null 会立刻复位状态）
      */
     fun plan(
@@ -59,7 +61,7 @@ object LoopShapePlan {
         targetWindow: LoopWindow?,
         appliedWindow: LoopWindow?,
         rawUs: Long,
-        isRingComplete: Boolean,
+        ringCoveredFrames: Long,
         wasReplaying: Boolean,
     ): Plan {
         if (targetWindow == appliedWindow) {
@@ -83,9 +85,10 @@ object LoopShapePlan {
             }
         }
 
-        // 进入 / A/B 变化：起播点落在 [A,B) 且 ring 未覆盖 → 预卷到该轮起点 − 250ms。
+        // 进入 / A/B 变化：起播点落在 [A,B) 且 ring **完全没有覆盖** → 预卷到该轮起点 − 250ms。
         // 复用 seekUs 的降级分支：k 取当前 raw 所在轮次，不会把播放位置拽回第 0 轮。
-        if (!isRingComplete && targetWindow.containsUs(displayUs)) {
+        // 只要有前缀覆盖(分片预填/捕获已开始)就不再预卷:用户的位置优先,缺口靠后续分片补。
+        if (ringCoveredFrames <= 0L && targetWindow.containsUs(displayUs)) {
             val preRollUs = LoopSessionProjection.seekUs(
                 targetUs = displayUs,
                 window = targetWindow,

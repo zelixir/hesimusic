@@ -23,7 +23,7 @@ import kotlin.math.roundToLong
 /**
  * 状态 × 事件全矩阵测试（第一轮：纯模型）。
  *
- * 10 个代表性状态 × 27 个事件 = 270 个参数化用例。矩阵的默认期望是
+ * 10 个代表性状态 × 28 个事件 = 280 个参数化用例。矩阵的默认期望是
  * **no-op 恒等**（同一个 state 实例 + 空 effect）；凡是有语义的转换都显式列在
  * [LoopPageMatrix.EXPECTATIONS] 里。这样任何“本应非法却偷偷改了状态”的组合都会红。
  */
@@ -534,6 +534,7 @@ object LoopPageMatrix {
         "AnalysisDone" to ANALYSIS_DONE,
         "AnalysisFailed" to LoopPageEvent.AnalysisFailed("analysis boom"),
         "Retry" to LoopPageEvent.Retry,
+        "ManualReanalyze" to LoopPageEvent.ManualReanalyze,
         "SelectCandidate(1)" to LoopPageEvent.SelectCandidate(1),
         "DragAStart" to LoopPageEvent.DragAStart(32_000L),
         "DragAMove" to LoopPageEvent.DragAMove(33_000L),
@@ -600,6 +601,8 @@ object LoopPageMatrix {
         val candidate = state.candidates[1]
         val (aMs, bMs) = candidateMs(candidate, state.sampleRate, state.durationMs)
         val startMs = modeStart(state.mode, aMs, bMs)
+        val auditionImmediately = state.playback !is PlaybackState.Playing &&
+            state.playback !is PlaybackState.AwaitingPrefill
         val next = state.copy(
             selectedCandidate = 1,
             aMs = aMs,
@@ -607,16 +610,21 @@ object LoopPageMatrix {
             positionMs = startMs,
             drag = DragState.Idle,
             prefill = PrefillState.InProgress(0f),
-            playback = PlaybackState.AwaitingPrefill(state.mode, startMs),
+            playback = if (auditionImmediately) {
+                PlaybackState.Playing
+            } else {
+                PlaybackState.AwaitingPrefill(state.mode, startMs)
+            },
         )
-        return Expectation.Transition(
-            next,
-            listOf(
-                LoopPageEffect.CancelPrefill,
-                LoopPageEffect.StartPrefill(window(aMs, bMs)),
-                LoopPageEffect.SeekTo(startMs),
-            ),
+        val effects = mutableListOf<LoopPageEffect>(
+            LoopPageEffect.CancelPrefill,
+            LoopPageEffect.StartPrefill(window(aMs, bMs)),
+            LoopPageEffect.SeekTo(startMs),
         )
+        if (auditionImmediately) {
+            effects += LoopPageEffect.Play(state.mode, startMs)
+        }
+        return Expectation.Transition(next, effects)
     }
 
     private fun commitExpected(state: LoopPageState.Ready): Expectation.Transition {
@@ -717,6 +725,24 @@ object LoopPageMatrix {
             ),
         )
 
+        // 页内「重新分析」:Loading / Failed / Ready 都转 Analyzing;Analyzing 时 no-op。
+        expect(
+            "Loading",
+            "ManualReanalyze",
+            Expectation.Transition(
+                LoopPageState.Analyzing(AnalysisPhase.DECODING, 0f),
+                listOf(LoopPageEffect.RestartAnalysis),
+            ),
+        )
+        expect(
+            "Failed",
+            "ManualReanalyze",
+            Expectation.Transition(
+                LoopPageState.Analyzing(AnalysisPhase.DECODING, 0f),
+                listOf(LoopPageEffect.RestartAnalysis),
+            ),
+        )
+
         // Back 对所有状态有效，只发 NavigateBack，不改状态。
         for ((stateKey, state) in STATES) {
             expect(stateKey, "Back", Expectation.Transition(state, listOf(LoopPageEffect.NavigateBack)))
@@ -726,6 +752,14 @@ object LoopPageMatrix {
         for ((stateKey, state) in STATES) {
             val ready = state as? LoopPageState.Ready ?: continue
 
+            expect(
+                stateKey,
+                "ManualReanalyze",
+                Expectation.Transition(
+                    LoopPageState.Analyzing(AnalysisPhase.DECODING, 0f),
+                    listOf(LoopPageEffect.RestartAnalysis),
+                ),
+            )
             expect(stateKey, "SelectCandidate(1)", selectExpected(ready))
             expect(stateKey, "CommitWindow", commitExpected(ready))
             expect(stateKey, "TogglePlay", toggleExpected(ready))

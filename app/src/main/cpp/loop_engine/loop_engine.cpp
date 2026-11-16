@@ -18,6 +18,7 @@
 #include <cmath>
 #include <thread>
 #include <cstring>
+#include <cstdlib>
 #include <limits>
 #include <numeric>
 #include <vector>
@@ -78,22 +79,44 @@ private:
 // Shards split by independent iteration ranges; every shard writes disjoint
 // output slices and cross-shard reductions use exact max / integer sums over
 // shard-ordered partials, so results stay bitwise identical to the serial run.
-int shardCount(int64_t items) {
-    const unsigned hw = std::thread::hardware_concurrency();
-    unsigned n = hw == 0 ? 2u : hw;
-    if (n > 8) n = 8;
-    int64_t shards = static_cast<int64_t>(n);
-    if (items <= 0 || items / shards < 64) shards = 1; // small work: keep serial
+// v7 §10.4-3: shard count can be capped from the environment (1..8). The value
+// is re-read per call so host tests can compare serial and parallel runs in a
+// single process; the app never sets the variable, so production keeps the
+// default (hardware concurrency, capped at 8).
+unsigned engineThreadCount() {
+    unsigned n = 0;
+    const char* env = std::getenv("LOOP_ENGINE_THREADS");
+    if (env != nullptr && env[0] != '\0') {
+        char* end = nullptr;
+        const long v = std::strtol(env, &end, 10);
+        if (end != env && v > 0) n = static_cast<unsigned>(v);
+    }
+    if (n == 0) n = std::thread::hardware_concurrency();
+    if (n == 0) n = 2u;
+    if (n > 8u) n = 8u; // phone-friendly ceiling; also bounds scratch buffers
+    return n;
+}
+
+int shardCount(int64_t items, int64_t minItemsPerShard = 64) {
+    if (items <= 0) return 1;
+    int64_t shards = static_cast<int64_t>(engineThreadCount());
+    if (shards <= 1) return 1;
+    if (minItemsPerShard > 1 && items / shards < minItemsPerShard) shards = 1;
     return static_cast<int>(shards);
 }
 
 // body(lo, hi, shard): process independent range [lo, hi), shard = shard index.
+// minItemsPerShard keeps tiny ranges serial (thread spawn is ~tens of us).
 template <class Body>
-void parallelForRange(int64_t begin, int64_t end, const Body& body) {
+void parallelForRangeItems(int64_t begin, int64_t end, const Body& body,
+                           int64_t minItemsPerShard) {
     const int64_t items = end - begin;
     if (items <= 0) return;
-    const int shards = shardCount(items);
-    if (shards <= 1) { body(begin, end, 0); return; }
+    const int shards = shardCount(items, minItemsPerShard);
+    if (shards <= 1) {
+        body(begin, end, 0);
+        return;
+    }
     std::vector<std::thread> threads;
     threads.reserve(static_cast<size_t>(shards));
     for (int s = 0; s < shards; s++) {
@@ -103,6 +126,11 @@ void parallelForRange(int64_t begin, int64_t end, const Body& body) {
         threads.emplace_back([&body, lo, hi, s]() { body(lo, hi, s); });
     }
     for (auto& t : threads) t.join();
+}
+
+template <class Body>
+void parallelForRange(int64_t begin, int64_t end, const Body& body) {
+    parallelForRangeItems(begin, end, body, 64);
 }
 
 // librosa.time_to_frames: floor(int(seconds * sr) / hop)
@@ -292,43 +320,56 @@ double estimateTuning(const std::vector<float>& sPower, int T, int sr) {
     while (kMax >= 0 && double(kMax) * kBeatSr / double(kNfft) >= 4000.0) kMax--;
     if (kMin > kMax) return 0.0;
 
-    std::vector<double> col(kBins);
+    // v7 §10.4-3: both passes are parallel by frame. Pass A concatenates the
+    // per-shard candidate lists in shard order, so the magnitude sequence (and
+    // therefore the median) is identical. Pass B counts are integers, so the
+    // histogram is order independent.
     std::vector<float> mags;
-    mags.reserve(size_t(T) * size_t(kMax - kMin + 1) / 3u + 16u);
-
-    // pass A: magnitudes at thresholded local-max positions
-    for (int t = 0; t < T; t++) {
-        const float* p = &sPower[size_t(t) * size_t(kBins)];
-        for (int k = 0; k < kBins; k++) col[size_t(k)] = p[k];
-        double mx = 0.0;
-        for (int k = 0; k < kBins; k++) mx = std::max(mx, col[size_t(k)]);
-        const double refV = 0.1 * mx; // threshold * np.max(S, axis=-2)
-        for (int k = kMin; k <= kMax; k++) {
-            const double v = col[size_t(k)];
-            if (!(v > refV)) continue;
-            const double xl = (k >= 1 && col[size_t(k - 1)] > refV) ? col[size_t(k - 1)] : 0.0;
-            const double xr = (k + 1 < kBins && col[size_t(k + 1)] > refV) ? col[size_t(k + 1)] : 0.0;
-            // localmax: x[k] > x[k-1] and x[k] >= x[k+1]; k == 0 never a max
-            const bool isMax = k >= 1 && v > xl && (k + 1 < kBins ? v >= xr : v > xl);
-            if (!isMax) continue;
-            double avg, shift;
-            if (k == 0) {
-                avg = col[1] - col[0];
-                shift = 0.0;
-            } else if (k == kBins - 1) {
-                avg = col[size_t(k)] - col[size_t(k - 1)];
-                shift = 0.0;
-            } else {
-                avg = 0.5 * (col[size_t(k + 1)] - col[size_t(k - 1)]);
-                const double a = col[size_t(k + 1)] + col[size_t(k - 1)] - 2.0 * col[size_t(k)];
-                const double b = 0.5 * (col[size_t(k + 1)] - col[size_t(k - 1)]);
-                shift = (std::abs(b) >= std::abs(a)) ? 0.0 : -b / a;
+    {
+        const int shards = std::max(1, shardCount(int64_t(T)));
+        std::vector<std::vector<float>> shardMags(static_cast<size_t>(shards));
+        parallelForRange(0, T, [&](int64_t lo, int64_t hi, int shard) {
+            std::vector<double> col(kBins);
+            std::vector<float>& out = shardMags[size_t(shard)];
+            out.reserve(size_t(hi - lo) * size_t(kMax - kMin + 1) / 3u + 16u);
+            for (int t = int(lo); t < int(hi); t++) {
+                const float* p = &sPower[size_t(t) * size_t(kBins)];
+                for (int k = 0; k < kBins; k++) col[size_t(k)] = p[k];
+                double mx = 0.0;
+                for (int k = 0; k < kBins; k++) mx = std::max(mx, col[size_t(k)]);
+                const double refV = 0.1 * mx; // threshold * np.max(S, axis=-2)
+                for (int k = kMin; k <= kMax; k++) {
+                    const double v = col[size_t(k)];
+                    if (!(v > refV)) continue;
+                    const double xl = (k >= 1 && col[size_t(k - 1)] > refV) ? col[size_t(k - 1)] : 0.0;
+                    const double xr = (k + 1 < kBins && col[size_t(k + 1)] > refV) ? col[size_t(k + 1)] : 0.0;
+                    // localmax: x[k] > x[k-1] and x[k] >= x[k+1]; k == 0 never a max
+                    const bool isMax = k >= 1 && v > xl && (k + 1 < kBins ? v >= xr : v > xl);
+                    if (!isMax) continue;
+                    double avg, shift;
+                    if (k == 0) {
+                        avg = col[1] - col[0];
+                        shift = 0.0;
+                    } else if (k == kBins - 1) {
+                        avg = col[size_t(k)] - col[size_t(k - 1)];
+                        shift = 0.0;
+                    } else {
+                        avg = 0.5 * (col[size_t(k + 1)] - col[size_t(k - 1)]);
+                        const double a = col[size_t(k + 1)] + col[size_t(k - 1)] - 2.0 * col[size_t(k)];
+                        const double b = 0.5 * (col[size_t(k + 1)] - col[size_t(k - 1)]);
+                        shift = (std::abs(b) >= std::abs(a)) ? 0.0 : -b / a;
+                    }
+                    const double mag = v + 0.5 * avg * shift; // dskew folded in
+                    out.push_back(float(mag));
+                }
             }
-            const double mag = v + 0.5 * avg * shift; // dskew folded in
-            mags.push_back(float(mag));
-        }
+        });
+        size_t total = 0;
+        for (const std::vector<float>& v : shardMags) total += v.size();
+        if (total == 0) return 0.0; // no pitch candidates -> pitch_tuning returns 0.0
+        mags.reserve(total);
+        for (const std::vector<float>& v : shardMags) mags.insert(mags.end(), v.begin(), v.end());
     }
-    if (mags.empty()) return 0.0; // no pitch candidates -> pitch_tuning returns 0.0
 
     std::vector<double> magD(mags.size());
     for (size_t i = 0; i < mags.size(); i++) magD[i] = mags[i];
@@ -338,39 +379,50 @@ double estimateTuning(const std::vector<float>& sPower, int T, int sr) {
     // pass B: histogram the tuning residual of pitches above the threshold
     const int nHistBins = 100;
     std::vector<int> counts(nHistBins, 0);
-    for (int t = 0; t < T; t++) {
-        const float* p = &sPower[size_t(t) * size_t(kBins)];
-        for (int k = 0; k < kBins; k++) col[size_t(k)] = p[k];
-        double mx = 0.0;
-        for (int k = 0; k < kBins; k++) mx = std::max(mx, col[size_t(k)]);
-        const double refV = 0.1 * mx;
-        for (int k = kMin; k <= kMax; k++) {
-            const double v = col[size_t(k)];
-            if (!(v > refV)) continue;
-            const double xl = (k >= 1 && col[size_t(k - 1)] > refV) ? col[size_t(k - 1)] : 0.0;
-            const double xr = (k + 1 < kBins && col[size_t(k + 1)] > refV) ? col[size_t(k + 1)] : 0.0;
-            const bool isMax = k >= 1 && v > xl && (k + 1 < kBins ? v >= xr : v > xl);
-            if (!isMax) continue;
-            double avg, shift;
-            if (k == 0) { avg = col[1] - col[0]; shift = 0.0; }
-            else if (k == kBins - 1) { avg = col[size_t(k)] - col[size_t(k - 1)]; shift = 0.0; }
-            else {
-                avg = 0.5 * (col[size_t(k + 1)] - col[size_t(k - 1)]);
-                const double a = col[size_t(k + 1)] + col[size_t(k - 1)] - 2.0 * col[size_t(k)];
-                const double b = 0.5 * (col[size_t(k + 1)] - col[size_t(k - 1)]);
-                shift = (std::abs(b) >= std::abs(a)) ? 0.0 : -b / a;
+    {
+        const int shards = std::max(1, shardCount(int64_t(T)));
+        std::vector<std::vector<int>> shardCounts(
+            size_t(shards), std::vector<int>(size_t(nHistBins), 0));
+        parallelForRange(0, T, [&](int64_t lo, int64_t hi, int shard) {
+            std::vector<double> col(kBins);
+            std::vector<int>& cnt = shardCounts[size_t(shard)];
+            for (int t = int(lo); t < int(hi); t++) {
+                const float* p = &sPower[size_t(t) * size_t(kBins)];
+                for (int k = 0; k < kBins; k++) col[size_t(k)] = p[k];
+                double mx = 0.0;
+                for (int k = 0; k < kBins; k++) mx = std::max(mx, col[size_t(k)]);
+                const double refV = 0.1 * mx;
+                for (int k = kMin; k <= kMax; k++) {
+                    const double v = col[size_t(k)];
+                    if (!(v > refV)) continue;
+                    const double xl = (k >= 1 && col[size_t(k - 1)] > refV) ? col[size_t(k - 1)] : 0.0;
+                    const double xr = (k + 1 < kBins && col[size_t(k + 1)] > refV) ? col[size_t(k + 1)] : 0.0;
+                    const bool isMax = k >= 1 && v > xl && (k + 1 < kBins ? v >= xr : v > xl);
+                    if (!isMax) continue;
+                    double avg, shift;
+                    if (k == 0) { avg = col[1] - col[0]; shift = 0.0; }
+                    else if (k == kBins - 1) { avg = col[size_t(k)] - col[size_t(k - 1)]; shift = 0.0; }
+                    else {
+                        avg = 0.5 * (col[size_t(k + 1)] - col[size_t(k - 1)]);
+                        const double a = col[size_t(k + 1)] + col[size_t(k - 1)] - 2.0 * col[size_t(k)];
+                        const double b = 0.5 * (col[size_t(k + 1)] - col[size_t(k - 1)]);
+                        shift = (std::abs(b) >= std::abs(a)) ? 0.0 : -b / a;
+                    }
+                    const double mag = v + 0.5 * avg * shift;
+                    if (!(double(mag) >= threshold)) continue;
+                    const double pitch = (double(k) + shift) * kBeatSr / double(kNfft);
+                    if (pitch <= 0.0) continue;
+                    double residual = std::fmod(12.0 * std::log2(pitch / 27.5), 1.0);
+                    if (residual >= 0.5) residual -= 1.0;
+                    int bin = int(std::floor((residual + 0.5) / 0.01));
+                    if (bin < 0) bin = 0;
+                    if (bin >= nHistBins) bin = nHistBins - 1;
+                    cnt[size_t(bin)]++;
+                }
             }
-            const double mag = v + 0.5 * avg * shift;
-            if (!(double(mag) >= threshold)) continue;
-            const double pitch = (double(k) + shift) * kBeatSr / double(kNfft);
-            if (pitch <= 0.0) continue;
-            double residual = std::fmod(12.0 * std::log2(pitch / 27.5), 1.0);
-            if (residual >= 0.5) residual -= 1.0;
-            int bin = int(std::floor((residual + 0.5) / 0.01));
-            if (bin < 0) bin = 0;
-            if (bin >= nHistBins) bin = nHistBins - 1;
-            counts[size_t(bin)]++;
-        }
+        });
+        for (const std::vector<int>& v : shardCounts)
+            for (int i = 0; i < nHistBins; i++) counts[size_t(i)] += v[size_t(i)];
     }
     int best = 0;
     for (int i = 1; i < nHistBins; i++)
@@ -466,9 +518,20 @@ bool computeChroma(const std::vector<float>& sPower, int T, int sr, double tunin
 
 // ------------------------------------------------------------ power dB max
 void powerDbColMax(const std::vector<float>& sWeighed, int T, std::vector<double>& cmax) {
+    // v7 §10.4-3: global max and per-frame column max run in parallel. Both are
+    // exact max reductions, so the values are bitwise identical to the serial walk.
     double gmaxLog = -std::numeric_limits<double>::infinity();
-    for (float v : sWeighed)
-        gmaxLog = std::max(gmaxLog, 10.0 * std::log10(std::max(1e-10, double(v))));
+    {
+        const int shards = std::max(1, shardCount(int64_t(sWeighed.size())));
+        std::vector<double> part(size_t(shards), -std::numeric_limits<double>::infinity());
+        parallelForRange(0, int64_t(sWeighed.size()), [&](int64_t lo, int64_t hi, int shard) {
+            double local = -std::numeric_limits<double>::infinity();
+            for (int64_t i = lo; i < hi; i++)
+                local = std::max(local, 10.0 * std::log10(std::max(1e-10, double(sWeighed[size_t(i)])))) ;
+            part[size_t(shard)] = local;
+        });
+        for (double v : part) gmaxLog = std::max(gmaxLog, v);
+    }
     std::vector<float> copy = sWeighed; // median reference
     const size_t n = copy.size();
     const auto mid = copy.begin() + ptrdiff_t(n / 2);
@@ -481,15 +544,17 @@ void powerDbColMax(const std::vector<float>& sWeighed, int T, std::vector<double
     const double dbRef = 10.0 * std::log10(std::max(1e-10, median));
     const double floorDb = (gmaxLog - dbRef) - 80.0; // top_db=80
     cmax.assign(size_t(T), 0.0);
-    for (int t = 0; t < T; t++) {
-        const float* sw = &sWeighed[size_t(t) * size_t(kBins)];
-        double mx = -std::numeric_limits<double>::infinity();
-        for (int k = 0; k < kBins; k++) {
-            const double d = 10.0 * std::log10(std::max(1e-10, double(sw[k]))) - dbRef;
-            mx = std::max(mx, std::max(d, floorDb));
+    parallelForRange(0, T, [&](int64_t lo, int64_t hi, int /*shard*/) {
+        for (int t = int(lo); t < int(hi); t++) {
+            const float* sw = &sWeighed[size_t(t) * size_t(kBins)];
+            double mx = -std::numeric_limits<double>::infinity();
+            for (int k = 0; k < kBins; k++) {
+                const double d = 10.0 * std::log10(std::max(1e-10, double(sw[k]))) - dbRef;
+                mx = std::max(mx, std::max(d, floorDb));
+            }
+            cmax[size_t(t)] = mx;
         }
-        cmax[size_t(t)] = mx;
-    }
+    });
 }
 
 // ------------------------------------------------------------ onset envelope
@@ -538,10 +603,11 @@ void plpPulse(const std::vector<double>& env, int sr, std::vector<double>& pulse
     detail::hannPeriodic(W, win);
 
     std::vector<Cdp> ft(size_t(nFrames) * size_t(bins));
-    {
+    // v7 §10.4-3: forward STFT frames only read env/win and write their own row.
+    parallelForRange(0, nFrames, [&](int64_t lo, int64_t hi, int /*shard*/) {
         std::vector<double> frame(W);
         std::vector<Cdp> spec(bins);
-        for (int i = 0; i < nFrames; i++) {
+        for (int i = int(lo); i < int(hi); i++) {
             for (int j = 0; j < W; j++) {
                 const int64_t pos = int64_t(i) - W / 2 + j;
                 const double v = (pos >= 0 && pos < T) ? env[size_t(pos)] : 0.0;
@@ -551,7 +617,7 @@ void plpPulse(const std::vector<double>& env, int sr, std::vector<double>& pulse
             for (int k = 0; k < bins; k++)
                 ft[size_t(i) * size_t(bins) + size_t(k)] = spec[size_t(k)];
         }
-    }
+    });
     // pin to feasible tempo range [30, 300] bpm
     std::vector<char> keep(bins, 0);
     for (int k = 0; k < bins; k++) {
@@ -559,28 +625,31 @@ void plpPulse(const std::vector<double>& env, int sr, std::vector<double>& pulse
         keep[size_t(k)] = (bpmBin >= 30.0 && bpmBin <= 300.0) ? 1 : 0;
     }
     const double normBase = std::sqrt(kTiny64); // tiny(complex128) ** 0.5
-    for (int i = 0; i < nFrames; i++) {
-        Cdp* col = &ft[size_t(i) * size_t(bins)];
-        double peakFtmag = 0.0;
-        for (int k = 0; k < bins; k++) {
-            if (!keep[size_t(k)]) continue;
-            peakFtmag = std::max(peakFtmag, std::log1p(1e6 * std::abs(col[size_t(k)])));
-        }
-        Cdp lexMax(0.0, 0.0);
-        bool hasLex = false;
-        for (int k = 0; k < bins; k++) {
-            if (!keep[size_t(k)]) { col[size_t(k)] = Cdp(0.0, 0.0); continue; }
-            const double ftm = std::log1p(1e6 * std::abs(col[size_t(k)]));
-            if (ftm < peakFtmag) col[size_t(k)] = Cdp(0.0, 0.0);
-            else if (!hasLex || lexGreater(col[size_t(k)], lexMax)) {
-                lexMax = col[size_t(k)];
-                hasLex = true;
+    // v7 §10.4-3: per-frame tempo-bin pinning/normalization, disjoint rows.
+    parallelForRange(0, nFrames, [&](int64_t lo, int64_t hi, int /*shard*/) {
+        for (int i = int(lo); i < int(hi); i++) {
+            Cdp* col = &ft[size_t(i) * size_t(bins)];
+            double peakFtmag = 0.0;
+            for (int k = 0; k < bins; k++) {
+                if (!keep[size_t(k)]) continue;
+                peakFtmag = std::max(peakFtmag, std::log1p(1e6 * std::abs(col[size_t(k)])));
             }
+            Cdp lexMax(0.0, 0.0);
+            bool hasLex = false;
+            for (int k = 0; k < bins; k++) {
+                if (!keep[size_t(k)]) { col[size_t(k)] = Cdp(0.0, 0.0); continue; }
+                const double ftm = std::log1p(1e6 * std::abs(col[size_t(k)]));
+                if (ftm < peakFtmag) col[size_t(k)] = Cdp(0.0, 0.0);
+                else if (!hasLex || lexGreater(col[size_t(k)], lexMax)) {
+                    lexMax = col[size_t(k)];
+                    hasLex = true;
+                }
+            }
+            // np.abs(ftgram.max(axis=-2)) uses numpy lexicographic ordering on complex
+            const double denom = normBase + std::abs(lexMax);
+            for (int k = 0; k < bins; k++) col[size_t(k)] /= denom;
         }
-        // np.abs(ftgram.max(axis=-2)) uses numpy lexicographic ordering on complex
-        const double denom = normBase + std::abs(lexMax);
-        for (int k = 0; k < bins; k++) col[size_t(k)] /= denom;
-    }
+    });
     // istft(ftgram, hop_length=1, n_fft=384, length=T)
     // Replicates librosa.istft exactly, including its split overlap-add: the
     // first start_frame=192 frames go into a head buffer and are copied out as
@@ -602,14 +671,29 @@ void plpPulse(const std::vector<double>& env, int sr, std::vector<double>& pulse
     // Main frames g >= start_frame land at y[(g - start_frame) * hop] because
     // librosa's overlap-add offset is start_frame*hop - n_fft//2 (= 0 here):
     // the whole reconstruction is the ideal OLA advanced by n_fft//2 samples.
-    for (int i = startFrame; i < nFrames; i++) {
-        detail::irfft(&ft[size_t(i) * size_t(bins)], W, recon.data());
-        const int base = i - startFrame;
-        const int n0 = std::max(base, 0);
-        const int n1 = std::min(T, base + W);
-        for (int n = n0; n < n1; n++) {
-            const int j = n - base;
-            pulse[size_t(n)] += win[size_t(j)] * recon[size_t(j)];
+    // v7 §10.4-3: IFFT runs in parallel per chunk, but the overlap-add itself
+    // stays serial in ascending frame order, so every pulse[n] receives its
+    // contributions in exactly the same order as before (bitwise identical).
+    const int kIstftChunk = 512;
+    std::vector<double> chunkRecon(size_t(kIstftChunk) * size_t(W));
+    for (int c0 = startFrame; c0 < nFrames; c0 += kIstftChunk) {
+        const int c1 = std::min(nFrames, c0 + kIstftChunk);
+        const int count = c1 - c0;
+        parallelForRangeItems(0, count, [&](int64_t lo, int64_t hi, int /*shard*/) {
+            for (int64_t k = lo; k < hi; k++) {
+                detail::irfft(&ft[size_t(c0 + int(k)) * size_t(bins)], W,
+                              &chunkRecon[size_t(k) * size_t(W)]);
+            }
+        }, 8);
+        for (int i = c0; i < c1; i++) {
+            const int base = i - startFrame;
+            const int n0 = std::max(base, 0);
+            const int n1 = std::min(T, base + W);
+            const double* rec = &chunkRecon[size_t(i - c0) * size_t(W)];
+            for (int n = n0; n < n1; n++) {
+                const int j = n - base;
+                pulse[size_t(n)] += win[size_t(j)] * rec[size_t(j)];
+            }
         }
     }
     // window_sumsquare over all n_frames = T+1 frames, then librosa.istft
@@ -664,27 +748,49 @@ double estimateTempo(const std::vector<double>& oenv, int sr, std::vector<double
 
     int FF = 1024; // >= 2*win-1 zero-padded autocorrelation length (win=344 -> 687)
     while (FF < 2 * win - 1) FF <<= 1;
-    std::vector<double> buf(FF, 0.0);
-    std::vector<Cdp> spec(FF / 2 + 1);
-    std::vector<double> ac(FF);
     std::vector<double> tgMean(win, 0.0);
-    for (int t = 0; t < N; t++) {
-        std::fill(buf.begin(), buf.end(), 0.0);
-        for (int i = 0; i < win; i++) {
-            const int64_t pos = int64_t(t) + i;
-            buf[size_t(i)] = (pos < int64_t(padded.size())) ? padded[size_t(pos)] * acwin[size_t(i)] : 0.0;
+    // v7 §10.4-3: per-frame autocorrelation (2 FFTs) is independent; the tgMean
+    // accumulation stays serial in ascending t, so the summation order and the
+    // resulting bits are unchanged. Only lags < win are used downstream, so the
+    // chunk buffer stores just those.
+    const int kTempoChunk = 128;
+    std::vector<double> chunkAc(size_t(kTempoChunk) * size_t(win), 0.0);
+    std::vector<double> chunkLen(size_t(kTempoChunk), 0.0);
+    for (int c0 = 0; c0 < N; c0 += kTempoChunk) {
+        const int c1 = std::min(N, c0 + kTempoChunk);
+        const int count = c1 - c0;
+        parallelForRangeItems(0, count, [&](int64_t lo, int64_t hi, int /*shard*/) {
+            std::vector<double> buf(FF, 0.0);
+            std::vector<Cdp> spec(FF / 2 + 1);
+            std::vector<double> ac(FF);
+            for (int64_t kk = lo; kk < hi; kk++) {
+                const int t = c0 + int(kk);
+                // buf[win..FF) is zero for every frame; only [0, win) is refreshed.
+                for (int i = 0; i < win; i++) {
+                    const int64_t pos = int64_t(t) + i;
+                    buf[size_t(i)] = (pos < int64_t(padded.size())) ? padded[size_t(pos)] * acwin[size_t(i)] : 0.0;
+                }
+                detail::rfft(buf.data(), FF, spec.data());
+                for (int k = 0; k <= FF / 2; k++) {
+                    const double re = spec[size_t(k)].real();
+                    const double im = spec[size_t(k)].imag();
+                    spec[size_t(k)] = Cdp(re * re + im * im, 0.0);
+                }
+                detail::irfft(spec.data(), FF, ac.data());
+                double len = 0.0;
+                for (int lag = 0; lag < win; lag++) len = std::max(len, std::abs(ac[size_t(lag)]));
+                double* dst = &chunkAc[size_t(kk) * size_t(win)];
+                for (int lag = 0; lag < win; lag++) dst[size_t(lag)] = ac[size_t(lag)];
+                chunkLen[size_t(kk)] = len;
+            }
+        }, 8);
+        for (int k = 0; k < count; k++) {
+            const double len = chunkLen[size_t(k)];
+            if (len >= kTiny64) {
+                const double* ac = &chunkAc[size_t(k) * size_t(win)];
+                for (int lag = 0; lag < win; lag++) tgMean[size_t(lag)] += ac[size_t(lag)] / len;
+            }
         }
-        detail::rfft(buf.data(), FF, spec.data());
-        for (int k = 0; k <= FF / 2; k++) {
-            const double re = spec[size_t(k)].real();
-            const double im = spec[size_t(k)].imag();
-            spec[size_t(k)] = Cdp(re * re + im * im, 0.0);
-        }
-        detail::irfft(spec.data(), FF, ac.data());
-        double len = 0.0;
-        for (int lag = 0; lag < win; lag++) len = std::max(len, std::abs(ac[size_t(lag)]));
-        if (len >= kTiny64)
-            for (int lag = 0; lag < win; lag++) tgMean[size_t(lag)] += ac[size_t(lag)] / len;
     }
     for (int lag = 0; lag < win; lag++) tgMean[size_t(lag)] /= double(N);
     if (tgMeanOut != nullptr) *tgMeanOut = tgMean;
@@ -1041,43 +1147,68 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
             return result;
 
         // ---- mono mixdown (librosa.to_mono) ----
+        // v7 §10.4-3: parallel over samples; min/max/max|.| are exact reductions
+        // over shard-ordered partials, so the result is bitwise identical.
         std::vector<double> mono(frames, 0.0);
-        for (int64_t i = 0; i < frames; i++) {
-            double s = 0.0;
-            for (int ch = 0; ch < channels; ch++)
-                s += interleavedPcm[size_t(i * channels + ch)];
-            mono[size_t(i)] = s / double(channels);
-        }
-        double mn = 0.0, mx = 0.0;
-        for (double v : mono) {
-            mn = std::min(mn, v);
-            mx = std::max(mx, v);
+        const int mixShards = std::max(1, shardCount(frames));
+        std::vector<double> mixMin(size_t(mixShards), 0.0);
+        std::vector<double> mixMax(size_t(mixShards), 0.0);
+        std::vector<double> mixAbs(size_t(mixShards), 0.0);
+        parallelForRange(0, frames, [&](int64_t lo, int64_t hi, int shard) {
+            double lmin = 0.0, lmax = 0.0, labs = 0.0;
+            for (int64_t i = lo; i < hi; i++) {
+                double s = 0.0;
+                for (int ch = 0; ch < channels; ch++)
+                    s += interleavedPcm[size_t(i * channels + ch)];
+                const double v = s / double(channels);
+                mono[size_t(i)] = v;
+                lmin = std::min(lmin, v);
+                lmax = std::max(lmax, v);
+                labs = std::max(labs, std::abs(v));
+            }
+            mixMin[size_t(shard)] = lmin;
+            mixMax[size_t(shard)] = lmax;
+            mixAbs[size_t(shard)] = labs;
+        });
+        double mn = 0.0, mx = 0.0, maxAbs = 0.0;
+        for (int s = 0; s < mixShards; s++) {
+            mn = std::min(mn, mixMin[size_t(s)]);
+            mx = std::max(mx, mixMax[size_t(s)]);
+            maxAbs = std::max(maxAbs, mixAbs[size_t(s)]);
         }
         if (mn == 0.0 && mx == 0.0) return result; // pure silence
-        double maxAbs = 0.0;
-        for (double v : mono) maxAbs = std::max(maxAbs, std::abs(v));
         if (!(maxAbs > 0.0)) return result;
-        for (double& v : mono) v /= maxAbs; // normalize to [-1, 1]
+        parallelForRange(0, frames, [&](int64_t lo, int64_t hi, int /*shard*/) {
+            for (int64_t i = lo; i < hi; i++) mono[size_t(i)] /= maxAbs; // normalize to [-1, 1]
+        });
         if (!prog.report(0.02)) return result;
 
         // ---- trim leading/trailing silence (top_db=40) ----
         const int64_t nTotal = frames;
         const int64_t nRmsFrames = nTotal / kHop + 1;
         std::vector<double> mse(nRmsFrames, 0.0);
-        for (int64_t t = 0; t < nRmsFrames; t++) {
-            const int64_t begin = t * kHop - kNfft / 2;
-            double s = 0.0;
-            for (int i = 0; i < kNfft; i++) {
-                const int64_t pos = begin + i;
-                if (pos >= 0 && pos < nTotal) {
-                    const double v = mono[size_t(pos)];
-                    s += v * v;
+        const int mseShards = std::max(1, shardCount(nRmsFrames));
+        std::vector<double> mseMax(size_t(mseShards), 0.0);
+        parallelForRange(0, nRmsFrames, [&](int64_t lo, int64_t hi, int shard) {
+            double localMax = 0.0;
+            for (int64_t t = lo; t < hi; t++) {
+                const int64_t begin = t * kHop - kNfft / 2;
+                double s = 0.0;
+                for (int i = 0; i < kNfft; i++) {
+                    const int64_t pos = begin + i;
+                    if (pos >= 0 && pos < nTotal) {
+                        const double v = mono[size_t(pos)];
+                        s += v * v;
+                    }
                 }
+                const double m = s / double(kNfft);
+                mse[size_t(t)] = m;
+                localMax = std::max(localMax, m);
             }
-            mse[size_t(t)] = s / double(kNfft);
-        }
+            mseMax[size_t(shard)] = localMax;
+        });
         double maxMse = 0.0;
-        for (double v : mse) maxMse = std::max(maxMse, v);
+        for (double v : mseMax) maxMse = std::max(maxMse, v);
         const double refDb = 20.0 * std::log10(std::max(1e-5, std::sqrt(maxMse)));
         int64_t firstNonsilent = -1, lastNonsilent = -1;
         for (int64_t t = 0; t < nRmsFrames; t++) {

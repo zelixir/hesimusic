@@ -272,7 +272,7 @@ class LoopAudioSinkTest {
     }
 
     @Test
-    fun `ring 不完整时降级为直通 避免永久空转`() {
+    fun `ring 不完整且无前缀时停在捕获 避免永久空转`() {
         val (controller, sink, fake) = rig()
         val src = PcmTestSupport.pcm16Buffer(150, 100)
 
@@ -280,12 +280,12 @@ class LoopAudioSinkTest {
 
         assertEquals("ring 只捕获后半段，不完整", 50L, controller.engine.capturedFrames)
         assertFalse(controller.isRingComplete)
-        assertTrue("应计入降级", controller.degradeCount >= 1L)
-        assertFalse("不完整时不应进入重放", controller.isReplaying)
+        assertEquals("未完整不再降级", 0L, controller.degradeCount)
+        assertFalse("无连续前缀时不应进入重放", controller.isReplaying)
         assertEquals("转发应裁到 B", 50, fake.feeds.first().frames)
 
         sink.playToEndOfStream()
-        assertEquals("降级后 playToEndOfStream 应转发 delegate", 1, fake.playToEndCalls)
+        assertEquals("无法重放时 playToEndOfStream 仍转发 delegate", 1, fake.playToEndCalls)
     }
 
     @Test
@@ -339,39 +339,32 @@ class LoopAudioSinkTest {
         val sink = LoopAudioSink(controller, fake)
         sink.configure(PcmTestSupport.format(), 4096, null)
         controller.window = window(1000, 2000)
-
-        // 从 1.5s 进入，只捕获 [1.5s,2s)，ring 不完整 -> 降级
         assertTrue(
-            sink.handleBuffer(
-                PcmTestSupport.pcm16Buffer(1500, 1000),
-                1_500_000L,
+            controller.seedRing(
+                window(1000, 2000),
+                PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(1000, 1000)),
+                PcmTestSupport.SAMPLE_RATE,
                 1,
-            )
+            ).isInstalled,
         )
+        sink.playToEndOfStream()
+        assertTrue(controller.isReplaying)
+
+        controller.engine.onDegrade?.invoke(1_000_000L)
 
         assertEquals("音频线程不得直接调用服务层回调", 0, targets.size)
         assertEquals("降级应 dispatch 到主线程", 1, queued.size)
         queued.removeAt(0).run()
         assertEquals("主线程执行后应回调一次", 1, targets.size)
-        assertEquals("target = A - 250ms", 750_000L, targets[0])
+        assertEquals("target 必须夹到 A", 1_000_000L, targets[0])
 
-        // 同一事件后继续喂普通输入，不应再次回调
-        assertTrue(sink.handleBuffer(PcmTestSupport.pcm16Buffer(0, 10), 0L, 1))
-        assertEquals("同一降级事件不得重复回调", 1, targets.size)
-
-        // flush 后再次失败 -> 再次回调
+        // flush 后再次收到降级事件 -> 再次 dispatch
         sink.flush()
-        assertTrue(
-            sink.handleBuffer(
-                PcmTestSupport.pcm16Buffer(2000, 10),
-                2_000_000L,
-                1,
-            )
-        )
+        controller.engine.onDegrade?.invoke(1_000_000L)
         assertEquals("flush 后应重新排队一次回调", 1, queued.size)
         queued.removeAt(0).run()
         assertEquals("flush 后应再次回调", 2, targets.size)
-        assertEquals("目标值仍为 A - 250ms", 750_000L, targets[1])
+        assertEquals("目标值仍不得小于 A", 1_000_000L, targets[1])
     }
 
     @Test
@@ -384,14 +377,17 @@ class LoopAudioSinkTest {
         val sink = LoopAudioSink(controller, fake)
         sink.configure(PcmTestSupport.format(), 4096, null)
         controller.window = window(1000, 2000)
-
         assertTrue(
-            sink.handleBuffer(
-                PcmTestSupport.pcm16Buffer(1500, 1000),
-                1_500_000L,
+            controller.seedRing(
+                window(1000, 2000),
+                PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(1000, 1000)),
+                PcmTestSupport.SAMPLE_RATE,
                 1,
-            )
+            ).isInstalled,
         )
+        sink.playToEndOfStream()
+        assertTrue(controller.isReplaying)
+        controller.engine.onDegrade?.invoke(1_000_000L)
         assertEquals("回调未注册时不应 dispatch", 0, queued.size)
 
         val targets = mutableListOf<Long>()
@@ -399,7 +395,7 @@ class LoopAudioSinkTest {
         assertEquals("注册回调后应补发 pending 事件", 1, queued.size)
         queued.removeAt(0).run()
         assertEquals(1, targets.size)
-        assertEquals(750_000L, targets[0])
+        assertEquals("target 必须夹到 A", 1_000_000L, targets[0])
     }
 
     @Test
@@ -837,15 +833,18 @@ class LoopAudioSinkTest {
             val sink = LoopAudioSink(controller, fake)
             sink.configure(PcmTestSupport.format(), 4096, null)
             controller.window = window(1000, 2000)
-
-            // 从 1.5s 进入，ring 只有后半段 -> 降级
             assertTrue(
-                sink.handleBuffer(
-                    PcmTestSupport.pcm16Buffer(1500, 1000),
-                    1_500_000L,
+                controller.seedRing(
+                    window(1000, 2000),
+                    PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(1000, 1000)),
+                    PcmTestSupport.SAMPLE_RATE,
                     1,
-                )
+                ).isInstalled,
             )
+            sink.playToEndOfStream()
+            assertTrue(controller.isReplaying)
+
+            controller.engine.onDegrade?.invoke(1_000_000L)
             sink.release()
 
             val lines = sidecar.readLines()
@@ -853,7 +852,7 @@ class LoopAudioSinkTest {
                 "degrade 事件应包含 targetRawUs",
                 lines.any {
                     it.contains("\"ev\":\"degrade\"") &&
-                        it.contains("\"targetRawUs\":750000")
+                        it.contains("\"targetRawUs\":1000000")
                 },
             )
             assertTrue(
@@ -870,6 +869,38 @@ class LoopAudioSinkTest {
             file.delete()
             sidecar.delete()
         }
+    }
+
+    @Test
+    fun `REPLAYING 中 seek 回前奏转捕获且有输出`() {
+        val w = window(1000, 2000)
+        val (controller, sink, fake) = rig(w)
+        assertTrue(
+            controller.seedRing(
+                w,
+                PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(1000, 1000)),
+                PcmTestSupport.SAMPLE_RATE,
+                1,
+            ).isInstalled,
+        )
+        sink.playToEndOfStream()
+        assertTrue(controller.isReplaying)
+        val before = fake.feeds.size
+
+        sink.handleDiscontinuity()
+        assertTrue(
+            sink.handleBuffer(
+                PcmTestSupport.pcm16Buffer(900, 10),
+                900_000L,
+                1,
+            )
+        )
+
+        assertFalse("前奏输入必须退出重放", controller.isReplaying)
+        val feed = fake.feeds.drop(before).firstOrNull { it.ptsUs >= 900_000L }
+        assertTrue("前奏必须有输出，不能空泵卡死", feed != null)
+        assertEquals(900_000L, feed!!.ptsUs)
+        assertEquals(10, feed.frames)
     }
 
     @Test

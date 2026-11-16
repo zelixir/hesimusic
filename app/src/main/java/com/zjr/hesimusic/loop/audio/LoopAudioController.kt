@@ -131,6 +131,10 @@ class LoopAudioController @Inject constructor() {
     val degradeCount: Long
         get() = engine.degradeCount
 
+    /** 分片预填追不上时“原地等待”的次数；不伴随 seek/降级。 */
+    val stallCount: Long
+        get() = engine.stallCount
+
     val isRingComplete: Boolean
         get() = engine.isRingComplete
 

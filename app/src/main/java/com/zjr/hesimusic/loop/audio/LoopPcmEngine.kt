@@ -192,8 +192,26 @@ class LoopPcmEngine {
     private var lastInputStartFrameAbs: Long? = null
     private var lastInputEndFrameAbs: Long? = null
 
-    /** 追尾回退时的覆盖前缀；在覆盖增长前禁止重新进入重放，避免循环降级。 */
-    private var underrunCoveredFrames = -1L
+    /** 重放中覆盖耗尽、原地等待分片的次数（不 seek、不降级）。 */
+    @Volatile
+    var stallCount: Long = 0L
+        private set
+    private var stalled = false
+
+    /** delegate 写重放 chunk 抛异常的次数（不再因此向后 seek）。 */
+    @Volatile
+    var replayFailureCount: Long = 0L
+        private set
+
+    /** pump 发现状态异常（PTS<A / delegate 长时间零消费）时自愈回捕获的次数。 */
+    @Volatile
+    var replaySelfHealCount: Long = 0L
+        private set
+
+    /** 检测到重放 PTS 早于 delegate 已写 PTS 而拒绝写入的次数。 */
+    @Volatile
+    var replayRejectCount: Long = 0L
+        private set
 
     /** 侧车 seam.iter：每次进入重放从 1 开始，折返递增。 */
     private var seamIteration = 0L
@@ -299,7 +317,6 @@ class LoopPcmEngine {
         ringFrames = plan.loopFrames
         capturedFrames = 0L
         coveredFrames = 0L
-        underrunCoveredFrames = -1L
         isRingComplete = false
         isRingPrefilled = false
         incompleteDegraded = false
@@ -411,7 +428,6 @@ class LoopPcmEngine {
         ringFrames = plan.loopFrames
         capturedFrames = plan.loopFrames
         coveredFrames = plan.loopFrames
-        underrunCoveredFrames = -1L
         isRingComplete = true
         isRingPrefilled = true
         incompleteDegraded = false
@@ -517,9 +533,6 @@ class LoopPcmEngine {
         ringFrames = plan.loopFrames
         capturedFrames = coverage.coveredFrames
         coveredFrames = coverage.prefixFrames
-        if (underrunCoveredFrames >= 0L && coveredFrames > underrunCoveredFrames) {
-            underrunCoveredFrames = -1L
-        }
         isRingComplete = coverage.coversFull(plan.loopFrames)
         isRingPrefilled = true
         incompleteDegraded = false
@@ -641,34 +654,49 @@ class LoopPcmEngine {
         val r = ensureRegionLocked() ?: return false
         val fmt = format ?: return false
         val startFrameAbs = frameFromUsRounded(frameTimeUs, fmt.sampleRate)
-        if (!isRingComplete) {
+        if (!isRingComplete && !isRingPrefilled) {
             pendingPostFlushPhase = false
             return false
         }
-        if (startFrameAbs >= r.aFrame && startFrameAbs < r.bFrame) {
+        if (startFrameAbs < r.aFrame) {
+            // 前奏输入必须退出重放（不变量）。
             pendingPostFlushPhase = false
-            state = State.REPLAYING
-            cursorFrames = startFrameAbs - r.aFrame
-            round = 0L
+            state = State.CAPTURING
+            cursorFrames = 0L
+            round = 1L
             pendingChunk = null
             pendingConsumedBytes = 0
             pendingAdvancedFrames = 0L
             seamIteration = 0L
-            if (cursorFrames == 0L) notifySeamLocked()
-            return true
+            return false
         }
-        if (startFrameAbs >= r.bFrame) {
+        val targetCursor = if (startFrameAbs < r.bFrame) {
+            startFrameAbs - r.aFrame
+        } else {
+            entryCursorFramesLocked(startFrameAbs, r)
+        }
+        if (!canStartReplayAt(targetCursor, r)) {
+            // 前缀还没覆盖到目标相位：先转捕获/转发，等 seed 追上。
             pendingPostFlushPhase = false
-            state = State.REPLAYING
-            cursorFrames = entryCursorFramesLocked(startFrameAbs, r)
-            round = entryRoundLocked(startFrameAbs, r)
+            state = State.CAPTURING
+            cursorFrames = 0L
+            round = 1L
             pendingChunk = null
             pendingConsumedBytes = 0
             pendingAdvancedFrames = 0L
             seamIteration = 0L
-            if (cursorFrames == 0L) notifySeamLocked()
-            return true
+            return false
         }
+        pendingPostFlushPhase = false
+        state = State.REPLAYING
+        cursorFrames = targetCursor
+        round = if (startFrameAbs < r.bFrame) 0L else entryRoundLocked(startFrameAbs, r)
+        pendingChunk = null
+        pendingConsumedBytes = 0
+        pendingAdvancedFrames = 0L
+        seamIteration = 0L
+        if (cursorFrames == 0L) notifySeamLocked()
+        return true
         // PTS < A：seek 到前奏，退出重放，让调用方按普通输入处理。
         pendingPostFlushPhase = false
         state = State.CAPTURING
@@ -679,6 +707,30 @@ class LoopPcmEngine {
         pendingAdvancedFrames = 0L
         seamIteration = 0L
         return false
+    }
+
+    /**
+     * 重放中收到前奏输入（PTS < A）：说明 seek/降级把播放头拉回了 A 之前。
+     * 不变量要求此时必须退出 REPLAYING，转到 CAPTURING 正常转发前奏。
+     *
+     * @return true 表示已从 REPLAYING 切到 CAPTURING
+     */
+    @Synchronized
+    fun onPreludeInput(frameTimeUs: Long): Boolean {
+        if (state != State.REPLAYING) return false
+        val r = ensureRegionLocked() ?: return false
+        val fmt = format ?: return false
+        val startFrameAbs = frameFromUsRounded(frameTimeUs, fmt.sampleRate)
+        if (startFrameAbs >= r.aFrame) return false
+        state = State.CAPTURING
+        cursorFrames = 0L
+        round = 1L
+        pendingChunk = null
+        pendingConsumedBytes = 0
+        pendingAdvancedFrames = 0L
+        pendingPostFlushPhase = false
+        seamIteration = 0L
+        return true
     }
 
     /** 由服务层/调试显式废弃 ring（窗口变更等）。 */
@@ -815,7 +867,8 @@ class LoopPcmEngine {
 
     /**
      * 调用方确认 plan 对应的输入已被 delegate 全部消费后调用（部分消费时不要调用）。
-     * 越过 B 且 ring 完整时切到 REPLAYING；ring 不完整则记一次降级并停在 CAPTURING。
+     * 越过 B 时：有连续前缀就进入 REPLAYING；前缀为空则停在 CAPTURING 等分片。
+     * 绝不因“ring 未完整”触发向后 seek。
      */
     @Synchronized
     fun onInputDrained(plan: BufferPlan) {
@@ -828,25 +881,13 @@ class LoopPcmEngine {
             0L
         }
         if (!canStartReplayAt(entryCursor, r)) {
-            if (isRingPrefilled) {
-                // 分片预填还没追到门槛：继续捕获/直通，等下一片到了再进。
-                state = State.CAPTURING
-                cursorFrames = 0L
-                round = 1L
-                pendingChunk = null
-                pendingConsumedBytes = 0
-                pendingAdvancedFrames = 0L
-                return
-            }
-            if (!incompleteDegraded) {
-                incompleteDegraded = true
-                degradeCount += 1L
-                notifyDegradeLocked()
-            }
-            // 不完整时不能让 sink 永久停在“循环态”空转：降级为直通，
-            // 由服务层（seek 回 A 补环 / 清窗口）决定后续。
-            replayUnavailable = true
-            state = State.PASS_THROUGH
+            // 分片模式下覆盖为 0 时先停在捕获；绝不再因“未完整”向后 seek。
+            state = State.CAPTURING
+            cursorFrames = 0L
+            round = 1L
+            pendingChunk = null
+            pendingConsumedBytes = 0
+            pendingAdvancedFrames = 0L
             return
         }
         state = State.REPLAYING
@@ -861,8 +902,8 @@ class LoopPcmEngine {
     }
 
     /**
-     * 源端 EOS：如果 ring 已完整但最后一个 buffer 恰好停在 B 之前一帧（没有触发
-     * crossedB），在这里兜底切到重放。ring 不完整则降级为直通。
+     * 源端 EOS：最后一个 buffer 恰好停在 B 之前一帧（没有触发 crossedB）时兜底切到
+     * 重放；无连续前缀则停在 CAPTURING，等分片预填，不做向后 seek。
      *
      * @return true = 已处于/已进入 REPLAYING
      */
@@ -875,17 +916,7 @@ class LoopPcmEngine {
         if (replayUnavailable) return false
         val r = ensureRegionLocked() ?: return false
         if (!canStartReplayAt(0L, r)) {
-            if (isRingPrefilled) {
-                state = State.CAPTURING
-                return false
-            }
-            if (!incompleteDegraded) {
-                incompleteDegraded = true
-                degradeCount += 1L
-                notifyDegradeLocked()
-            }
-            replayUnavailable = true
-            state = State.PASS_THROUGH
+            state = State.CAPTURING
             return false
         }
         state = State.REPLAYING
@@ -914,6 +945,14 @@ class LoopPcmEngine {
         if (bpf <= 0 || maxBytes <= 0) return null
         if (r.loopFrames <= 0L) return null
 
+        val currentPts = replayPtsLocked(cursorFrames, round, r, fmt)
+        if (currentPts < r.window.loopStartUs - 2_000L) {
+            // 不变量兜底：重放头落到 A 之前时自行退出重放，不能空泵冻结。
+            replaySelfHealCount += 1L
+            exitReplayToCaptureLocked()
+            return null
+        }
+
         if (cursorFrames >= r.loopFrames) {
             cursorFrames = 0L
             round += 1L
@@ -922,9 +961,10 @@ class LoopPcmEngine {
         }
         val availableAhead = coveredFrames - cursorFrames
         if (!isRingComplete && availableAhead <= 0L) {
-            fallbackFromUnderrunLocked()
+            stallForCoverageLocked()
             return null
         }
+        stalled = false
         val maxFrames = maxOf(1, maxBytes / bpf).toLong()
         val contiguous = if (isRingComplete) {
             r.loopFrames - cursorFrames
@@ -997,7 +1037,7 @@ class LoopPcmEngine {
         degradeCallbackArmed = true
         pendingPostFlushPhase = true
         seamIteration = 0L
-        underrunCoveredFrames = -1L
+        stalled = false
         pendingChunk = null
         pendingConsumedBytes = 0
         pendingAdvancedFrames = 0L
@@ -1032,20 +1072,61 @@ class LoopPcmEngine {
         state = State.PASS_THROUGH
     }
 
-    /** 重放写 delegate 抛异常时调用：降级并退出重放。 */
+    /**
+     * 重放写 delegate 抛异常：只退出重放到 CAPTURING，不 seek、不降级回调。
+     * 由 sink/上层决定是否 flush；分片预填可继续，播放头不会被拽回 A。
+     */
     @Synchronized
     fun onReplayFailure() {
-        if (state == State.REPLAYING) {
-            degradeCount += 1L
-            notifyDegradeLocked()
-        }
-        replayUnavailable = true
+        if (state == State.REPLAYING) replayFailureCount += 1L
+        exitReplayToCaptureLocked()
+    }
+
+    /** delegate 连续多次接受 0 字节（重放 chunk 卡住）时由 sink 调用：自愈回捕获。 */
+    @Synchronized
+    fun onReplayStuck() {
+        if (state != State.REPLAYING) return
+        replaySelfHealCount += 1L
+        exitReplayToCaptureLocked()
+    }
+
+    /** 检测到重放 chunk 的 PTS 早于 delegate 已写 PTS：拒绝本轮写入，回捕获。 */
+    @Synchronized
+    fun onReplayTimestampBackward() {
+        if (state != State.REPLAYING) return
+        replayRejectCount += 1L
+        exitReplayToCaptureLocked()
+    }
+
+    /** 当前重放环内游标（诊断用）。 */
+    @Synchronized
+    fun currentCursorFrames(): Long = cursorFrames
+
+    /** 诊断快照（1Hz LoopPerf）。 */
+    @Synchronized
+    fun debugStateString(): String =
+        "state=" + state +
+            " covered=" + coveredFrames +
+            " cursor=" + cursorFrames +
+            " round=" + round +
+            " pos=" + currentPositionUs() +
+            " ring=" + isRingComplete +
+            " pendingChunk=" + (pendingChunk != null) +
+            " stall=" + stallCount +
+            " selfHeal=" + replaySelfHealCount +
+            " replayReject=" + replayRejectCount +
+            " writeFail=" + replayFailureCount
+
+    private fun exitReplayToCaptureLocked() {
+        replayUnavailable = false
+        state = State.CAPTURING
+        cursorFrames = 0L
+        round = 1L
         pendingChunk = null
         pendingConsumedBytes = 0
         pendingAdvancedFrames = 0L
-        cursorFrames = 0L
-        round = 1L
-        state = State.PASS_THROUGH
+        pendingPostFlushPhase = false
+        stalled = false
     }
 
     // ------------------------------------------------------------------ 内部
@@ -1061,7 +1142,7 @@ class LoopPcmEngine {
         onDegrade?.invoke(target)
     }
 
-    /** 建议 seek 目标：当前轮起点 - 250ms，下限 0。 */
+    /** 建议 seek 目标：当前轮起点 - 250ms，但不得小于 A（禁止跳进前奏）。 */
     private fun degradeTargetUsLocked(): Long {
         val r = region
         val roundStart = if (r != null) {
@@ -1070,7 +1151,9 @@ class LoopPcmEngine {
         } else {
             window?.loopStartUs ?: 0L
         }
-        return (roundStart - DEGRADE_SEEK_BACK_US).coerceAtLeast(0L)
+        // 禁止向后跳进前奏：目标不得小于 A（分片模式下尤其重要）。
+        val aUs = window?.loopStartUs ?: 0L
+        return (roundStart - DEGRADE_SEEK_BACK_US).coerceAtLeast(aUs)
     }
 
     private fun passThroughPlan(srcPos: Int, frameCount: Int, remainingBytes: Int): BufferPlan {
@@ -1099,8 +1182,7 @@ class LoopPcmEngine {
             ringFrames = 0L
             capturedFrames = 0L
             coveredFrames = 0L
-            underrunCoveredFrames = -1L
-            isRingComplete = false
+                isRingComplete = false
             state = State.PASS_THROUGH
             return null
         }
@@ -1113,8 +1195,7 @@ class LoopPcmEngine {
             ringFrames = 0L
             capturedFrames = 0L
             coveredFrames = 0L
-            underrunCoveredFrames = -1L
-            isRingComplete = false
+                isRingComplete = false
             state = State.PASS_THROUGH
             if (unavailableWindow != w) {
                 unavailableWindow = w
@@ -1146,8 +1227,7 @@ class LoopPcmEngine {
                 ringFrames = plan.loopFrames
                 capturedFrames = 0L
                 coveredFrames = 0L
-                underrunCoveredFrames = -1L
-                isRingComplete = false
+                        isRingComplete = false
                 state = State.PASS_THROUGH
                 return null
             }
@@ -1161,8 +1241,7 @@ class LoopPcmEngine {
                 ringFrames = plan.loopFrames
                 capturedFrames = 0L
                 coveredFrames = 0L
-                underrunCoveredFrames = -1L
-                isRingComplete = false
+                        isRingComplete = false
                 state = State.PASS_THROUGH
                 if (unavailableWindow != w) {
                     unavailableWindow = w
@@ -1179,7 +1258,6 @@ class LoopPcmEngine {
         ringFrames = plan.loopFrames
         capturedFrames = 0L
         coveredFrames = 0L
-        underrunCoveredFrames = -1L
         isRingComplete = false
         isRingPrefilled = false
         incompleteDegraded = false
@@ -1207,7 +1285,6 @@ class LoopPcmEngine {
         ringFrames = 0L
         capturedFrames = 0L
         coveredFrames = 0L
-        underrunCoveredFrames = -1L
         isRingComplete = false
         isRingPrefilled = false
         incompleteDegraded = false
@@ -1261,24 +1338,18 @@ class LoopPcmEngine {
         )
         capturedFrames = coverage.coveredFrames
         coveredFrames = coverage.prefixFrames
-        if (underrunCoveredFrames >= 0L && coveredFrames > underrunCoveredFrames) {
-            underrunCoveredFrames = -1L
-        }
         isRingComplete = coverage.coversFull(r.loopFrames)
     }
 
-    /** 重放追尾（解码/预填跟不上）：不得输出环内未覆盖的静音，退回捕获/直通。 */
-    private fun fallbackFromUnderrunLocked() {
-        degradeCount += 1L
-        incompleteDegraded = true
-        underrunCoveredFrames = coveredFrames
-        state = State.CAPTURING
-        cursorFrames = 0L
-        round = 1L
-        pendingChunk = null
-        pendingConsumedBytes = 0
-        pendingAdvancedFrames = 0L
-        notifyDegradeLocked()
+    /**
+     * 重放中覆盖耗尽（分片预填还没追上）：保持 REPLAYING 原地等待，不 seek、不倒回、
+     * 不输出未覆盖静音。下一片 seedRingRange 追加后，下一次 pump 自动继续。
+     */
+    private fun stallForCoverageLocked() {
+        if (!stalled) {
+            stalled = true
+            stallCount += 1L
+        }
     }
 
     private fun advanceReplayCursorLocked(frames: Long) {
@@ -1337,22 +1408,23 @@ class LoopPcmEngine {
     private fun seekJumpFrames(sampleRate: Int): Long =
         (sampleRate / 2L).coerceAtLeast(1L)
 
-    /** 重放门槛：完整 ring，或当前游标前方至少还有 0.5s 连续数据。 */
+    /** 分片模式下只要前缀覆盖到 cursor 之后就有可播数据；完整 ring 当然可以。 */
     private fun canStartReplayAt(cursor: Long, r: Region): Boolean {
         if (isRingComplete) return true
-        if (underrunCoveredFrames >= 0L && coveredFrames <= underrunCoveredFrames) return false
-        val need = (r.format.sampleRate / 2L).coerceAtLeast(1L)
-        return coveredFrames - cursor >= need
+        return coveredFrames > cursor
     }
 
     private fun entryCursorFramesLocked(startFrameAbs: Long, r: Region): Long {
-        if (!isRingComplete || startFrameAbs < r.bFrame) return 0L
+        if (startFrameAbs < r.bFrame) return 0L
+        // 预填分段时即使未完整，也按输入 PTS 记录目标相位；门槛由 canStartReplayAt 把关。
+        if (!isRingComplete && !isRingPrefilled) return 0L
         return Math.floorMod(startFrameAbs - r.aFrame, r.loopFrames)
     }
 
     /** 进入重放时的轮次：保证首个 chunk 的 PTS = 输入 PTS（媒体域连续）。 */
     private fun entryRoundLocked(startFrameAbs: Long, r: Region): Long {
-        if (!isRingComplete || startFrameAbs < r.bFrame) return 1L
+        if (startFrameAbs < r.bFrame) return 1L
+        if (!isRingComplete && !isRingPrefilled) return 1L
         return (startFrameAbs - r.bFrame) / r.loopFrames + 1L
     }
 

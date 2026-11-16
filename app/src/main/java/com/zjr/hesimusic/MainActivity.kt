@@ -22,7 +22,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.media3.common.Player
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -301,12 +300,13 @@ class MainActivity : ComponentActivity() {
                                 musicViewModel = sharedMusicViewModel,
                                 onBack = { navController.popBackStack() },
                                 onSavedAndPlay = { song ->
-                                    // 契约 §2.4:确认保存 → **显式武装该歌的无缝意图** → 播放该歌 +
-                                    // 单曲循环 → 返回。arm 必须在 play/setRepeatMode(ONE) 之前:
-                                    // 先记下进入前的 repeat,退出无缝时才能恢复。
-                                    loopIntent.arm(song.id, sharedMusicViewModel.uiState.value.repeatMode)
+                                    // 契约 §2.4:确认保存 → **显式武装该歌的无缝意图** → 播放该歌 → 返回。
+                                    // arm 必须在 play 之前:先记下进入前的 repeat + shuffle,
+                                    // 退出无缝时才能恢复。repeat=ONE / shuffle=false 由播放层
+                                    // 在唯一写点(LoopPlaybackCoordinator)统一应用,这里不再散落写。
+                                    val state = sharedMusicViewModel.uiState.value
+                                    loopIntent.arm(song.id, state.repeatMode, state.shuffleModeEnabled)
                                     sharedMusicViewModel.play(song)
-                                    sharedMusicViewModel.setRepeatMode(Player.REPEAT_MODE_ONE)
                                     navController.popBackStack()
                                 },
                             )
@@ -350,7 +350,8 @@ private data class LoopMenuActions(
 
 /**
  * 构造菜单两个入口的回调:
- * - 「无缝循环」(菜单仅在行 confirmed=1 时显示)→ **显式武装该歌的无缝意图** + 播放该歌 + repeatMode=ONE;
+ * - 「无缝循环」(菜单仅在行 confirmed=1 时显示)→ **显式武装该歌的无缝意图** + 播放该歌
+ *   (repeat=ONE / shuffle=false 由播放层唯一写点应用,菜单不直接写这两个属性);
  * - 「无缝分析」(始终显示,仅 CUE 置灰)→ 导航 loop/{songId}(进页加载已存结果 / 自动分析)。
  *
  * 「重新分析 / 取消最终结果 / 删除分析结果」已从长按菜单移入结果页(页内自行处理)。
@@ -364,11 +365,12 @@ private fun rememberLoopMenuActions(
     return remember(navController, musicViewModel, loopIntent) {
         LoopMenuActions(
             onSeamlessLoop = { song ->
-                // 显式进入:arm 必须在 play/setRepeatMode(ONE) 之前(记录进入前的 repeat,
-                // 切歌退出时恢复)。切到别的歌不会自动武装,必须重新走这里。
-                loopIntent.arm(song.id, musicViewModel.uiState.value.repeatMode)
+                // 显式进入:arm 必须在 play 之前(记录进入前的 repeat + shuffle,退出时恢复)。
+                // repeat=ONE / shuffle=false 由播放层在唯一写点统一应用 —— 同时关掉 shuffle
+                // 才能让播放页/底部条显示「单曲循环」而不是「随机播放」。
+                val state = musicViewModel.uiState.value
+                loopIntent.arm(song.id, state.repeatMode, state.shuffleModeEnabled)
                 musicViewModel.play(song)
-                musicViewModel.setRepeatMode(Player.REPEAT_MODE_ONE)
             },
             onSeamlessAnalysis = { song -> navController.navigate("loop/${song.id}") },
         )

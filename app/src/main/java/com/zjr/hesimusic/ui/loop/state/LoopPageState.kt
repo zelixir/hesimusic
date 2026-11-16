@@ -48,8 +48,10 @@ sealed interface PrefillState {
 /**
  * 播放状态。
  *
- * [AwaitingPrefill] 是 00009 的核心建模：换窗口/换候选后，位置可以继续插值推进，
- * 但**不允许**声称有音频输出；预填就绪（或失败降级）后 **必须** 产生 [LoopPageEffect.Play]。
+ * [AwaitingPrefill] 是 00009 的核心建模：换窗口/换候选后，在预填完成前**不允许**
+ * 声称有音频输出；预填就绪（或失败降级）后 **必须** 产生 [LoopPageEffect.Play]。
+ * 模型允许 Tick 继续更新位置；当前 UI 在 AwaitingPrefill 时冻结展示位置，
+ * 避免出现“进度条在动但没声音”的假象。
  */
 sealed interface PlaybackState {
     data object Stopped : PlaybackState
@@ -135,6 +137,9 @@ sealed interface LoopPageEvent {
     data class AnalysisFailed(val message: String) : LoopPageEvent
 
     data object Retry : LoopPageEvent
+
+    /** 页内「重新分析」:Loading / Ready / Failed 都可进入 Analyzing;Analyzing 时 no-op。 */
+    data object ManualReanalyze : LoopPageEvent
 
     data class SelectCandidate(val index: Int) : LoopPageEvent
 
@@ -224,6 +229,14 @@ object LoopPageReducer {
     ): Pair<LoopPageState, List<LoopPageEffect>> {
         if (event is LoopPageEvent.Back) {
             return state to listOf(LoopPageEffect.NavigateBack)
+        }
+        if (event is LoopPageEvent.ManualReanalyze) {
+            return if (state is LoopPageState.Analyzing) {
+                noEffects(state)
+            } else {
+                LoopPageState.Analyzing(AnalysisPhase.DECODING, 0f) to
+                    listOf(LoopPageEffect.RestartAnalysis)
+            }
         }
         return when (state) {
             is LoopPageState.Loading -> reduceLoading(state, event)
@@ -358,6 +371,18 @@ object LoopPageReducer {
         val candidate = state.candidates.getOrNull(index) ?: return noEffects(state)
         val (aMs, bMs) = candidateWindowMs(candidate, state.sampleRate, state.durationMs)
         val startMs = modeStartMs(state.mode, aMs, bMs)
+
+        // 候选点击本身就是“试听”动作:
+        // - 正在播放 / 已在等预填 → AwaitingPrefill(00009:等新 ring,完成必补 Play);
+        // - Stopped / Paused(含首次进入)→ 立即起播,先把 sink 配置起来,避免
+        //   “等预填 seed 需要 sink,而 sink 又等 Play”的死锁。
+        val auditionImmediately = state.playback !is PlaybackState.Playing &&
+            state.playback !is PlaybackState.AwaitingPrefill
+        val playback = if (auditionImmediately) {
+            PlaybackState.Playing
+        } else {
+            PlaybackState.AwaitingPrefill(state.mode, startMs)
+        }
         val next = state.copy(
             selectedCandidate = index,
             aMs = aMs,
@@ -365,14 +390,17 @@ object LoopPageReducer {
             positionMs = startMs,
             drag = DragState.Idle,
             prefill = PrefillState.InProgress(0f),
-            // 00009:换窗口后先显式“等待预填”,预填就绪/失败时由 reducer 补发 Play。
-            playback = PlaybackState.AwaitingPrefill(state.mode, startMs),
+            playback = playback,
         )
-        return next to listOf(
+        val effects = mutableListOf<LoopPageEffect>(
             LoopPageEffect.CancelPrefill,
             LoopPageEffect.StartPrefill(next.window()),
             LoopPageEffect.SeekTo(startMs),
         )
+        if (auditionImmediately) {
+            effects += LoopPageEffect.Play(state.mode, startMs)
+        }
+        return next to effects
     }
 
     private fun dragStart(
@@ -620,6 +648,8 @@ object LoopPageReducer {
         LoopPageMode.FREE -> 0L
     }
 
-    private fun LoopPageState.Ready.window(): LoopWindow =
-        LoopWindow(songId, aMs * 1000L, bMs * 1000L)
 }
+
+/** [LoopPageState.Ready] 当前 A/B 对应的环形窗口(微秒);UI/effect runner 共用。 */
+fun LoopPageState.Ready.window(): LoopWindow =
+    LoopWindow(songId, aMs * 1000L, bMs * 1000L)
