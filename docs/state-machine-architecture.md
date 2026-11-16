@@ -11,7 +11,9 @@
 | `app/src/test/java/com/zjr/hesimusic/core/statemachine/MatrixTestSelfTest.kt` | 框架自测（10 个用例，见 §3.5） |
 | `app/src/main/java/com/zjr/hesimusic/ui/player/state/PlayerPageState.kt` | 播放页纯模型：状态 / 事件 / effect / reducer / 不变量 |
 | `app/src/main/java/com/zjr/hesimusic/ui/player/state/PlayerPageStateMachine.kt` | 播放页合法状态域（10 代表实例）、事件全集（19 夹具）、effect 类型声明 |
-| `app/src/test/java/com/zjr/hesimusic/ui/player/state/PlayerPageReducerTest.kt` | `PlayerPageReducerTest`（190 矩阵用例）+ 矩阵闸门 + 5 条规则命名用例，共 224 个新测试 |
+| `app/src/main/java/com/zjr/hesimusic/ui/player/state/PlayerPageShadow.kt` | 第二阶段影子双跑：`PlayerSnapshot`、`project`、`diff`、`PlayerPageShadow`、诊断计数器 |
+| `app/src/test/java/com/zjr/hesimusic/ui/player/state/PlayerPageReducerTest.kt` | `PlayerPageReducerTest`（190 矩阵用例）+ 矩阵闸门 + 19 条规则命名用例 |
+| `app/src/test/java/com/zjr/hesimusic/ui/player/state/PlayerPageShadowTest.kt` | 影子双跑 27 个用例（project/diff/事件序列/seek 抑制/零 effect） |
 
 纪律：未修改 `ui/player/PlayerScreen.kt`、`ui/common/MusicViewModel.kt`、`ui/loop/**`、`loop/**`、`service/**`、`data/**`、`di/**`、gradle、debug 源集；未安装依赖、未操作设备、未 commit。
 
@@ -243,8 +245,9 @@ fun reduce(
 | 框架自测 | 10 |
 | 矩阵闸门/一致性用例 | 5 |
 | 规则命名用例 | 19 |
-| 本轮新增测试合计 | **224** |
-| 全量单测（最终） | **892，0 失败** |
+| 影子双跑用例 | 27 |
+| 本轮新增测试合计 | **251** |
+| 全量单测（第二阶段完成时） | **1022，0 失败** |
 
 矩阵闸门测试同时断言：
 
@@ -421,6 +424,85 @@ MUTANT 期间产生的红是真实 JUnit 失败（非手工断言），恢复后
 
 ---
 
+## 6.5 第二阶段落地：影子双跑（只观测）
+
+实现文件：`ui/player/state/PlayerPageShadow.kt`（纯 Kotlin）+ `MusicViewModel` 的 debug 接线 + debug `/state`。
+**没有切换读路径、没有切换写路径、没有删除旧字段、没有执行任何 effect。**
+
+### 快照与投影
+
+`PlayerSnapshot` 是 VM 与模型之间的边界（纯 Kotlin，无 Media3 依赖）：
+
+| 字段 | 来源 / 说明 |
+|---|---|
+| `songId` | `currentPlayingSongId` |
+| `isPlaying` / `positionMs` | `isPlaying` / `currentPosition`（已做无缝窗口展示折返） |
+| `repeat` / `shuffle` | Media3 `repeatMode` / `shuffleModeEnabled`，映射为 `RepeatMode` |
+| `playbackState` | Media3 `STATE_*` → `IDLE/BUFFERING/READY/ENDED/ERROR` |
+| `errorMessage` | `controller.playerError?.message` |
+| `seamlessIntent` | `LoopIntent.armed` 且当前歌匹配且实际模式为 `ONE/false` 时填入 `SeamlessIntent` |
+| `dragMs/pendingSeek*` | VM 通常为 null；给单测/后续接 UI 预留 |
+| `nowMs` | 调用方注入（接 UI 用 `elapsedRealtime`） |
+
+`project` 映射口径：
+
+- 拖拽 / pendingSeek 优先 → `Seeking`（VM 无 UI 本地字段时不会出现）；
+- `errorMessage`（或 `state=ERROR`）→ `Error`；
+- `ENDED` → `Ended`；无歌 `IDLE` → `Idle`；
+- `READY/BUFFERING` → 按 `isPlaying` 映射 `Playing/Paused`；
+- **归一化** `shuffle=true && repeat=ONE`：投影按状态机不变量视为 `shuffle=false`，
+  避免服务层「先写 repeat=ONE、再关 shuffle」的中间帧投影出非法状态；
+- `seamless` 只在 armed 歌匹配且投影模式合法时进入。
+
+### 事件订阅（由快照差量翻译）
+
+| 快照变化 | 喂给 reducer 的事件 |
+|---|---|
+| 切歌（首次装歌以投影为起点） | `TrackChanged(songId, hasLoopIntent)` |
+| armed 歌 + 模式变为 ONE/false（或 armed 变化） | `EnterSeamless` / `ExitSeamless` |
+| `isPlaying` 变化 | `Play` / `Pause` |
+| repeat / shuffle 变化（按归一化口径） | `SetRepeat` / `SetShuffle` |
+| 出现新错误 | `PlaybackError` |
+| `STATE_ENDED` | `PlaybackEnded` |
+| 每次观测 | `PositionTick`（seek 抑制窗口内除外） |
+
+`PlayerPageShadow` 只记录 reducer 产生的 effect（`ShadowObservation.effects`），从不调用播放器。
+`PlayerPageShadowTest.shadowNeverExecutesEffects` 用 fake runner 断言调用次数为 0。
+
+### 与“逐次对比”相关的两个收敛窗口
+
+1. **显式 seek**：`seekTo()` 后通知影子；2s 内（与 VM 的位置刷新窗口一致）不做对比，
+   否则 MediaController 的旧位置快照会把“seek 尚未生效”误报成模型差异；
+2. **结构切换帧**：切歌 / 进出无缝 / repeat/shuffle 写序的第一帧若产生差异，记为
+   `suppressed`（不增加 mismatch 计数），下一帧稳定观测仍会捕获持续差异。
+   这样“服务层写序的瞬态”不会污染 `shadowMismatchCount`，但持续不一致不会被吞掉。
+
+### debug-only 接线与 /state
+
+- 开关：main 的 `PlayerPageShadowGate.enabled` 默认 false；只有 debug 源集的
+  `DebugInitProvider` 在进程启动时置 true。release 不创建影子对象。
+- `MusicViewModel` 在每次 `updateState()` 的 `_uiState` 更新后调用影子；`seekTo()`
+  额外通知一次 seek。除影子自己的状态外不写任何字段、不执行 effect。
+- `/state` 的 playback 下新增：
+
+```json
+"shadow": {
+  "enabled": true,
+  "mismatchCount": 0,
+  "shadowMismatchCount": 0,
+  "suppressedCount": 3,
+  "lastMismatches": [],
+  "lastExpected": "Playing(positionMs=..., mode=...)",
+  "lastActual": "Playing(positionMs=..., mode=...)",
+  "lastObservedAtMs": 123456
+}
+```
+
+真机复测时看 `playback.shadow.mismatchCount` 是否为 0；若不为 0，
+`lastMismatches` 直接给出字段名与 expected/actual。
+
+---
+
 ## 7. 风险评估
 
 | 风险 | 影响 | 缓解 |
@@ -449,4 +531,5 @@ MUTANT 期间产生的红是真实 JUnit 失败（非手工断言），恢复后
 .\.\gradlew.bat :app:testDebugUnitTest
 ```
 
-结果：新增 224 个测试全绿；全量 892 个测试、0 失败。未接入 UI，未修改任何被禁止的现有文件。
+结果：阶段一新增 224 个测试、阶段二新增 27 个影子测试，共 251 个新测试全绿；全量 1022 个测试、0 失败。
+未切换读写路径、未执行 effect、未修改任何被禁止的现有文件。

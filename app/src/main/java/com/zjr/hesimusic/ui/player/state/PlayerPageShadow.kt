@@ -507,6 +507,8 @@ object PlayerPageShadowDiagnostics {
     fun snapshotMap(): Map<String, Any?> = linkedMapOf(
         "enabled" to PlayerPageShadowGate.enabled,
         "mismatchCount" to shadowMismatchCount,
+        // 兼容任务里约定的计数器名；/state 消费者两个键都能读。
+        "shadowMismatchCount" to shadowMismatchCount,
         "suppressedCount" to shadowSuppressedCount,
         "lastMismatches" to lastMismatches.take(5),
         "lastExpected" to lastExpected,
