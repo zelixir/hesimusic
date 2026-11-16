@@ -98,6 +98,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -650,10 +651,12 @@ private fun ResultContent(
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
             )
+            // 必须有**有界**高度才能滚动:ModalBottomSheet 的内容 Column 高度是 wrapContent,
+            // weight(1f) 在这里换不到空间,LazyColumn 只会渲染到约一行(issue 00012:后续候选被遮挡)。
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f, fill = false)
+                    .heightIn(max = 460.dp)
                     .navigationBarsPadding(),
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
             ) {
