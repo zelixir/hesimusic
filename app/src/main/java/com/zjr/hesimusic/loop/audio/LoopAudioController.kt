@@ -149,13 +149,21 @@ class LoopAudioController @Inject constructor() {
     @Volatile
     var seamBufferMode: SeamBufferMode = SeamBufferMode.OFF
 
+    /** 00017 sink 路由总开关；默认 false，需真机验证时单独打开。 */
+    @Volatile
+    var seamSinkRouteEnabled: Boolean = false
+
+    /** 接缝半窗 Δ；默认 1s。 */
+    @Volatile
+    var seamDeltaUs: Long = 1_000_000L
+
     /** 长窗口（>30s）才允许启用接缝缓冲；短窗口继续 M3′。 */
     val seamWindowEligible: Boolean
         get() = (window?.lengthUs ?: 0L) > 30_000_000L
 
     val seamActiveForWindow: Boolean
-        get() = seamBufferMode == SeamBufferMode.ON && seamWindowEligible &&
-            seamDecodeRange != null && seamSeekRequested != null
+        get() = seamBufferMode == SeamBufferMode.ON && seamSinkRouteEnabled &&
+            seamWindowEligible && seamDecodeRange != null && seamSeekRequested != null
 
     /** 服务层注入：按环内帧范围精确解码 PCM16（X/Y/defer）。失败返回 null。 */
     @Volatile

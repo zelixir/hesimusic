@@ -15,7 +15,7 @@ class LoopSeamSpliceBuffer(
     val windowStartFrame: Long,
     val windowEndFrame: Long,
     val deltaFrames: Long,
-    private val decodeRange: (startFrame: Long, endFrame: Long) -> ByteArray,
+    private val decodeRange: (startFrame: Long, endFrame: Long) -> ByteArray?,
 ) {
 
     enum class State {
@@ -78,7 +78,7 @@ class LoopSeamSpliceBuffer(
     /** 预解码 X=[B-Δ,B)（无需 warm-up 首轮捕获）。 */
     fun prepareSeamPrefix(): Boolean {
         if (seam.isEmpty()) return false
-        val pcm = decodeRange(windowEndFrame - deltaFrames, windowEndFrame)
+        val pcm = decodeRange(windowEndFrame - deltaFrames, windowEndFrame) ?: return false
         val need = seamBytesPerHalf
         if (pcm.size < need) return false
         System.arraycopy(pcm, 0, seam, 0, need)
@@ -109,7 +109,7 @@ class LoopSeamSpliceBuffer(
     /** 精确解码 Y=[A,A+Δ) 并安装到 S 后半段。 */
     fun prepareSeamSuffix(): Boolean {
         if (seam.isEmpty()) return false
-        val pcm = decodeRange(windowStartFrame, windowStartFrame + deltaFrames)
+        val pcm = decodeRange(windowStartFrame, windowStartFrame + deltaFrames) ?: return false
         val need = seamBytesPerHalf
         if (pcm.size < need) return false
         System.arraycopy(pcm, 0, seam, seamBytesPerHalf, need)
@@ -182,7 +182,7 @@ class LoopSeamSpliceBuffer(
         if (state != State.RESUMING_SOURCE) return null
         val start = resumeFrame()
         val end = start + deltaFrames
-        val pcm = decodeRange(start, end)
+        val pcm = decodeRange(start, end) ?: return null
         val need = seamBytesPerHalf
         if (pcm.size < need) return null
         System.arraycopy(pcm, 0, seam, seamBytesPerHalf, need)

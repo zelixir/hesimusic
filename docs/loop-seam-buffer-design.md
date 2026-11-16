@@ -84,9 +84,15 @@ IDLE
 | seek/循环不稳定设备 | M3′/透传兜底 |
 | 需要严格逐样本跨接缝 | Seam Splice（X 实时捕获） |
 
-## 8. 原型范围
+## 8. 接线状态（00017 第二步）
 
-- `LoopSeamSpliceBuffer`：纯 Kotlin 状态机与缓冲，不接 Android；
-- `SeamBufferMode`：`OFF`（默认）/ `ON`，当前只作为开关占位，默认路径不启用；
-- 生产接线点（后续）：`LoopAudioSink.handleBuffer` 在 normal/seam 状态间路由，
-  `LoopAudioController` 在窗口写入后准备 Y 并调度 seek。
+- `LoopSeamSpliceBuffer`：纯 Kotlin 状态机与缓冲；
+- `SeamBufferMode` 默认 `OFF`；
+- 真机验证开关：`seamSinkRouteEnabled` 默认 false；只有
+  `seamActiveForWindow && seamSinkRouteEnabled` 才进入 sink 路由；
+- `LoopAudioSink` 路由：NORMAL 源直通到 B−Δ → 在线校验 → SEAM 输出 X/Y →
+  `seamSeekRequested(A+Δ)` → WAIT_SOURCE → `handleDiscontinuity` + 源写回；
+  S 背压走 `seamQueue/pendingSeam`，部分消费重试；
+- provider 注入：`LoopPlaybackCoordinator` 提供 `seamDecodeRange`（缓存 + 后台 Δ 解码）
+  与 `seamSeekRequested`（独立 seek，绕过 degrade backward 拦截）；
+- 默认 `OFF` 时 sink 仍走 M3′，不改 PTS/位置投影。

@@ -51,6 +51,83 @@ class LoopAudioSinkTest {
     private fun expectedRing(): ByteArray =
         PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(100, 100))
 
+    @Test
+    fun `seam 开关打开时 NORMAL 到 SEAM 再回源 三圈逐样本一致`() {
+        val (controller, sink, fake) = rig(window(2000, 62000))
+        controller.seamBufferMode = SeamBufferMode.ON
+        controller.seamSinkRouteEnabled = true
+        controller.seamDeltaUs = 1_000_000L
+        controller.seamDecodeRange = { s, e ->
+            PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(s.toInt(), (e - s).toInt()))
+        }
+        val seeks = mutableListOf<Long>()
+        controller.seamSeekRequested = { seeks.add(it) }
+
+        fun feedRange(startFrame: Int, frames: Int, chunk: Int = 1000) {
+            var f = startFrame
+            val end = startFrame + frames
+            while (f < end) {
+                val n = minOf(chunk, end - f)
+                assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(f, n), f * 1000L))
+                f += n
+            }
+        }
+
+        // 第一圈：A..B-Δ + S 的 X
+        feedRange(2000, 59_000)
+        feedRange(61_000, 1000)
+        // S 已输出 Y，源 seek 到 A+Δ；第二圈
+        feedRange(3000, 58_000)
+        feedRange(61_000, 1000)
+        // 第三圈
+        feedRange(3000, 58_000)
+        feedRange(61_000, 1000)
+
+        val out = ByteArrayOutputStream()
+        fake.feeds.forEach { out.write(it.bytes) }
+        val actual = out.toByteArray()
+        val expected = PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(2000, 60_000)) +
+            PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(2000, 60_000)) +
+            PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(2000, 60_000))
+        assertArrayEquals(
+            "三圈输出必须与理论 [A,B) 逐样本一致",
+            expected,
+            actual.copyOf(expected.size),
+        )
+        assertTrue("应完成 3 次 S 切换: " + sink.seamDebugStats(), sink.seamDebugStats().contains("switch=3"))
+        assertTrue("切换点样本缺口应为 0: " + sink.seamDebugStats(), sink.seamDebugStats().contains("gap=0"))
+        assertTrue("每圈应请求 seek A+Δ: " + seeks, seeks.size >= 2)
+        assertTrue("seek 目标应为 A+Δ", seeks.all { it == 3_000_000L })
+        assertTrue("切回源应调用 discontinuity", fake.discontinuityCalls >= 2)
+    }
+
+    @Test
+    fun `seam S 输出被 delegate 部分消费时不丢帧`() {
+        val (controller, sink, fake) = rig(window(0, 31_000), maxFramesPerCall = 3)
+        controller.seamBufferMode = SeamBufferMode.ON
+        controller.seamSinkRouteEnabled = true
+        controller.seamDeltaUs = 1_000_000L
+        controller.seamDecodeRange = { s, e ->
+            PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(s.toInt(), (e - s).toInt()))
+        }
+        controller.seamSeekRequested = { }
+
+        var f = 0
+        while (f < 30_000) {
+            assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(f, 3), f * 1000L))
+            f += 3
+        }
+        assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(30_000, 1000), 30_000_000L))
+
+        val seamFeeds = fake.feeds.filter { it.ptsUs >= 30_000_000L && it.ptsUs < 32_000_000L }
+        assertEquals("S 必须完整输出 X+Y 共 2Δ", 2000, seamFeeds.sumOf { it.frames })
+        val actualSeam = seamFeeds.flatMap { it.bytes.toList() }.toByteArray()
+        val expectedSeam = PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(30_000, 1000)) +
+            PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(0, 1000))
+        assertArrayEquals(expectedSeam, actualSeam)
+        assertTrue(sink.seamDebugStats().contains("switch=1"))
+    }
+
     // ---------------------------------------------------------------- 捕获/切帧
 
     @Test
