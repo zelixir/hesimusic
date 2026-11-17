@@ -74,7 +74,6 @@ class SongListTest {
         )
     }
 
-
     @Test
     fun `track number ordering sorts by trackNumber then title`() {
         val songs = listOf(

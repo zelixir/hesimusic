@@ -34,6 +34,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -105,8 +106,10 @@ fun MainScreen(
     //   - 页面返回 → epoch 不变 → 标志保留 → 保留用户原有滚动位置,不跳。
     // 这里必须在组合期同步推进(而不是 LaunchedEffect 里),这样重新组合的目标页在同一帧就拿到的
     // 是新 epoch,不会先按旧标志恢复一次滚动位置再纠正(避免一帧闪跳)。
-    var viewEpoch by remember { mutableStateOf(0) }
-    var lastViewPagerPage by remember { mutableStateOf(pagerState.currentPage) }
+    // 两者都用 rememberSaveable:旋转/进程重建后 epoch 与记录的页号一起恢复,不会因为
+    // "epoch 复位成 0 而 saveable 标志还停在旧 epoch" 误触发一次定位。
+    var viewEpoch by rememberSaveable { mutableStateOf(0) }
+    var lastViewPagerPage by rememberSaveable { mutableStateOf(pagerState.currentPage) }
     val currentViewPagerPage = pagerState.currentPage
     if (currentViewPagerPage != lastViewPagerPage) {
         viewEpoch = nextViewEpoch(lastViewPagerPage, currentViewPagerPage, viewEpoch)
