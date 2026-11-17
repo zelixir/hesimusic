@@ -14,6 +14,23 @@ object LoopPreviewDebugBridge {
     var lastRequestedMs: Long? = null
         private set
 
+    /**
+     * 预览播放器用的是**独立**的 [com.zjr.hesimusic.loop.audio.LoopAudioController]
+     * 实例，和主播放不共享。所以 /debug/tap 必须同时把 tap 设到预览实例上，
+     * 否则 SOURCE 路径写 PCM 时 tapOut 永远是 null。
+     */
+    @Volatile
+    var tapSink: ((java.io.File?) -> Unit)? = null
+        private set
+
+    fun registerTap(handler: ((java.io.File?) -> Unit)?) {
+        tapSink = handler
+    }
+
+    fun setTap(file: java.io.File?) {
+        tapSink?.invoke(file)
+    }
+
     fun register(handler: (Long) -> Unit) {
         seekRequest = handler
     }

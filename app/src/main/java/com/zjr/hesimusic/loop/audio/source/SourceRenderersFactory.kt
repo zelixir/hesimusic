@@ -34,6 +34,7 @@ class TapAudioSink(
         specifiedBufferSize: Int,
         outputChannels: IntArray?,
     ) {
+        controller.tapEngineSeamsEnabled = false
         if (MimeTypes.AUDIO_RAW == inputFormat.sampleMimeType &&
             inputFormat.channelCount > 0 &&
             inputFormat.sampleRate > 0

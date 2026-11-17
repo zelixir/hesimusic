@@ -96,6 +96,30 @@ class LoopingPcmSourceCoreLoopTest {
     }
 
     @Test
+    fun `seam callback fires once per loop across long playback`() {
+        val tl = LoopingPcmTestSupport.timeline(
+            aUs = 5_000_000L,
+            bUs = 20_000_000L,
+            sr = 48_000,
+        )
+        val provider = LoopingPcmTestSupport.provider(tl)
+        val core = LoopingPcmSourceCore(tl, provider)
+        var seams = 0
+        core.onSeamOutputFrames = { seams += 1 }
+
+        var frames = 0L
+        while (frames < 40L * 48_000L) {
+            val r = core.read(7_680)
+            if (r == null) {
+                core.pumpDecode()
+                continue
+            }
+            frames += r.frames
+        }
+        assertTrue("40s with L=15s should have 2..3 seams, got " + seams, seams in 2..3)
+    }
+
+    @Test
     fun `B to A seam reports cumulative output frame at loop boundary`() {
         val tl = LoopingPcmTestSupport.timeline()
         val provider = LoopingPcmTestSupport.provider(tl)

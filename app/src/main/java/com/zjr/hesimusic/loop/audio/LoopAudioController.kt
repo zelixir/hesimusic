@@ -50,6 +50,23 @@ class LoopAudioController @Inject constructor() {
      * 写入时同步到引擎（会重建 ring），并在后台按 window/format 预分配 ring；
      * sink 在音频回调里只做容量校验，不会做大分配。
      */
+    /**
+     * tap 专用的真实循环窗口。SOURCE 的 sink configure 会临时把 [window] 置 null，
+     * 因此 run 事件不能只依赖 [window]；PreviewPlayer 在写 source window 时同步写这里。
+     */
+    @Volatile
+    var tapWindow: LoopWindow? = null
+        set(value) {
+            field = value
+            synchronized(tapLock) {
+                writeTapRunLocked()
+            }
+        }
+
+    /** SOURCE 只使用 core 的 seam；引擎 seam 不应重复写进 tap 侧车。 */
+    @Volatile
+    internal var tapEngineSeamsEnabled: Boolean = true
+
     @Volatile
     var window: LoopWindow? = null
         set(value) {
@@ -333,6 +350,9 @@ class LoopAudioController @Inject constructor() {
     private var tapFailed = false
     private var tapLogCount = 0L
     private var lastTapLogMs = 0L
+    private var lastTapSeamOutFrames: Long = -1L
+    private var tapHeaderBytes: Long = 0L
+    private var lastTapHeaderMs: Long = 0L
 
     // tap 侧车事件: <file.name>.jsonl
     private var tapEventFile: File? = null
@@ -454,8 +474,10 @@ class LoopAudioController @Inject constructor() {
         // sink 释放后不再有搭载点，丢弃等待中的预填。
         synchronized(seedLock) { pendingSeed = null }
         engine.onRelease()
+        // sink 释放时结束本次 tap 段并回填 WAV 头，但保持文件句柄打开：
+        // M3′ sink 释放不应把 SOURCE 正在写的 tap 关掉。
         synchronized(tapLock) {
-            closeTapLocked()
+            if (tapOut != null) finishTapSegmentLocked("sinkRelease")
         }
     }
 
@@ -559,6 +581,12 @@ class LoopAudioController @Inject constructor() {
             try {
                 out.write(data)
                 tapDataBytes += safeLength.toLong()
+                val nowMs = System.currentTimeMillis()
+                if (tapDataBytes - tapHeaderBytes >= 1_000_000L ||
+                    nowMs - lastTapHeaderMs >= 1_000L
+                ) {
+                    updateTapHeaderLocked(out)
+                }
             } catch (e: IOException) {
                 tapFailed = true
                 closeTapLocked()
@@ -581,6 +609,8 @@ class LoopAudioController @Inject constructor() {
             raf.seek(44L)
             tapOut = raf
             tapDataBytes = 0L
+            tapHeaderBytes = 0L
+            lastTapHeaderMs = System.currentTimeMillis()
             tapDebug("tapOpened file=" + file + " sr=" + fmt.sampleRate + " ch=" + fmt.channels)
         } catch (t: Throwable) {
             tapFailed = true
@@ -592,7 +622,43 @@ class LoopAudioController @Inject constructor() {
         }
     }
 
-    private fun closeTapLocked() {
+    private fun finishTapSegmentLocked(reason: String) {
+        val out = tapOut ?: return
+        val fmt = tapFormat
+        val bpf = fmt?.bytesPerFrame ?: 0
+        val totalFrames = if (bpf > 0) tapDataBytes / bpf else 0L
+        tapDebug("tapSegmentEnd reason=" + reason + " frames=" + totalFrames)
+        writeTapEventLocked(
+            "end",
+            "totalFrames" to totalFrames,
+            "frames" to totalFrames,
+            "flushCount" to tapFlushCount,
+            "degradeCount" to engine.degradeCount,
+        )
+        updateTapHeaderLocked(out)
+        tapFlushCount = 0L
+    }
+
+    private fun updateTapHeaderLocked(out: RandomAccessFile) {
+        val fmt = tapFormat ?: return
+        try {
+            val pos = out.filePointer
+            out.seek(0L)
+            out.write(buildWavHeader(fmt, tapDataBytes))
+            out.seek(pos)
+            tapHeaderBytes = tapDataBytes
+            lastTapHeaderMs = System.currentTimeMillis()
+        } catch (e: IOException) {
+            tapFailed = true
+        }
+    }
+
+    private fun closeTapLocked(reason: String = "unknown") {
+        tapWindow = null
+        tapDebug(
+            "tapClosed reason=" + reason + " bytes=" + tapDataBytes +
+                " out=" + (tapOut != null) + " failed=" + tapFailed,
+        )
         val fmt = tapFormat
         val bpf = fmt?.bytesPerFrame ?: 0
         val totalFrames = if (bpf > 0) tapDataBytes / bpf else 0L
@@ -634,13 +700,20 @@ class LoopAudioController @Inject constructor() {
     /** SOURCE 数据源 B→A 环回：写入与 PCM 累计帧严格对应的 seam 事件。 */
     internal fun tapSeam(outFrames: Long) {
         synchronized(tapLock) {
-            if (tapEventOut != null) {
-                writeTapEventLocked("seam", "outFrames" to outFrames)
+            if (tapEventOut == null) return
+            val sr = tapFormat?.sampleRate ?: 0
+            if (sr > 0 && lastTapSeamOutFrames >= 0L && outFrames <= lastTapSeamOutFrames + sr / 2L) {
+                tapDebug("tapSeam dedupe outFrames=" + outFrames + " last=" + lastTapSeamOutFrames)
+                return
             }
+            lastTapSeamOutFrames = outFrames
+            tapDebug("tapSeam outFrames=" + outFrames)
+            writeTapEventLocked("seam", "outFrames" to outFrames)
         }
     }
 
     private fun onEngineSeam(iter: Long, engineOutFrames: Long, ptsUs: Long) {
+        if (!tapEngineSeamsEnabled) return
         synchronized(tapLock) {
             val bpf = tapFormat?.bytesPerFrame ?: 0
             val outFrames = if (bpf > 0 && tapDataBytes > 0L) {
@@ -701,7 +774,7 @@ class LoopAudioController @Inject constructor() {
     private fun writeTapRunLocked() {
         if (tapEventOut == null) return
         // 窗口未就绪时不要先写一条 aMs/bMs=null 的 run；等 window setter 再写。
-        val w = window ?: return
+        val w = tapWindow ?: window ?: return
         if (tapRunWritten && tapRunWindow == w) return
         val sampleRate = tapFormat?.sampleRate ?: 0
         val aMs = w.loopStartUs / 1000L

@@ -215,6 +215,7 @@ class PreviewPlayer @Inject constructor(
         window = newWindow
         controller.fullDurationUs = duration * 1000L
         controller.window = newWindow
+        controller.tapWindow = newWindow
         prepared = true
         pendingSeekMs = null
         _positionMs.value = aa
@@ -355,6 +356,7 @@ class PreviewPlayer @Inject constructor(
         this.window = window
         degradeRetryUsed = false
         controller.window = window
+        controller.tapWindow = window
         updatePositionOnce()
     }
 
@@ -458,6 +460,7 @@ class PreviewPlayer @Inject constructor(
         val newWindow = buildWindow(song.id, aa, bb, allowLong = LoopSourceMode.isSource())
         window = newWindow
         controller.window = newWindow
+        controller.tapWindow = newWindow
 
         val p = player
         if (shouldUseSource(this.mode) && p != null && engineKind == EngineKind.SOURCE) {
@@ -506,6 +509,7 @@ class PreviewPlayer @Inject constructor(
         releasePlayerOnly()
         handler.removeCallbacks(ticker)
         controller.window = null
+        controller.tapWindow = null
         controller.fullDurationUs = 0L
         song = null
         window = null
@@ -613,6 +617,8 @@ class PreviewPlayer @Inject constructor(
                 // HTTP/debug 线程 → 播放器必须回到主线程。
                 handler.post { seekToDisplayMs(positionMs) }
             }
+            // 预览用独立 controller:把 tap 也镜像到它，否则 SOURCE 路径的 tapOut 恒为 null。
+            LoopPreviewDebugBridge.registerTap { file -> controller.setPcmTap(file) }
         }
         player = p
         engineKind = kind
@@ -656,6 +662,7 @@ class PreviewPlayer @Inject constructor(
 
     private fun releasePlayerOnly() {
         LoopPreviewDebugBridge.unregister()
+        LoopPreviewDebugBridge.registerTap(null)
         handler.removeCallbacks(ticker)
         val p = player
         player = null
@@ -674,6 +681,7 @@ class PreviewPlayer @Inject constructor(
         sourceActive = false
         engineKind = EngineKind.M3
         controller.window = null
+        controller.tapWindow = null
         controller.onDegradeRequested = null
         _isReplaying.value = false
         _ringReady.value = false
@@ -738,6 +746,7 @@ class PreviewPlayer @Inject constructor(
             sourceActive = true
             markSourceReadyFromState(p)
             controller.window = window
+            controller.tapWindow = window
             controller.fullDurationUs = _durationMs.value * 1000L
             Log.d(
                 TAG,
@@ -774,11 +783,13 @@ class PreviewPlayer @Inject constructor(
         }
         window = w
         controller.window = w
+        controller.tapWindow = w
     }
 
     private fun applyFreeShape() {
         window = null
         controller.window = null
+        controller.tapWindow = null
     }
 
     /**

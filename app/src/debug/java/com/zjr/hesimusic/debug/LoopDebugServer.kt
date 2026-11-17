@@ -1361,6 +1361,8 @@ object LoopDebugServer {
         }
         try {
             d.loopAudioController().setPcmTap(file)
+            // 预览页用的是独立 controller，必须同步镜像，否则 SOURCE 路径写不到 PCM。
+            com.zjr.hesimusic.loop.audio.source.LoopPreviewDebugBridge.setTap(file)
         } catch (t: Throwable) {
             Log.e(TAG, "pcm tap setup failed", t)
             throw HttpError(500, "tap failed: ${t.message}")
