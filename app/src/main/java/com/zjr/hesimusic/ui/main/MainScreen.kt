@@ -97,6 +97,21 @@ fun MainScreen(
     val pagerState = rememberPagerState(pageCount = { 6 })
     val scope = rememberCoroutineScope()
     val titles = listOf("歌曲", "歌单", "收藏", "文件夹", "歌手", "专辑")
+
+    // 视图 epoch(issue 00002 回归):只在 pager 当前页变化(= 切换视图/tab)时 +1,
+    // 从播放页 / 详情页 / 无缝循环分析页返回时不变。
+    // 各列表把它当作「已自动定位当前播放歌」标志的 key:
+    //   - 切到别的视图再切回 → epoch 变化 → 标志失效 → 重新定位当前播放歌(本次修复的回归点);
+    //   - 页面返回 → epoch 不变 → 标志保留 → 保留用户原有滚动位置,不跳。
+    // 这里必须在组合期同步推进(而不是 LaunchedEffect 里),这样重新组合的目标页在同一帧就拿到的
+    // 是新 epoch,不会先按旧标志恢复一次滚动位置再纠正(避免一帧闪跳)。
+    var viewEpoch by remember { mutableStateOf(0) }
+    var lastViewPagerPage by remember { mutableStateOf(pagerState.currentPage) }
+    val currentViewPagerPage = pagerState.currentPage
+    if (currentViewPagerPage != lastViewPagerPage) {
+        viewEpoch = nextViewEpoch(lastViewPagerPage, currentViewPagerPage, viewEpoch)
+        lastViewPagerPage = currentViewPagerPage
+    }
     val musicUiState by musicViewModel.uiState.collectAsState()
     val sleepTimerState by musicViewModel.sleepTimerState.collectAsState()
     val savedPlaylistContext by musicViewModel.savedPlaylistContext.collectAsState()
@@ -432,6 +447,7 @@ fun MainScreen(
                                     batchSelectedSongIds + song.id
                                 }
                             },
+                            viewEpoch = viewEpoch,
                             appLogger = appLogger
                         )
                     }
@@ -467,7 +483,8 @@ fun MainScreen(
                                 }
                             },
                             onPlaylistSongsVisibleChanged = { isPlaylistSongsVisible = it },
-                            queueDisplayBySongId = buildQueueDisplayBySongId(playQueueSongIds)
+                            queueDisplayBySongId = buildQueueDisplayBySongId(playQueueSongIds),
+                            viewEpoch = viewEpoch
                         )
                     }
                     2 -> {
@@ -502,6 +519,7 @@ fun MainScreen(
                                     batchSelectedSongIds + song.id
                                 }
                             },
+                            viewEpoch = viewEpoch,
                             appLogger = appLogger
                         )
                     }
@@ -516,6 +534,7 @@ fun MainScreen(
                                 Log.d("MainScreen", "FolderList: playing song at index $index in folder $folderPath")
                                 musicViewModel.playList(list, index, PlaylistContext(PlaylistType.FOLDER, folderPath))
                             },
+                            viewEpoch = viewEpoch,
                             appLogger = appLogger
                         )
                     }
@@ -584,6 +603,17 @@ fun MainScreen(
         }
     }
 }
+
+/**
+ * 视图 epoch 推进(issue 00002 回归)。只有 pager 当前页发生变化(= 切换视图/tab)时才 +1;
+ * 从播放页 / 详情页 / 无缝循环分析页返回时页号不变,epoch 也不变。
+ *
+ * 必须用单调递增计数,不能直接把 pager 页号当 epoch:0 → 1 → 0 切回「歌曲」时页号回到旧值,
+ * HorizontalPager 经 SaveableStateHolder 恢复出来的「已自动定位当前播放歌」标志会重新生效,
+ * 于是不再定位——这正是 00002 的根因。
+ */
+internal fun nextViewEpoch(previousPage: Int, currentPage: Int, currentEpoch: Int): Int =
+    if (previousPage == currentPage) currentEpoch else currentEpoch + 1
 
 internal fun playlistTypeToTabIndex(type: PlaylistType): Int = when (type) {
     PlaylistType.GLOBAL -> 0

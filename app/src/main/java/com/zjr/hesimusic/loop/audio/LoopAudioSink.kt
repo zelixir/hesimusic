@@ -388,8 +388,15 @@ class LoopAudioSink(
         }
 
         // NORMAL：只放行到 B-Δ；跨过边界就切 S。
-        val bDeltaFrame = seam.windowEndFrame - seam.deltaFrames
-        val bDeltaUs = frameToUsCeil(bDeltaFrame)
+        // 判定统一用 media µs：bDeltaUs = B - Δ（不从帧号反推，避免帧量化/口径差）。
+        val currentWindow = controller.window
+        val bDeltaUs = if (currentWindow != null) {
+            (currentWindow.loopEndUs - controller.seamDeltaUs)
+                .coerceAtLeast(currentWindow.loopStartUs)
+        } else {
+            frameToUsCeil(seam.windowEndFrame - seam.deltaFrames)
+        }
+        val bDeltaFrame = usToFrameCeil(bDeltaUs)
         val startFrame = usToFrameFloor(mediaPts)
         if (mediaPts >= bDeltaUs - 500_000L) {
             seamLog(
@@ -608,6 +615,14 @@ class LoopAudioSink(
     ): Boolean {
         val start = buffer.position()
         val end = minOf(start + bytes, restoreLimit)
+        if (mediaPtsUs >= (controller.window?.loopEndUs ?: Long.MAX_VALUE) - 3_000_000L ||
+            seamState != SeamRouteState.NORMAL || seamBypass
+        ) {
+            seamLog(
+                "source write pts=" + mediaPtsUs + " start=" + start + " end=" + end +
+                    " limit=" + restoreLimit + " state=" + seamState + " bypass=" + seamBypass,
+            )
+        }
         buffer.limit(end)
         val before = buffer.position()
         val accept: () -> Boolean = {
@@ -624,7 +639,9 @@ class LoopAudioSink(
                     "seam source write failed pts=" + mediaPtsUs +
                         " start=" + start + " end=" + end +
                         " pos=" + buffer.position() + " limit=" + buffer.limit() +
-                        " state=" + seamState,
+                        " state=" + seamState +
+                        " ex=" + t.javaClass.simpleName + ":" + t.message +
+                        " stack=" + t.stackTrace.take(3).joinToString(" <- "),
                     t,
                 )
             } catch (_: Throwable) {

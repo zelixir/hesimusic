@@ -59,6 +59,13 @@ fun SongList(
      * 默认空 map 保证未接入的调用点零改动;缺失的 songId 表示"无分析结果",不画符号。
      */
     loopConfirmed: Map<Long, Boolean> = emptyMap(),
+    /**
+     * 视图 epoch(issue 00002 回归):MainScreen 每次切换 tab 就 +1,详情页 / 无缝循环分析页返回不变。
+     * 它是「已自动定位当前播放歌」标志的 key:epoch 变化 → 旧标志被丢弃 → 回到列表重新定位一次;
+     * epoch 不变 → 标志保留 → 返回时不会把用户原本的滚动位置顶掉。
+     * 默认 0 保证未接入的调用点(以及详情页 SongListScreen)行为不变。
+     */
+    viewEpoch: Int = 0,
     modifier: Modifier = Modifier,
     appLogger: AppLogger? = null
 ) {
@@ -109,11 +116,13 @@ fun SongList(
         appLogger?.timing(TAG, "Song flattening", flattenDuration)
         result
     }
-    // 「本次进入列表后已自动定位过当前播放歌」的标志(issue 00002)。
+    // 「本次视图已自动定位过当前播放歌」的标志(issue 00002),记录的是定位成功时的 viewEpoch。
     // 必须是 rememberSaveable:从详情页 / 无缝循环分析页返回时列表会重新组合,普通 remember 会复位成
-    // false → 再按"当前播放歌"滚动一次,把用户原本的滚动位置覆盖掉(表现为"列表跳回正在播放的那首")。
-    // 首次进入列表时它仍是 false,原有"首次定位当前播放歌"的行为不变。
-    var hasAutoScrolledToCurrentSong by rememberSaveable { mutableStateOf(false) }
+    // 未定位 → 再按"当前播放歌"滚动一次,把用户原本的滚动位置覆盖掉(表现为"列表跳回正在播放的那首")。
+    // 但 saveable 不能跨「切换视图」存活:HorizontalPager 会保存/恢复本页的 saveable 状态,
+    // 切到歌单/收藏/文件夹再切回歌曲时标志仍是旧值 → 不再自动定位(00002 的回归点)。
+    // key 挂 viewEpoch:epoch 变化 → rememberSaveable 丢弃旧保存值 ←→ 详情页返回 epoch 不变 → 保留。
+    var autoScrolledViewEpoch by rememberSaveable(viewEpoch) { mutableStateOf(AUTO_SCROLL_NEVER) }
 
     // Calculate the starting index for each group for display
     val groupStartingIndices = remember(grouped) {
@@ -139,27 +148,35 @@ fun SongList(
 
     val sections = remember(grouped) { grouped.keys.toList() }
 
-    // Auto-scroll to currently playing song once when list is ready.
-    // Also listens to currentPlayingSongId so late restore after startup can still scroll.
-    LaunchedEffect(grouped, flattenedSongs, currentPlayingSongId, useTrackNumberOrdering) {
-        if (!hasAutoScrolledToCurrentSong && currentPlayingSongId != null && flattenedSongs.isNotEmpty()) {
-            // Find the song in the flattened list
-            // Note: MediaItem.mediaId is set as song.id.toString() in SongMapper.toMediaItem()
-            val currentSong = flattenedSongs.find { it.id.toString() == currentPlayingSongId }
-            if (currentSong != null) {
-                val scrollIndex = if (useTrackNumberOrdering) {
-                    flattenedSongs.indexOf(currentSong).takeIf { it != -1 }
-                } else {
-                    // Calculate scroll index by finding which group contains the song
-                    calculateScrollIndex(grouped, currentSong)
-                }
-                
-                if (scrollIndex != null) {
-                    // Scroll to the item instantly (no animation), centered if possible
-                    listState.scrollToItem(scrollIndex, scrollOffset = SCROLL_OFFSET_TO_CENTER_ITEM)
-                    hasAutoScrolledToCurrentSong = true
-                    Log.d(TAG, "Auto-scrolled to current song at index $scrollIndex")
-                }
+    // Auto-scroll to currently playing song once per view epoch when list is ready.
+    // Also listens to currentPlayingSongId so late restore after startup can still scroll,
+    // and to viewEpoch so switching views re-locates the song (issue 00002 regression).
+    LaunchedEffect(grouped, flattenedSongs, currentPlayingSongId, useTrackNumberOrdering, viewEpoch) {
+        if (!shouldAutoScrollToCurrentSong(
+                autoScrolledViewEpoch = autoScrolledViewEpoch,
+                viewEpoch = viewEpoch,
+                currentPlayingSongId = currentPlayingSongId,
+                hasItems = flattenedSongs.isNotEmpty()
+            )
+        ) {
+            return@LaunchedEffect
+        }
+        // Find the song in the flattened list
+        // Note: MediaItem.mediaId is set as song.id.toString() in SongMapper.toMediaItem()
+        val currentSong = flattenedSongs.find { it.id.toString() == currentPlayingSongId }
+        if (currentSong != null) {
+            val scrollIndex = if (useTrackNumberOrdering) {
+                flattenedSongs.indexOf(currentSong).takeIf { it != -1 }
+            } else {
+                // Calculate scroll index by finding which group contains the song
+                calculateScrollIndex(grouped, currentSong)
+            }
+
+            if (scrollIndex != null) {
+                // Scroll to the item instantly (no animation), centered if possible
+                listState.scrollToItem(scrollIndex, scrollOffset = SCROLL_OFFSET_TO_CENTER_ITEM)
+                autoScrolledViewEpoch = viewEpoch
+                Log.d(TAG, "Auto-scrolled to current song at index $scrollIndex (viewEpoch=$viewEpoch)")
             }
         }
     }
@@ -307,12 +324,4 @@ private fun calculateScrollIndex(grouped: Map<Char, List<Song>>, targetSong: Son
         scrollIndex += 1 + songsInGroup.size
     }
     return null
-}
-
-internal fun shouldAutoScrollToCurrentSong(
-    hasAutoScrolledToCurrentSong: Boolean,
-    currentPlayingSongId: String?,
-    grouped: Map<Char, List<Song>>
-): Boolean {
-    return !hasAutoScrolledToCurrentSong && currentPlayingSongId != null && grouped.isNotEmpty()
 }

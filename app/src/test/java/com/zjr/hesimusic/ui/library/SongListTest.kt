@@ -8,59 +8,72 @@ import org.junit.Test
 
 class SongListTest {
 
-    @Test
-    fun `should auto-scroll when first valid current song appears`() {
-        val grouped = mapOf(
-            'A' to listOf(
-                Song(
-                    id = 1L,
-                    title = "A Song",
-                    artist = "Artist",
-                    album = "Album",
-                    filePath = "/music/a.mp3",
-                    duration = 1000L,
-                    mimeType = "audio/mpeg",
-                    size = 1024L,
-                    dateAdded = 1L
-                )
-            )
-        )
+    // ---- 自动定位当前播放歌(issue 00002)----
+    // 判定只看「视图 epoch 是否变化」:epoch 变化 = 切换视图后回到列表,应重新定位;
+    // epoch 不变 = 从详情页 / 分析页返回(列表重新组合),不能再滚一次把用户位置顶掉。
 
+    @Test
+    fun `auto-scrolls on first entry into a list`() {
         assertTrue(
             shouldAutoScrollToCurrentSong(
-                hasAutoScrolledToCurrentSong = false,
+                autoScrolledViewEpoch = AUTO_SCROLL_NEVER,
+                viewEpoch = 0,
                 currentPlayingSongId = "1",
-                grouped = grouped
+                hasItems = true
             )
         )
     }
 
     @Test
-    fun `should not auto-scroll after initial restore`() {
-        val grouped = mapOf(
-            'A' to listOf(
-                Song(
-                    id = 1L,
-                    title = "A Song",
-                    artist = "Artist",
-                    album = "Album",
-                    filePath = "/music/a.mp3",
-                    duration = 1000L,
-                    mimeType = "audio/mpeg",
-                    size = 1024L,
-                    dateAdded = 1L
-                )
-            )
-        )
-
-        assertFalse(
+    fun `epoch change re-auto-scrolls after switching views`() {
+        // 在 epoch 7 已经定位过一次(标志记下 7);切到别的视图再切回,MainScreen 把 epoch 推到 8。
+        assertTrue(
             shouldAutoScrollToCurrentSong(
-                hasAutoScrolledToCurrentSong = true,
+                autoScrolledViewEpoch = 7,
+                viewEpoch = 8,
                 currentPlayingSongId = "1",
-                grouped = grouped
+                hasItems = true
             )
         )
     }
+
+    @Test
+    fun `same epoch keeps scroll position when returning from details`() {
+        // 从详情页 / 无缝循环分析页返回:列表重新组合,但 epoch 没变 → 不再定位,保住滚动位置。
+        assertFalse(
+            shouldAutoScrollToCurrentSong(
+                autoScrolledViewEpoch = 7,
+                viewEpoch = 7,
+                currentPlayingSongId = "1",
+                hasItems = true
+            )
+        )
+    }
+
+    @Test
+    fun `never auto-scrolls without a current playing song`() {
+        assertFalse(
+            shouldAutoScrollToCurrentSong(
+                autoScrolledViewEpoch = AUTO_SCROLL_NEVER,
+                viewEpoch = 8,
+                currentPlayingSongId = null,
+                hasItems = true
+            )
+        )
+    }
+
+    @Test
+    fun `never auto-scrolls an empty list`() {
+        assertFalse(
+            shouldAutoScrollToCurrentSong(
+                autoScrolledViewEpoch = AUTO_SCROLL_NEVER,
+                viewEpoch = 0,
+                currentPlayingSongId = "1",
+                hasItems = false
+            )
+        )
+    }
+
 
     @Test
     fun `track number ordering sorts by trackNumber then title`() {

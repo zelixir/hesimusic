@@ -43,6 +43,12 @@ fun FolderList(
     currentPlayingSongId: String? = null,
     sortMode: SongSortMode = SongSortMode.TITLE_INITIAL,
     onSongClick: (List<Song>, Int, String) -> Unit,
+    /**
+     * 视图 epoch(issue 00002 回归):MainScreen 每次切换 tab 就 +1,详情页 / 播放页 / 分析页返回不变。
+     * 与 [SongList] 同一套语义:epoch 变化 → 重新定位当前播放歌;epoch 不变 → 保留滚动位置。
+     * 默认 0 保证未接入的调用点行为不变。
+     */
+    viewEpoch: Int = 0,
     appLogger: AppLogger? = null
 ) {
     var currentPath by rememberSaveable(initialPath, startPath) { mutableStateOf(startPath ?: initialPath) }
@@ -62,12 +68,15 @@ fun FolderList(
         appLogger?.info(TAG, "FolderList rendering path: $currentPath with $folderCount folders and $fileCount files")
     }
 
-    // 「当前目录已自动定位过当前播放歌」的标志(issue 00002 同类;lead 授权一并修)。
-    // 必须可保存:从播放页 / 无缝循环分析页返回时本页会重新组合,普通 remember 会复位成 false →
+    // 「本次视图 / 当前目录已自动定位过当前播放歌」的标志(issue 00002 同类;lead 授权一并修),
+    // 记录定位成功时的 viewEpoch。
+    // 必须可保存:从播放页 / 无缝循环分析页返回时本页会重新组合,普通 remember 会复位成未定位 →
     // 又按当前播放歌 scrollToItem,把用户原本的滚动位置覆盖掉。
-    // key 用 currentPath:文件夹是「同一页换 path」而不是新路由,进入子目录 / 返回上一级属于换了一个列表,
-    // 应重新定位一次(路径变化时标志复位);同一目录内返回(重组)则不再重复定位。
-    var hasAutoScrolledToCurrentSong by rememberSaveable(currentPath) { mutableStateOf(false) }
+    // key 用 (currentPath, viewEpoch):
+    // - currentPath:文件夹是「同一页换 path」而不是新路由,进入子目录 / 返回上一级属于换了一个列表,
+    //   应重新定位一次;同一目录内返回(重组)则不再重复定位;
+    // - viewEpoch:MainScreen 切换 tab 后回到文件夹 → 标志失效,重新定位当前播放歌(00002 回归点)。
+    var autoScrolledViewEpoch by rememberSaveable(currentPath, viewEpoch) { mutableStateOf(AUTO_SCROLL_NEVER) }
 
     // Handle back press to go up directory
     // Only enable if we are not at the initial path
@@ -78,17 +87,24 @@ fun FolderList(
         }
     }
     
-    LaunchedEffect(items, currentPlayingSongId, currentPath, initialPath) {
-        if (hasAutoScrolledToCurrentSong) return@LaunchedEffect
-        if (currentPlayingSongId == null) return@LaunchedEffect
+    LaunchedEffect(items, currentPlayingSongId, currentPath, initialPath, viewEpoch) {
+        if (!shouldAutoScrollToCurrentSong(
+                autoScrolledViewEpoch = autoScrolledViewEpoch,
+                viewEpoch = viewEpoch,
+                currentPlayingSongId = currentPlayingSongId,
+                hasItems = items.isNotEmpty()
+            )
+        ) {
+            return@LaunchedEffect
+        }
         val itemIndex = items.indexOfFirst { item ->
             item is FileSystemItem.MusicFile && item.song.id.toString() == currentPlayingSongId
         }
         if (itemIndex >= 0) {
             val scrollIndex = if (currentPath != initialPath) itemIndex + 1 else itemIndex
             listState.scrollToItem(scrollIndex)
-            hasAutoScrolledToCurrentSong = true
-            Log.d(TAG, "Auto-scrolled to current song at index $scrollIndex (path=$currentPath)")
+            autoScrolledViewEpoch = viewEpoch
+            Log.d(TAG, "Auto-scrolled to current song at index $scrollIndex (path=$currentPath, viewEpoch=$viewEpoch)")
         }
     }
 

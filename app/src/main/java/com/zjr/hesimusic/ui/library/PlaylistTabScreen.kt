@@ -57,7 +57,12 @@ fun PlaylistTabScreen(
     selectedSongIds: Set<Long>,
     onBatchSongToggle: (Song) -> Unit,
     onPlaylistSongsVisibleChanged: (Boolean) -> Unit,
-    queueDisplayBySongId: Map<Long, String> = emptyMap()
+    queueDisplayBySongId: Map<Long, String> = emptyMap(),
+    /**
+     * 视图 epoch(issue 00002),透传给歌单内歌曲列表:MainScreen 切走再切回歌单 tab 时
+     * 重新定位当前播放歌;详情 / 播放页返回不变,保留滚动位置。默认 0 兼容其他调用点。
+     */
+    viewEpoch: Int = 0
 ) {
     val musicUiState by musicViewModel.uiState.collectAsState()
     val playlists by viewModel.playlists.collectAsState()
@@ -139,6 +144,7 @@ fun PlaylistTabScreen(
                 },
                 loopConfirmed = loopConfirmed,
                 onBatchSongToggle = onBatchSongToggle,
+                viewEpoch = viewEpoch,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -181,6 +187,7 @@ fun PlaylistTabScreen(
                 },
                 loopConfirmed = loopConfirmed,
                 onBatchSongToggle = onBatchSongToggle,
+                viewEpoch = viewEpoch,
                 modifier = Modifier.fillMaxSize()
             )
         }
