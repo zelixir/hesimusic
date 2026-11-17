@@ -15,6 +15,7 @@ import androidx.media3.exoplayer.DecoderCounters
 import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
+import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.model.Song
@@ -26,7 +27,9 @@ import com.zjr.hesimusic.loop.audio.LoopPcmEngine
 import com.zjr.hesimusic.loop.audio.LoopRenderersFactory
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMediaTag
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
+import com.zjr.hesimusic.loop.audio.source.LoopSourcePipeline
 import com.zjr.hesimusic.loop.audio.source.LoopSourceProjection
+import com.zjr.hesimusic.loop.audio.source.LoopingPcmExtractorMediaSource
 import com.zjr.hesimusic.loop.audio.source.LoopingPcmMediaSource
 import com.zjr.hesimusic.loop.audio.source.LoopingPcmTimeline
 import com.zjr.hesimusic.loop.audio.source.PcmDecoderRangeProvider
@@ -100,6 +103,7 @@ class PreviewPlayer @Inject constructor(
     init {
         // 打开结果页时读取真机调试开关（默认 M3′）。
         LoopSourceMode.refreshFromSettings(context)
+        LoopSourcePipeline.refreshFromSettings(context)
     }
 
     /** 独立音频控制器:窗口/ring/位置都只属于预览,不污染主播放。 */
@@ -112,7 +116,7 @@ class PreviewPlayer @Inject constructor(
     private var player: ExoPlayer? = null
 
     /** SOURCE 路径当前持有的 MediaSource / timeline / 窗口。 */
-    private var source: LoopingPcmMediaSource? = null
+    private var source: MediaSource? = null
     private var sourceTimeline: LoopingPcmTimeline? = null
     private var sourceWindow: LoopWindow? = null
     private var sourceSongId: Long? = null
@@ -700,11 +704,22 @@ class PreviewPlayer @Inject constructor(
             val item = song.toMediaItem().buildUpon()
                 .setTag(LoopSourceMediaTag)
                 .build()
-            val mediaSource = LoopingPcmMediaSource(
-                item = item,
-                timeline = timeline,
-                provider = PcmDecoderRangeProvider(pcmDecoder, song.filePath),
-            )
+            val provider = PcmDecoderRangeProvider(pcmDecoder, song.filePath)
+            val mediaSource: MediaSource = if (LoopSourcePipeline.isExtractor()) {
+                LoopingPcmExtractorMediaSource.create(
+                    item = item,
+                    timeline = timeline,
+                    provider = provider,
+                    logger = { message -> Log.d("LoopPcmSource", message) },
+                )
+            } else {
+                LoopingPcmMediaSource(
+                    item = item,
+                    timeline = timeline,
+                    provider = provider,
+                )
+            }
+            Log.d(TAG, "source pipeline=" + LoopSourcePipeline.current + " source=" + mediaSource)
             p.setMediaSource(mediaSource, /* resetPosition= */ false)
             p.prepare()
             this.source = mediaSource
