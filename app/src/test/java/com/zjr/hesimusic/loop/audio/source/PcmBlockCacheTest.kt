@@ -63,12 +63,32 @@ class PcmBlockCacheTest {
     @Test
     fun `eviction drops farthest blocks and keeps playhead`() {
         val c = cache(maxBytes = 3L * 2_000L)
-        for (i in 0..4) c.put(block(i))
         c.trimToBudget(playhead = 2)
+        for (i in 0..4) c.put(block(i))
         assertTrue("active=" + c.activeBlockCount(), c.activeBlockCount() <= 3)
         assertEquals(PcmBlockCache.State.READY, c.state(2))
         assertTrue(c.readyIndices().contains(2))
-        assertEquals(3L * 2_000L, c.cachedBytes())
+        assertTrue(c.cachedBytes() <= 3L * 2_000L)
+    }
+
+    @Test
+    fun `budget of three keeps playhead while inserting ten blocks`() {
+        val c = cache(maxBytes = 3L * 2_000L)
+        c.trimToBudget(playhead = 5)
+        c.put(block(5))
+        for (i in 0..9) {
+            if (i != 5) c.put(block(i))
+        }
+        assertTrue("active=" + c.activeBlockCount(), c.activeBlockCount() <= 3)
+        assertEquals(PcmBlockCache.State.READY, c.state(5))
+        assertTrue(c.cachedBytes() <= 3L * 2_000L)
+    }
+
+    @Test
+    fun `adaptive budget uses heap tenth clamped to 16-32MB`() {
+        assertEquals(32L * 1024L * 1024L, PcmBlockCache.maxBytesForHeap(402L * 1024L * 1024L))
+        assertEquals(16L * 1024L * 1024L, PcmBlockCache.maxBytesForHeap(100L * 1024L * 1024L))
+        assertEquals(20L * 1024L * 1024L, PcmBlockCache.maxBytesForHeap(200L * 1024L * 1024L))
     }
 
     @Test

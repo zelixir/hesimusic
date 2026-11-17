@@ -11,6 +11,7 @@ import com.zjr.hesimusic.loop.analysis.PcmDecoder
 import com.zjr.hesimusic.loop.audio.LoopAudioController
 import com.zjr.hesimusic.loop.audio.LoopRenderersFactory
 import com.zjr.hesimusic.loop.audio.source.LoopAwareMediaSourceFactory
+import com.zjr.hesimusic.loop.audio.source.LoopSourceMainPlayer
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
 import com.zjr.hesimusic.loop.audio.source.SourceRenderersFactory
 import dagger.Module
@@ -58,7 +59,11 @@ object MediaModule {
         // 主播放器在进程启动时读取会话开关：SOURCE 用默认 sink + 数据源循环，
         // M3_PRIME 保持 LoopRenderersFactory，行为完全不变。
         LoopSourceMode.refreshFromSettings(context)
-        val renderersFactory = if (LoopSourceMode.isSource()) {
+        LoopSourceMainPlayer.refreshFromSettings(context)
+        val mainSource = LoopSourceMainPlayer.shouldUseSourceForMainPlayer()
+        LoopSourceMainPlayer.activateMainPlayer(mainSource)
+        // renderers 与 MediaSourceFactory 必须同源，避免半切换。
+        val renderersFactory = if (mainSource) {
             SourceRenderersFactory(context, loopAudioController)
         } else {
             LoopRenderersFactory(context, loopAudioController)
@@ -66,8 +71,11 @@ object MediaModule {
         val defaultMediaSourceFactory = DefaultMediaSourceFactory(context, extractorsFactory)
         val loopAwareFactory = LoopAwareMediaSourceFactory(
             delegate = defaultMediaSourceFactory,
+            enabled = mainSource,
             sourceFactory = LoopAwareMediaSourceFactory.defaultSourceFactory(pcmDecoder),
         )
+        // 这里不按 mainSource 另建 delegate：factory 内部用同一条件判断，
+        // 普通 item / 开关关闭时原样走 default。
         val player = ExoPlayer.Builder(context)
             .setMediaSourceFactory(loopAwareFactory)
             .setRenderersFactory(renderersFactory)

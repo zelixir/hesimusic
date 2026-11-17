@@ -41,12 +41,15 @@ class LoopingPcmSourceCore(
     private var nextFrame: Long = timeline.frameAtTimeline(0L)
     private var ptsBaseUs: Long = 0L
     private var emittedFrames: Long = 0L
+    /** 自创建以来实际 read 出去的累计帧数；seek 不重置，tap seam outFrames 用它。 */
+    private var totalReadFrames: Long = 0L
     private var skippedBlockCount: Long = 0L
     private var skippedFrameCount: Long = 0L
     private var skipStreak: Int = 0
     private var decodeCalls: Long = 0L
     private var lastError: String? = null
     private var released: Boolean = false
+    private var lastCacheLogMs: Long = 0L
 
     /** 最近一次 seek 的对外时间目标（诊断）。 */
     @Volatile
@@ -145,11 +148,13 @@ class LoopingPcmSourceCore(
         if (advance) {
             val beforeFrame = nextFrame
             val rawNext = beforeFrame + frames
-            val seamOutFrames = emittedFrames + (timeline.bFrame - beforeFrame)
+            val seamOutFrames = totalReadFrames + (timeline.bFrame - beforeFrame)
             emittedFrames += frames.toLong()
+            totalReadFrames += frames.toLong()
             nextFrame = timeline.normalizeFrame(rawNext)
             skipStreak = 0
             cache.trimToBudget(timeline.blockIndexForFrame(nextFrame))
+            maybeLogCacheLocked()
             if (rawNext >= timeline.bFrame) {
                 onSeamOutputFrames?.invoke(seamOutFrames)
             }
@@ -273,6 +278,17 @@ class LoopingPcmSourceCore(
         }
     }
 
+    private fun maybeLogCacheLocked() {
+        val now = System.currentTimeMillis()
+        if (now - lastCacheLogMs < 1_000L) return
+        lastCacheLogMs = now
+        logger(
+            "LoopPcmSource cacheBytes=" + cache.cachedBytes() +
+                " maxBytes=" + cache.budgetBytes +
+                " blocks=" + cache.activeBlockCount(),
+        )
+    }
+
     private fun currentBlockLocked(): PcmBlock? {
         val current = timeline.blockIndexForFrame(nextFrame)
         cache.playheadBlock = current
@@ -393,6 +409,7 @@ class LoopingPcmSourceCore(
                     data = trimmed.data,
                 ),
             )
+            maybeLogCacheLocked()
             logger(
                 "decode done block=" + block + " frames=" + expectedFrames +
                     " calls=" + decodeCalls + " ms=" + (System.currentTimeMillis() - startedMs) +

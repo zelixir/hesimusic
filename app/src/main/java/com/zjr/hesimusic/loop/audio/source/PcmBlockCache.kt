@@ -26,15 +26,15 @@ class PcmBlock(
  *
  * - 块号按 [PcmBlockCacheKey] + 1 秒网格计算；A/B/采样率/声道任一变化 = 新 key；
  * - 块状态机：PENDING（解码中）→ READY / FAILED；
- * - 预算内保留所有块；超预算时**优先淘汰离播放头最远的块**，同距离按 LRU；
- * - 当前播放块（[playheadBlock]）不会被淘汰；即使单块大于预算也至少保留它，
- *   保证不会因为预算配置过小直接 OOM 或死锁。
+ * - 预算按进程堆自适应（maxMemory/10，夹 16~32MB），绝不使用固定 128MB；
+ * - **插入前**先淘汰离播放头最远的 READY 块，插入后再检查一次；
+ * - 当前播放块（[playheadBlock]）不会被淘汰；即使单块大于预算也至少保留它。
  */
 class PcmBlockCache(
     val key: PcmBlockCacheKey,
     val framesPerBlock: Int,
     val bytesPerFrame: Int,
-    maxBytes: Long = DEFAULT_MAX_BYTES,
+    val maxBytes: Long = DEFAULT_MAX_BYTES,
 ) {
 
     enum class State {
@@ -83,13 +83,14 @@ class PcmBlockCache(
         true
     }
 
-    /** 安装解码成功的块，然后按预算淘汰。 */
+    /** 安装解码成功的块；插入前先腾空间，插入后再按预算淘汰。 */
     fun put(block: PcmBlock) {
         synchronized(lock) {
             val expectedBytes = framesPerBlock * bytesPerFrame
             require(block.data.size <= expectedBytes || block.frames < framesPerBlock) {
                 "block data larger than a full block: ${block.data.size} > $expectedBytes"
             }
+            evictForIncomingLocked(block)
             entries[block.index] = Entry(
                 state = State.READY,
                 block = block,
@@ -124,11 +125,7 @@ class PcmBlockCache(
         entries.filterValues { it.state == State.READY }.keys.toSet()
     }
 
-    fun cachedBytes(): Long = synchronized(lock) {
-        entries.values.asSequence()
-            .filter { it.state == State.READY }
-            .sumOf { (it.block?.bytes ?: 0).toLong() }
-    }
+    fun cachedBytes(): Long = synchronized(lock) { readyBytesLocked() }
 
     fun activeBlockCount(): Int = synchronized(lock) {
         entries.values.count { it.state == State.READY }
@@ -150,28 +147,59 @@ class PcmBlockCache(
         }
     }
 
-    private fun evictLocked() {
-        var total = entries.values.asSequence()
-            .filter { it.state == State.READY }
-            .sumOf { (it.block?.bytes ?: 0).toLong() }
-        if (total <= budgetBytes) return
+    private fun readyBytesLocked(): Long = entries.values.asSequence()
+        .filter { it.state == State.READY }
+        .sumOf { (it.block?.bytes ?: 0).toLong() }
 
-        val candidates = entries.entries.asSequence()
-            .filter { (index, entry) -> entry.state == State.READY && index != playheadBlock }
-            .sortedWith(
-                compareByDescending<Map.Entry<Int, Entry>> { abs(it.key - playheadBlock) }
-                    .thenBy { it.value.lastAccess },
-            )
-            .toList()
-        for ((index, entry) in candidates) {
-            if (total <= budgetBytes) break
-            total -= (entry.block?.bytes ?: 0).toLong()
-            entries.remove(index)
+    private fun evictForIncomingLocked(block: PcmBlock) {
+        val existing = entries[block.index]?.block?.bytes ?: 0
+        var total = readyBytesLocked()
+        val incoming = (block.bytes - existing).coerceAtLeast(0)
+        while (total + incoming > budgetBytes) {
+            val victim = selectVictimLocked(excludeIndex = block.index) ?: break
+            total -= (entries[victim]?.block?.bytes ?: 0).toLong()
+            entries.remove(victim)
         }
     }
 
+    private fun evictLocked() {
+        var total = readyBytesLocked()
+        while (total > budgetBytes) {
+            val victim = selectVictimLocked(excludeIndex = -1) ?: break
+            total -= (entries[victim]?.block?.bytes ?: 0).toLong()
+            entries.remove(victim)
+        }
+    }
+
+    private fun selectVictimLocked(excludeIndex: Int): Int? {
+        var victim: Int? = null
+        var bestDistance = -1
+        var bestAccess = Long.MAX_VALUE
+        for ((index, entry) in entries) {
+            if (entry.state != State.READY) continue
+            if (index == playheadBlock || index == excludeIndex) continue
+            val distance = abs(index - playheadBlock)
+            if (distance > bestDistance ||
+                (distance == bestDistance && entry.lastAccess < bestAccess)
+            ) {
+                victim = index
+                bestDistance = distance
+                bestAccess = entry.lastAccess
+            }
+        }
+        return victim
+    }
+
     companion object {
-        /** 默认 128MB；48kHz/2ch/16bit 约 682 块（≈11 分钟）。 */
-        const val DEFAULT_MAX_BYTES: Long = 128L * 1024L * 1024L
+        const val MIN_BYTES: Long = 16L * 1024L * 1024L
+        const val MAX_BYTES: Long = 32L * 1024L * 1024L
+
+        /** 402MB 堆 → 32MB；低堆至少 16MB，最多 32MB。 */
+        fun maxBytesForHeap(maxMemoryBytes: Long): Long =
+            (maxMemoryBytes / 10L).coerceIn(MIN_BYTES, MAX_BYTES)
+
+        /** 进程默认预算由当前堆决定，不再是固定 128MB。 */
+        val DEFAULT_MAX_BYTES: Long
+            get() = maxBytesForHeap(Runtime.getRuntime().maxMemory())
     }
 }

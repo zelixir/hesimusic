@@ -26,6 +26,7 @@ import com.zjr.hesimusic.loop.audio.LoopAudioController
 import com.zjr.hesimusic.loop.audio.LoopPcmEngine
 import com.zjr.hesimusic.loop.audio.LoopRenderersFactory
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMediaTag
+import com.zjr.hesimusic.loop.audio.source.LoopSourcePauseGate
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
 import com.zjr.hesimusic.loop.audio.source.LoopSourcePipeline
 import com.zjr.hesimusic.loop.audio.source.LoopSourceProjection
@@ -224,6 +225,7 @@ class PreviewPlayer @Inject constructor(
 
     /** 按模式起播。已 prepare 时只做窗口切换 + seek + play(MediaItem 不裁剪、不重建)。 */
     fun play(mode: PreviewMode, startMs: Long) {
+        LoopSourcePauseGate.resume()
         val song = this.song ?: return
         if (!prepared) {
             prepare(song, aMs, bMs)
@@ -304,6 +306,7 @@ class PreviewPlayer @Inject constructor(
      * [LoopPosition.rawSeekUs]（00008 的重复映射来源）。
      */
     fun playFromCurrent(mode: PreviewMode) {
+        LoopSourcePauseGate.resume()
         val song = this.song ?: return
         val p = player
         if (!prepared || p == null) {
@@ -410,6 +413,7 @@ class PreviewPlayer @Inject constructor(
 
     /** 暂停(保留位置与已捕获的 ring;resume 走 [play] 从展示位置起播)。 */
     fun pause() {
+        LoopSourcePauseGate.pause()
         player?.pause()
         _isPlaying.value = false
     }
@@ -661,8 +665,8 @@ class PreviewPlayer @Inject constructor(
     }
 
     private fun releasePlayerOnly() {
-        LoopPreviewDebugBridge.unregister()
-        LoopPreviewDebugBridge.registerTap(null)
+        LoopPreviewDebugBridge.release()
+        LoopSourcePauseGate.reset()
         handler.removeCallbacks(ticker)
         val p = player
         player = null

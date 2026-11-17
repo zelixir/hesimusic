@@ -16,6 +16,7 @@ import com.zjr.hesimusic.loop.analysis.PcmDecoder
 @UnstableApi
 class LoopAwareMediaSourceFactory(
     private val delegate: MediaSource.Factory,
+    private val enabled: Boolean,
     private val sourceFactory: (MediaItem, LoopSourceItemTag) -> MediaSource,
 ) : MediaSource.Factory {
 
@@ -36,7 +37,7 @@ class LoopAwareMediaSourceFactory(
     }
 
     override fun createMediaSource(mediaItem: MediaItem): MediaSource {
-        val tag = loopTagOf(mediaItem.localConfiguration?.tag)
+        val tag = loopTagOf(mediaItem.localConfiguration?.tag, enabled)
         if (tag != null) {
             return sourceFactory(mediaItem, tag)
         }
@@ -45,8 +46,8 @@ class LoopAwareMediaSourceFactory(
 
     companion object {
         /** 纯逻辑：只有 SOURCE 且 tag 为 [LoopSourceItemTag] 时才接管。 */
-        internal fun loopTagOf(tag: Any?): LoopSourceItemTag? =
-            if (LoopSourceMode.isSource() && tag is LoopSourceItemTag) tag else null
+        internal fun loopTagOf(tag: Any?, enabled: Boolean): LoopSourceItemTag? =
+            if (enabled && tag is LoopSourceItemTag) tag else null
 
         fun defaultSourceFactory(pcmDecoder: PcmDecoder): (MediaItem, LoopSourceItemTag) -> MediaSource =
             { item, tag ->

@@ -3,6 +3,7 @@ package com.zjr.hesimusic.loop.audio.source
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -10,7 +11,7 @@ class LoopPreviewDebugBridgeTest {
 
     @After
     fun tearDown() {
-        LoopPreviewDebugBridge.unregister()
+        LoopPreviewDebugBridge.release()
     }
 
     @Test
@@ -26,5 +27,21 @@ class LoopPreviewDebugBridgeTest {
     fun `unregistered bridge rejects seek`() {
         LoopPreviewDebugBridge.unregister()
         assertFalse(LoopPreviewDebugBridge.requestSeek(1_000L))
+    }
+
+    @Test
+    fun `five engine switches leave no bridge handles`() {
+        repeat(5) {
+            LoopPreviewDebugBridge.register { }
+            LoopPreviewDebugBridge.registerTap { }
+            assertTrue(LoopPreviewDebugBridge.requestSeek(it.toLong()))
+            LoopPreviewDebugBridge.release()
+            assertNull(LoopPreviewDebugBridge.seekRequest)
+            assertNull(LoopPreviewDebugBridge.tapSink)
+            assertFalse(LoopPreviewDebugBridge.requestSeek(1L))
+        }
+        assertNull(LoopPreviewDebugBridge.seekRequest)
+        assertNull(LoopPreviewDebugBridge.tapSink)
+        assertFalse(LoopPreviewDebugBridge.requestSeek(2L))
     }
 }

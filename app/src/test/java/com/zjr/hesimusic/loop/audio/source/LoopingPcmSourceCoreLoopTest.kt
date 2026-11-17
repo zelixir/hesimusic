@@ -104,8 +104,8 @@ class LoopingPcmSourceCoreLoopTest {
         )
         val provider = LoopingPcmTestSupport.provider(tl)
         val core = LoopingPcmSourceCore(tl, provider)
-        var seams = 0
-        core.onSeamOutputFrames = { seams += 1 }
+        val seams = ArrayList<Long>()
+        core.onSeamOutputFrames = { seams += it }
 
         var frames = 0L
         while (frames < 40L * 48_000L) {
@@ -116,7 +116,13 @@ class LoopingPcmSourceCoreLoopTest {
             }
             frames += r.frames
         }
-        assertTrue("40s with L=15s should have 2..3 seams, got " + seams, seams in 2..3)
+        assertTrue("40s with L=15s should have 2..3 seams, got " + seams.size, seams.size in 2..3)
+        assertTrue("seam outFrames must strictly increase: " + seams, seams.zipWithNext().all { it.second > it.first })
+        assertEquals(
+            "40s/L=15s seams must be exactly L and 2L: " + seams,
+            listOf(tl.loopFrames, 2L * tl.loopFrames),
+            seams,
+        )
     }
 
     @Test

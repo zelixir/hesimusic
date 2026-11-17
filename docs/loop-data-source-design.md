@@ -2,7 +2,7 @@
 
 > 状态：**调查结论 + 最小原型（纯 JVM）已落地**。
 > 不接 UI/service、不碰设备、不加依赖；写域仅 `loop/audio/source/**`、对应测试、本文件。
-> 全量单测基线 1047 → 当前 **1121**（新增 74；第二阶段接入后），0 failures / 0 skipped。
+> 全量单测基线 1047 → 当前 **1128**（新增 81；第二阶段接入后），0 failures / 0 skipped。
 
 ## 0. 结论摘要
 
@@ -381,10 +381,10 @@ app/src/test/java/com/zjr/hesimusic/loop/audio/source/
 
 ```
 :app:testDebugUnitTest
-files=75 tests=1121 failures=0 skipped=0
+files=76 tests=1128 failures=0 skipped=0
 ```
 
-（基线 1047，新增 74；最后以实际跑数为准。）
+（基线 1047，新增 81；最后以实际跑数为准。）
 
 覆盖：
 
@@ -796,6 +796,26 @@ POST /debug/preview-seek {"positionMs":30000}
   播放的 LoopSourceItemTag；位置 display = A + floorMod(T,L)，seek 反算
   timelineUsForDisplay；duration 仍用整曲 L，不读 player 的 TIME_UNSET。
 - 测试：factory 的 tag/mode 选择；display→T→display 往返；全量 1121。
+
+### 6.21 返工：主播放器双开关/自适应缓存/暂停/seam 验收（2026-11-17）
+
+- 主播放器路线与预览开关分离：LoopSourceMainPlayer 默认 false，setting
+  hesi_loop_source_main；MediaModule 在构建 ExoPlayer 时算一次 mainSource 并
+  activateMainPlayer，renderers 与 LoopAwareMediaSourceFactory 共用该快照；
+  预览页仍只看 LoopSourceMode。
+- PcmBlockCache 预算改为 maxMemory/10 夹 16~32MB；402MB 堆 = 32MB，192000 字节块
+  ≈174 块。put 前 evictForIncoming、put 后 evictLocked，播放头块受保护。
+  核心日志每 1s 一条 LoopPcmSource cacheBytes=... maxBytes=... blocks=...
+- Pause gate：LoopSessionPlayer.pause / PreviewPlayer.pause 置 paused，extractor.read
+  与 MediaPeriod.continueLoading 停止；play/resume 恢复。切换引擎先
+  LoopPreviewDebugBridge.release() 清 seek/tap 再释放旧 player。
+- seam：LoopingPcmSourceCore 只在真实跨 B 时回调，outFrames=totalReadFrames+
+  (bFrame-beforeFrame)，seek 不重置累计；tapSeam 0.5s 帧距去重；source sink 设
+  tapEngineSeamsEnabled=false，避免引擎 seam 重复。run 用 tapWindow 的 A/B，
+  窗口未就绪不写；WAV 头周期 + 段结束/关闭回填。
+- JVM 自测：40s/L=15s seam 恰为 720000、1440000；预算 3 强插 10 块 blocks<=3
+  且播放头保留；402MB→32MB；双开关同源；暂停后 extractor read 不推进；切换 5 次
+  bridge 为空。分析器 selftest clean PASS/click clicks FAIL(seamAlign PASS)。
 
 ## 7. 与 M3′ / Seam Splice 的取舍
 

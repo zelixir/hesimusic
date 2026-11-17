@@ -9,8 +9,10 @@ import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.LoopAudioController
 import com.zjr.hesimusic.loop.audio.source.LoopSourceItemTag
+import com.zjr.hesimusic.loop.audio.source.LoopSourceMainPlayer
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMediaTag
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
+import com.zjr.hesimusic.loop.audio.source.LoopSourcePauseGate
 import com.zjr.hesimusic.loop.audio.source.LoopSourceProjection
 
 /**
@@ -45,6 +47,16 @@ class LoopSessionPlayer(
     /** 回退日志节流：每次「runtime.window 不可用但仍在重放」的区间只打一次。 */
     @Volatile
     private var fallbackLogged: Boolean = false
+
+    override fun play() {
+        LoopSourcePauseGate.resume()
+        super.play()
+    }
+
+    override fun pause() {
+        if (isSourceItem()) LoopSourcePauseGate.pause()
+        super.pause()
+    }
 
     override fun getCurrentPosition(): Long {
         val snapshot = snapshot()
@@ -179,9 +191,11 @@ class LoopSessionPlayer(
     /** 引擎原始位置（µs）：重放期取 sink 推进的位置，否则取播放器自身位置。 */
     /** 当前项是否由循环 PCM 数据源产生（MediaItem tag 标记）。 */
     private fun isSourceItem(): Boolean {
-        if (!LoopSourceMode.isSource()) return false
         val tag = currentMediaItem?.localConfiguration?.tag
-        return tag === LoopSourceMediaTag || tag is LoopSourceItemTag
+        if (tag is LoopSourceItemTag) {
+            return LoopSourceMainPlayer.isMainPlayerActive
+        }
+        return LoopSourceMode.isSource() && tag === LoopSourceMediaTag
     }
 
     private fun currentRawUs(isReplaying: Boolean): Long = LoopSessionProjection.rawUs(

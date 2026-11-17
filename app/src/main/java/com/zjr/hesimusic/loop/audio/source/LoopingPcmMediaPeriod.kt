@@ -272,6 +272,7 @@ class LoopingPcmMediaPeriod(
 
     override fun continueLoading(loadingInfo: LoadingInfo): Boolean {
         if (isReleased()) return false
+        if (LoopSourcePauseGate.paused) return false
         maybeLogLoad(
             loadingInfo.playbackPositionUs,
             core.bufferedEndUs(),

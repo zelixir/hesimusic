@@ -31,6 +31,13 @@ object LoopPreviewDebugBridge {
         tapSink?.invoke(file)
     }
 
+    /** 切换引擎：一次性清空 seek/tap 回调，旧播放器句柄不可再被调用。 */
+    fun release() {
+        seekRequest = null
+        tapSink = null
+        lastRequestedMs = null
+    }
+
     fun register(handler: (Long) -> Unit) {
         seekRequest = handler
     }

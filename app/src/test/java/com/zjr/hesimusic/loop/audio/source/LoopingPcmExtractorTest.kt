@@ -77,6 +77,32 @@ class LoopingPcmExtractorTest {
     } as ExtractorInput
 
     @Test
+    fun `paused gate stops extractor read`() {
+        val tl = LoopingPcmTestSupport.timeline()
+        val provider = LoopingPcmTestSupport.provider(tl)
+        val core = LoopingPcmSourceCore(tl, provider, prefetchBlocks = 2)
+        repeat(4) { core.pumpDecode() }
+        val out = FakeOutput()
+        val extractor = LoopingPcmExtractor(core, tl)
+        extractor.init(out)
+        val input = fakeInput()
+        val seek = PositionHolder()
+        assertEquals(Extractor.RESULT_CONTINUE, extractor.read(input, seek))
+        val frameBefore = core.currentFrame()
+        val samplesBefore = out.track.pts.size
+        try {
+            LoopSourcePauseGate.pause()
+            assertEquals(Extractor.RESULT_CONTINUE, extractor.read(input, seek))
+            assertEquals(frameBefore, core.currentFrame())
+            assertEquals(samplesBefore, out.track.pts.size)
+        } finally {
+            LoopSourcePauseGate.reset()
+        }
+        assertEquals(Extractor.RESULT_CONTINUE, extractor.read(input, seek))
+        assertTrue(core.currentFrame() != frameBefore)
+    }
+
+    @Test
     fun `read outputs three seconds of monotonic PCM and seek lands on target`() {
         val tl = LoopingPcmTestSupport.timeline()
         val provider = LoopingPcmTestSupport.provider(tl)

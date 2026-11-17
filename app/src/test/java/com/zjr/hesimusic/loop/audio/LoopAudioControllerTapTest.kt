@@ -12,6 +12,25 @@ import java.nio.ByteOrder
 class LoopAudioControllerTapTest {
 
     @Test
+    fun `duplicate seam callbacks within half second are deduped`() {
+        val dir = createTempDir(prefix = "loop-tap-seam-")
+        val pcm = File(dir, "seam.wav")
+        val controller = LoopAudioController()
+        try {
+            controller.setPcmTap(pcm)
+            controller.onFormatConfigured(48_000, 2, 4, false)
+            repeat(100) { controller.tapSeam(it.toLong()) }
+            controller.onSinkRelease()
+        } finally {
+            controller.setPcmTap(null)
+        }
+        val events = File(dir, "seam.wav.jsonl").readLines()
+            .filter { it.contains("\"ev\":\"seam\"") }
+        assertEquals(1, events.size)
+        assertTrue(events.single().contains("\"outFrames\":0"))
+    }
+
+    @Test
     fun `format change after setPcmTap keeps same handle and writes new frames`() {
         val dir = createTempDir(prefix = "loop-tap-format-")
         val pcm = File(dir, "format.pcm")
@@ -110,6 +129,8 @@ class LoopAudioControllerTapTest {
         // WAV header 44 + 1000 stereo PCM16 frames * 4 bytes.
         assertEquals(44 + 1_000 * 4, bytes.size)
         val text = events.readText()
+        assertTrue("run aMs must come from window A", text.contains("\"aMs\":20000"))
+        assertTrue("run bMs must come from window B", text.contains("\"bMs\":35000"))
         assertTrue("run event must carry loop window", text.contains("\"loopStartUs\":"))
         assertTrue("run event must carry channels", text.contains("\"channels\":2"))
         assertTrue("seam event must exist", text.contains("\"seam\""))

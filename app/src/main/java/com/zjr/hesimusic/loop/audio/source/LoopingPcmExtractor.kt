@@ -65,6 +65,7 @@ class LoopingPcmExtractor(
     }
 
     override fun read(input: ExtractorInput, seekPosition: PositionHolder): Int {
+        if (LoopSourcePauseGate.paused) return Extractor.RESULT_CONTINUE
         val track = trackOutput ?: return Extractor.RESULT_CONTINUE
         if (!formatSent) {
             track.format(format)

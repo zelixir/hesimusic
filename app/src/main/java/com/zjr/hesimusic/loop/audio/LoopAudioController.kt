@@ -610,6 +610,7 @@ class LoopAudioController @Inject constructor() {
             tapOut = raf
             tapDataBytes = 0L
             tapHeaderBytes = 0L
+            lastTapSeamOutFrames = -1L
             lastTapHeaderMs = System.currentTimeMillis()
             tapDebug("tapOpened file=" + file + " sr=" + fmt.sampleRate + " ch=" + fmt.channels)
         } catch (t: Throwable) {
@@ -655,6 +656,7 @@ class LoopAudioController @Inject constructor() {
 
     private fun closeTapLocked(reason: String = "unknown") {
         tapWindow = null
+        lastTapSeamOutFrames = -1L
         tapDebug(
             "tapClosed reason=" + reason + " bytes=" + tapDataBytes +
                 " out=" + (tapOut != null) + " failed=" + tapFailed,

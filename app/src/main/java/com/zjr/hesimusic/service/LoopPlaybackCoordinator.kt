@@ -16,8 +16,8 @@ import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.analysis.PcmDecoder
 import com.zjr.hesimusic.loop.audio.LoopAudioController
 import com.zjr.hesimusic.loop.audio.source.LoopSourceItemTag
+import com.zjr.hesimusic.loop.audio.source.LoopSourceMainPlayer
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMediaTag
-import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
 import com.zjr.hesimusic.loop.audio.source.LoopSourceProjection
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -226,7 +226,7 @@ class LoopPlaybackCoordinator @Inject constructor(
             audio.fullDurationUs = if (willBeEligible) songDurationUs(songId) else 0L
             runtime.refresh(songId, mode.repeatMode, row, armedSongId) // 1) 纯函数重算（唯一窗口来源）
             val window = runtime.window.value
-            val sourceSong = if (LoopSourceMode.isSource() && window != null) {
+            val sourceSong = if (LoopSourceMainPlayer.isMainPlayerActive && window != null) {
                 songRepository.getSongsByIds(listOf(window.songId)).firstOrNull()
             } else {
                 null
@@ -417,14 +417,14 @@ class LoopPlaybackCoordinator @Inject constructor(
         reason: String,
     ) {
         // SOURCE：只替换当前 item 为带 tag 的循环数据源，队列/首页/通知栏不变。
-        if (LoopSourceMode.isSource()) {
+        if (LoopSourceMainPlayer.isMainPlayerActive) {
             syncSourceItem(window, player, sourceSong, reason)
             return
         }
         // SOURCE 数据源自己负责循环/PTS/seek；这里不能再写 M3′ 的 window/ring，
         // 否则 LoopAudioSink 会二次拦截 PCM。A/B 变更由 SOURCE 侧新 source 承接。
         val currentTag = player.currentMediaItem?.localConfiguration?.tag
-        if (LoopSourceMode.isSource() &&
+        if (LoopSourceMainPlayer.isMainPlayerActive &&
             (currentTag === LoopSourceMediaTag || currentTag is LoopSourceItemTag)
         ) {
             Log.d(
@@ -496,11 +496,13 @@ class LoopPlaybackCoordinator @Inject constructor(
         val current = player.currentMediaItem ?: return
         val tag = current.localConfiguration?.tag
         if (window == null) {
+            audio.tapWindow = null
             if (tag is LoopSourceItemTag) {
                 restoreSourceItem(player, index, tag)
             }
             return
         }
+        audio.tapWindow = window
         if (tag is LoopSourceItemTag &&
             tag.songId == window.songId &&
             tag.loopStartUs == window.loopStartUs &&
