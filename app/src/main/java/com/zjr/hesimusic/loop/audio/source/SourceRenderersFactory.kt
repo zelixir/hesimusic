@@ -1,6 +1,7 @@
 package com.zjr.hesimusic.loop.audio.source
 
 import android.content.Context
+import android.util.Log
 import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
@@ -23,6 +24,9 @@ class TapAudioSink(
     delegate: AudioSink,
     private val controller: LoopAudioController,
 ) : ForwardingAudioSink(delegate) {
+
+    private var handledBuffers = 0L
+    private var lastBufferLogMs = 0L
 
     override fun configure(
         inputFormat: Format,
@@ -48,6 +52,12 @@ class TapAudioSink(
                 controller.window = window
             }
         }
+        Log.d(
+            "LoopPcmSource",
+            "tap configure " + inputFormat.sampleMimeType + "/" + inputFormat.pcmEncoding +
+                " " + inputFormat.sampleRate + "Hz/" + inputFormat.channelCount +
+                "ch buffer=" + specifiedBufferSize,
+        )
         super.configure(inputFormat, specifiedBufferSize, outputChannels)
     }
 
@@ -59,18 +69,46 @@ class TapAudioSink(
         val before = buffer.position()
         val consumed = super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
         val after = buffer.position()
+        handledBuffers += 1L
+        val now = System.currentTimeMillis()
+        if (handledBuffers == 1L || now - lastBufferLogMs >= 1_000L) {
+            lastBufferLogMs = now
+            Log.d(
+                "LoopPcmSource",
+                "tap handleBuffer n=" + handledBuffers + " ptsUs=" + presentationTimeUs +
+                    " consumed=" + consumed + " before=" + before + " after=" + after +
+                    " delta=" + (after - before),
+            )
+        }
         if (after > before) {
             controller.tapPcm(buffer, before, after - before)
         }
         return consumed
     }
 
+    override fun play() {
+        Log.d("LoopPcmSource", "tap play")
+        super.play()
+    }
+
+    override fun pause() {
+        Log.d("LoopPcmSource", "tap pause")
+        super.pause()
+    }
+
+    override fun handleDiscontinuity() {
+        Log.w("LoopPcmSource", "tap handleDiscontinuity")
+        super.handleDiscontinuity()
+    }
+
     override fun flush() {
+        Log.d("LoopPcmSource", "tap flush")
         controller.onSinkFlush()
         super.flush()
     }
 
     override fun reset() {
+        Log.d("LoopPcmSource", "tap reset")
         controller.onSinkReset()
         super.reset()
     }
@@ -96,6 +134,7 @@ class SourceRenderersFactory(
         floatOutput: Boolean,
         playbackParams: Boolean,
     ): AudioSink {
+        Log.d("LoopPcmSource", "buildAudioSink source float=" + floatOutput + " params=" + playbackParams)
         val delegate = DefaultAudioSink.Builder(context)
             // PCM16 直通；float 输出会让 tap 的 bytesPerFrame 口径变化。
             .setEnableFloatOutput(false)

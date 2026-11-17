@@ -11,7 +11,11 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DecoderCounters
+import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
+import androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.loop.LoopPosition
@@ -542,6 +546,62 @@ class PreviewPlayer @Inject constructor(
             Log.d(TAG, "source load control min=3000 max=8000 playback=1000 rebuffer=1500")
         }
         val p = builder.build()
+        if (kind == EngineKind.SOURCE) {
+            p.addAnalyticsListener(object : AnalyticsListener {
+                override fun onPlaybackStateChanged(eventTime: EventTime, state: Int) {
+                    Log.d(TAG, "analytics state=" + state + " event=" + eventTime)
+                }
+
+                override fun onIsPlayingChanged(eventTime: EventTime, isPlaying: Boolean) {
+                    Log.d(TAG, "analytics isPlaying=" + isPlaying + " event=" + eventTime)
+                }
+
+                override fun onAudioEnabled(eventTime: EventTime, decoderCounters: DecoderCounters) {
+                    Log.d(TAG, "analytics audio enabled event=" + eventTime)
+                }
+
+                override fun onAudioInputFormatChanged(
+                    eventTime: EventTime,
+                    format: androidx.media3.common.Format,
+                    decoderReuseEvaluation: DecoderReuseEvaluation?,
+                ) {
+                    Log.d(
+                        TAG,
+                        "analytics audio format=" + format.sampleMimeType + "/" + format.pcmEncoding +
+                            " " + format.sampleRate + "Hz/" + format.channelCount + "ch",
+                    )
+                }
+
+                override fun onAudioPositionAdvancing(eventTime: EventTime, playoutStartSystemTimeMs: Long) {
+                    Log.d(TAG, "analytics audio position advancing at=" + playoutStartSystemTimeMs)
+                }
+
+                override fun onAudioUnderrun(
+                    eventTime: EventTime,
+                    bufferSize: Int,
+                    bufferSizeMs: Long,
+                    elapsedSinceLastFeedMs: Long,
+                ) {
+                    Log.w(
+                        TAG,
+                        "analytics audio underrun size=" + bufferSize + " ms=" + bufferSizeMs +
+                            " sinceFeed=" + elapsedSinceLastFeedMs,
+                    )
+                }
+
+                override fun onAudioDisabled(eventTime: EventTime, decoderCounters: DecoderCounters) {
+                    Log.w(TAG, "analytics audio disabled event=" + eventTime)
+                }
+
+                override fun onRenderedFirstFrame(
+                    eventTime: EventTime,
+                    output: Any,
+                    renderTimeMs: Long,
+                ) {
+                    Log.d(TAG, "analytics rendered first frame")
+                }
+            })
+        }
         p.addListener(listener)
         player = p
         engineKind = kind
@@ -805,9 +865,12 @@ class PreviewPlayer @Inject constructor(
                 Log.d(
                     TAG,
                     "tick posMs=" + _positionMs.value + " playerPos=" + p?.currentPosition +
+                        " buffered=" + p?.bufferedPosition +
                         " dur=" + p?.duration +
                         " playing=" + (p?.isPlaying == true) +
+                        " playWhenReady=" + (p?.playWhenReady == true) +
                         " state=" + p?.playbackState +
+                        " error=" + p?.playerError +
                         " replaying=" + controller.isReplaying +
                         " ringReady=" + controller.isRingComplete +
                         " seam=" + controller.seamCount +
@@ -824,6 +887,7 @@ class PreviewPlayer @Inject constructor(
             _buffering.value = playbackState == Player.STATE_BUFFERING
             _isPlaying.value = player?.isPlaying == true
             if (sourceActive && engineKind == EngineKind.SOURCE) {
+                Log.d(TAG, "source state=" + playbackState + " playing=" + (player?.isPlaying == true))
                 if (playbackState == Player.STATE_READY) {
                     if (!_sourceFirstBlockReady.value) {
                         Log.d(TAG, "source first block ready")
@@ -838,6 +902,9 @@ class PreviewPlayer @Inject constructor(
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             _isPlaying.value = isPlaying
+            if (sourceActive && engineKind == EngineKind.SOURCE) {
+                Log.d(TAG, "source isPlaying=" + isPlaying)
+            }
         }
 
         override fun onPlayerError(error: PlaybackException) {

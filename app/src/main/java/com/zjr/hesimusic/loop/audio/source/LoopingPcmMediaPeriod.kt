@@ -288,6 +288,7 @@ class LoopingPcmMediaPeriod(
         lastLoadLogMs = now
         logD(
             "load pos=" + playbackPositionUs + " buffered=" + bufferedUs +
+                " bufferedDuration=" + (bufferedUs - playbackPositionUs) +
                 " nextLoad=" + (nextLoadUs ?: "END") + " loading=" + isLoading() +
                 " readyBlocks=" + core.cache.readyIndices().size + " " + core.debugStateString(),
         )

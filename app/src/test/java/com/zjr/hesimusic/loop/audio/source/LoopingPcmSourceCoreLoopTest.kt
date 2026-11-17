@@ -106,6 +106,15 @@ class LoopingPcmSourceCoreLoopTest {
         assertTrue(core.pumpDecode()) // 2
         assertEquals(3_000_000L, core.bufferedEndUs())
         assertEquals(null, core.nextLoadPositionUs())
+
+        // 连续读 1s 后，buffered 必须继续领先当前位置至少 1s（LoadControl 用）。
+        val read = core.read(tl.sampleRate * tl.bytesPerFrame)
+        assertNotNull(read)
+        assertTrue(
+            "buffered-current must stay >=1s: buffered=" + core.bufferedEndUs() +
+                " current=" + core.currentPtsUs(),
+            core.bufferedEndUs() - core.currentPtsUs() >= 1_000_000L,
+        )
     }
 
     @Test
