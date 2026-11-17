@@ -46,6 +46,10 @@ class FakeAudioSink : AudioSink {
     /** 下一次 handleBuffer 抛异常（无条件，模拟切回源写失败）。 */
     var failNextBuffer: Boolean = false
 
+    /** 模拟 DefaultAudioSink 内部 PTS 单调断言。 */
+    var requireMonotonicPts: Boolean = false
+    private var lastAcceptedPtsUs: Long = Long.MIN_VALUE
+
     private var listener: AudioSink.Listener? = null
     private var playbackParameters: PlaybackParameters = PlaybackParameters.DEFAULT
     private var skipSilence: Boolean = false
@@ -90,6 +94,12 @@ class FakeAudioSink : AudioSink {
         presentationTimeUs: Long,
         encodedAccessUnitCount: Int,
     ): Boolean {
+        if (requireMonotonicPts && lastAcceptedPtsUs != Long.MIN_VALUE &&
+            presentationTimeUs < lastAcceptedPtsUs
+        ) {
+            throw IllegalArgumentException("pts regressed $presentationTimeUs < $lastAcceptedPtsUs")
+        }
+        if (presentationTimeUs != Long.MIN_VALUE) lastAcceptedPtsUs = presentationTimeUs
         if (failNextBuffer) {
             failNextBuffer = false
             throw RuntimeException("fake delegate rejected buffer pts=$presentationTimeUs")

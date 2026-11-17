@@ -61,6 +61,7 @@ class LoopAudioSinkTest {
         controller.seamDecodeRange = { s, e ->
             PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(s.toInt(), (e - s).toInt()))
         }
+        fake.requireMonotonicPts = true
         val seeks = mutableListOf<Long>()
         controller.seamSeekRequested = { seeks.add(it) }
 
@@ -97,6 +98,10 @@ class LoopAudioSinkTest {
         )
         assertTrue("应完成 3 次 S 切换: " + sink.seamDebugStats(), sink.seamDebugStats().contains("switch=3"))
         assertTrue("切换点样本缺口应为 0: " + sink.seamDebugStats(), sink.seamDebugStats().contains("gap=0"))
+        assertTrue("两圈后 bias 应为 2L: " + sink.seamDebugStats(), sink.seamDebugStats().contains("bias=120000000"))
+        fake.currentPositionUs = 500_000_000L
+        assertEquals(380_000_000L, sink.getCurrentPositionUs(false))
+        assertEquals(380_000_000L, controller.positionUs)
         assertTrue("每圈应请求 seek A+Δ: " + seeks, seeks.size >= 2)
         assertTrue("seek 目标应为 A+Δ", seeks.all { it == 3_000_000L })
         assertTrue("切回源应调用 discontinuity", fake.discontinuityCalls >= 2)
@@ -127,6 +132,12 @@ class LoopAudioSinkTest {
             PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(0, 1000))
         assertArrayEquals(expectedSeam, actualSeam)
         assertTrue(sink.seamDebugStats().contains("switch=1"))
+    }
+
+    @Test
+    fun `seam writtenPts 去 bias 回到媒体时间`() {
+        val (_, sink, _) = rig()
+        assertEquals(201_787_000L, sink.writtenPtsToMediaUs(232_787_000L, 31_000_000L))
     }
 
     @Test

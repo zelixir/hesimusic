@@ -125,6 +125,8 @@ class LoopAudioSink(
     private var seamPrepared = false
     private var seamSeekIssued = false
     private var seamBypass = false
+    /** 每完成一次 S→源环回累加一个 L；所有 delegate PTS 都加它，位置查询再减回。 */
+    private var seamPtsBiasUs = 0L
     private var pendingSeam: PendingSeam? = null
     private val seamQueue = ArrayDeque<PendingSeam>()
     private var seamDiscontinuityCount = 0L
@@ -541,6 +543,8 @@ class LoopAudioSink(
         resetDelegateForSeam("resume")
         seamState = SeamRouteState.NORMAL
         seamSeekIssued = false
+        seamPtsBiasUs += (controller.window?.lengthUs ?: 0L)
+        seamLog("bias=" + seamPtsBiasUs)
         seamLog("switch to source resumeFrame=" + (seamBuffer?.resumeFrame() ?: -1L))
     }
 
@@ -561,7 +565,7 @@ class LoopAudioSink(
         val consumedFrames = pending.offset / bytesPerFrame
         val pts = pending.ptsUs + consumedFrames * 1_000_000L / sampleRate
         val accepted = try {
-            super.handleBuffer(slice, pts + outputStreamOffsetUs, 1)
+            super.handleBuffer(slice, pts + outputStreamOffsetUs + seamPtsBiasUs, 1)
         } catch (t: Throwable) {
             try {
                 Log.w("LoopPerf", "seam write failed pts=" + pts, t)
@@ -577,7 +581,7 @@ class LoopAudioSink(
         val consumed = slice.position() - before
         if (consumed > 0) {
             controller.tapPcm(slice, before, consumed)
-            lastDelegatePtsUs = pts + outputStreamOffsetUs
+            lastDelegatePtsUs = pts + outputStreamOffsetUs + seamPtsBiasUs
             seamBuffer?.noteOutput(
                 usToFrameFloor(pts),
                 (consumed / bytesPerFrame).toLong(),
@@ -628,7 +632,7 @@ class LoopAudioSink(
         val accept: () -> Boolean = {
             buffer.position(start)
             buffer.limit(end)
-            super.handleBuffer(buffer, mediaPtsUs + outputStreamOffsetUs, 1)
+            super.handleBuffer(buffer, mediaPtsUs + outputStreamOffsetUs + seamPtsBiasUs, 1)
         }
         var accepted = try {
             accept()
@@ -675,7 +679,7 @@ class LoopAudioSink(
         }
         val after = buffer.position()
         if (after > before) {
-            lastDelegatePtsUs = mediaPtsUs + outputStreamOffsetUs
+            lastDelegatePtsUs = mediaPtsUs + outputStreamOffsetUs + seamPtsBiasUs
             controller.tapPcm(buffer, before, after - before)
             seamBuffer?.noteOutput(
                 usToFrameFloor(mediaPtsUs),
@@ -760,17 +764,24 @@ class LoopAudioSink(
             pump()
         }
         val raw = super.getCurrentPositionUs(forceDiscontinuityPosition)
+        var result = raw
         if (!released) {
             if (raw != AudioSink.CURRENT_POSITION_NOT_SET) {
                 // 优先用 delegate 的原生位置（AudioTrack playhead），只做坐标归一化。
-                controller.updatePositionUs(toMediaPositionUs(raw))
+                val media = toMediaPositionUs(raw)
+                controller.updatePositionUs(media)
+                if (seamPtsBiasUs != 0L) {
+                    // 对外仍给“output offset 域”，但去掉 seam bias，保证媒体时间不漂移。
+                    val hadOffset = outputStreamOffsetUs > 0L && raw >= outputStreamOffsetUs
+                    result = media + if (hadOffset) outputStreamOffsetUs else 0L
+                }
             } else if (engine.state == LoopPcmEngine.State.REPLAYING) {
                 // delegate 未给出位置时，回落到引擎帧游标。
                 val enginePos = engine.currentPositionUs()
                 if (enginePos >= 0L) controller.updatePositionUs(enginePos)
             }
         }
-        return raw
+        return result
     }
 
     /**
@@ -779,8 +790,13 @@ class LoopAudioSink(
      */
     private fun toMediaPositionUs(rawUs: Long): Long {
         val offset = outputStreamOffsetUs
-        return if (offset > 0L && rawUs >= offset) rawUs - offset else rawUs
+        val withoutOffset = if (offset > 0L && rawUs >= offset) rawUs - offset else rawUs
+        return writtenPtsToMediaUs(withoutOffset, seamPtsBiasUs)
     }
+
+    /** 纯函数：写 delegate 的 PTS 去掉 seam bias 后回到媒体时间。 */
+    internal fun writtenPtsToMediaUs(writtenPtsUs: Long, biasUs: Long): Long =
+        writtenPtsUs - biasUs
 
     override fun handleDiscontinuity() {
         // delegate 已被告知时间戳不连续：允许后续重放从更早的位置重新开始。
@@ -864,6 +880,7 @@ class LoopAudioSink(
             " gap=" + seamMaxGapFrames +
             " bytes=" + (seamBuffer?.seamBufferBytes ?: 0L) +
             " bDeltaUs=" + (seamBuffer?.let { frameToUsCeil(it.windowEndFrame - it.deltaFrames) } ?: 0L) +
+            " bias=" + seamPtsBiasUs +
             " bypass=" + seamBypass
 
     // ------------------------------------------------------------------ 内部
@@ -957,6 +974,7 @@ class LoopAudioSink(
         pendingSeam = null
         seamSeekIssued = false
         seamBypass = false
+        seamPtsBiasUs = 0L
         seamState = SeamRouteState.NORMAL
         seamSwitchCount = 0L
         seamDeferCount = 0L
@@ -1177,6 +1195,7 @@ class LoopAudioSink(
             " seamDiscontinuity=" + seamDiscontinuityCount +
             " seamGap=" + seamMaxGapFrames +
             " seamBytes=" + (seamBuffer?.seamBufferBytes ?: 0L) +
+            " seamBiasUs=" + seamPtsBiasUs +
             " seamBDeltaUs=" + (seamBuffer?.let { frameToUsCeil(it.windowEndFrame - it.deltaFrames) } ?: 0L) +
             " seamBypass=" + seamBypass
         try {
