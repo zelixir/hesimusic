@@ -16,6 +16,7 @@ import com.zjr.hesimusic.loop.analysis.RingChunkedSeeder
 import com.zjr.hesimusic.loop.analysis.WaveformPeaks
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.LoopPcmEngine
+import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
 import com.zjr.hesimusic.ui.loop.state.AnalysisPhase
 import com.zjr.hesimusic.ui.loop.state.DragState
 import com.zjr.hesimusic.ui.loop.state.LoopHandle
@@ -175,7 +176,10 @@ class LoopViewModel @Inject constructor(
 
     /** 环缓冲预填中(含 AwaitingPrefill);UI 显示「正在准备环缓冲…」。 */
     val ringPreparing: StateFlow<Boolean> = pageState
-        .map { (it as? LoopPageState.Ready)?.prefill is PrefillState.InProgress }
+        .map {
+            val prefill = (it as? LoopPageState.Ready)?.prefill
+            prefill is PrefillState.InProgress || prefill is PrefillState.FirstBlockLoading
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
@@ -280,11 +284,22 @@ class LoopViewModel @Inject constructor(
         }
 
         override fun startPrefill(window: LoopWindow) {
+            val ready = _pageState.value as? LoopPageState.Ready
+            if (ready?.sourceMode == true) return
             startPrefillInternal(window)
         }
 
         override fun cancelPrefill() {
             cancelPrefillInternal()
+        }
+
+        override fun applyWindow(window: LoopWindow) {
+            val ready = _pageState.value as? LoopPageState.Ready
+            if (ready?.sourceMode != true) return
+            previewPlayer.updateWindow(
+                aMs = window.loopStartUs / 1000L,
+                bMs = window.loopEndUs / 1000L,
+            )
         }
 
         override fun persistConfirm(
@@ -400,7 +415,21 @@ class LoopViewModel @Inject constructor(
         }
         viewModelScope.launch {
             previewPlayer.error.collect { err ->
-                if (err != null) _notice.value = err
+                if (err != null) {
+                    _notice.value = err
+                    val ready = _pageState.value as? LoopPageState.Ready
+                    if (ready?.sourceMode == true) {
+                        dispatch(LoopPageEvent.PrefillFailed(err))
+                    }
+                }
+            }
+        }
+        viewModelScope.launch {
+            previewPlayer.sourceFirstBlockEvents.collect {
+                val current = _pageState.value as? LoopPageState.Ready ?: return@collect
+                if (current.sourceMode && current.prefill is PrefillState.FirstBlockLoading) {
+                    dispatch(LoopPageEvent.PrefillReady)
+                }
             }
         }
         viewModelScope.launch { resolveEntry() }
@@ -472,6 +501,7 @@ class LoopViewModel @Inject constructor(
                     durationMs = duration,
                     confirmed = row.confirmed,
                     selectedCandidate = restored.selectedIndex,
+                    sourceMode = LoopSourceMode.isSource(),
                 ),
             )
             refillPeaks(song)
@@ -509,6 +539,7 @@ class LoopViewModel @Inject constructor(
                         sampleRate = state.sampleRate,
                         durationMs = state.durationMs,
                         confirmed = confirmed,
+                        sourceMode = LoopSourceMode.isSource(),
                     ),
                 )
             }
@@ -580,7 +611,7 @@ class LoopViewModel @Inject constructor(
 
         // 首次起播/换歌后:播放器未 prepared → 先让 Play 把 sink configure 起来,
         // 预填延迟到 Play 之后再做。否则 seed 恒 PENDING,而 Play 又等 seed → 自锁。
-        if (LoopPagePrefillPolicy.shouldDeferStart(previewPlayer.isPrepared)) {
+        if (LoopPagePrefillPolicy.shouldDeferStart(previewPlayer.hasPlayer)) {
             deferredPrefillWindow = window
             Log.d(TAG, "ring prefill deferred until playback prepares sink window=" + window)
             return

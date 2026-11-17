@@ -8,6 +8,9 @@ import com.zjr.hesimusic.loop.LoopPosition
 import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.LoopAudioController
+import com.zjr.hesimusic.loop.audio.source.LoopSourceMediaTag
+import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
+import com.zjr.hesimusic.loop.audio.source.LoopSourceProjection
 
 /**
  * 给 MediaSession / UI / 通知用的**位置口径层**（ForwardingPlayer）。
@@ -45,6 +48,9 @@ class LoopSessionPlayer(
     override fun getCurrentPosition(): Long {
         val snapshot = snapshot()
         val window = snapshot.window ?: return super.getCurrentPosition()
+        if (isSourceItem()) {
+            return LoopSourceProjection.displayMs(super.getCurrentPosition(), window)
+        }
         val rawUs = currentRawUs(snapshot.isReplaying)
         return LoopSessionProjection.displayUs(rawUs, window) / LoopSessionProjection.US_PER_MS
     }
@@ -52,6 +58,20 @@ class LoopSessionPlayer(
     override fun getBufferedPosition(): Long {
         val snapshot = snapshot()
         val window = snapshot.window ?: return super.getBufferedPosition()
+        if (isSourceItem()) {
+            val currentDisplayUs = LoopSourceProjection.displayUs(
+                super.getCurrentPosition() * LoopSessionProjection.US_PER_MS,
+                window,
+            )
+            val bufferedUs = LoopSourceProjection.displayUs(
+                super.getBufferedPosition() * LoopSessionProjection.US_PER_MS,
+                window,
+            )
+            val atLeastCurrent = maxOf(bufferedUs, currentDisplayUs)
+            val durationUs = projectedDurationUs(window)
+            val clamped = if (durationUs > 0L) atLeastCurrent.coerceAtMost(durationUs) else atLeastCurrent
+            return clamped / LoopSessionProjection.US_PER_MS
+        }
         val durationUs = projectedDurationUs(window)
         val currentDisplayUs = LoopSessionProjection.displayUs(currentRawUs(snapshot.isReplaying), window)
         val bufferedUs = LoopSessionProjection.bufferedUs(
@@ -66,6 +86,10 @@ class LoopSessionPlayer(
     override fun getDuration(): Long {
         val window = snapshot().window ?: return super.getDuration()
         val projectedUs = projectedDurationUs(window)
+        // SOURCE 播放器原生 duration 是 TIME_UNSET；对外仍返回整曲时长。
+        if (isSourceItem() && projectedUs > 0L) {
+            return projectedUs / LoopSessionProjection.US_PER_MS
+        }
         // 防御性覆盖：不裁剪时播放器原生时长本来就等于整曲时长，这里只是保证「窗口生效期间
         // 对外时长恒为整曲」（整曲时长未知时返回 0 → 透传原生值）
         return if (projectedUs > 0L) projectedUs / LoopSessionProjection.US_PER_MS else super.getDuration()
@@ -95,6 +119,15 @@ class LoopSessionPlayer(
         val window = snapshot.window
         if (window == null || mediaItemIndex != currentMediaItemIndex) {
             super.seekTo(mediaItemIndex, positionMs)
+            return
+        }
+        if (isSourceItem()) {
+            val targetT = LoopSourceProjection.timelineUsForDisplay(
+                displayUs = positionMs * LoopSessionProjection.US_PER_MS,
+                currentTimelineUs = super.getCurrentPosition() * LoopSessionProjection.US_PER_MS,
+                window = window,
+            )
+            super.seekTo(mediaItemIndex, targetT / LoopSessionProjection.US_PER_MS)
             return
         }
         val rawUs = LoopSessionProjection.seekUs(
@@ -143,6 +176,11 @@ class LoopSessionPlayer(
     }
 
     /** 引擎原始位置（µs）：重放期取 sink 推进的位置，否则取播放器自身位置。 */
+    /** 当前项是否由循环 PCM 数据源产生（MediaItem tag 标记）。 */
+    private fun isSourceItem(): Boolean =
+        LoopSourceMode.isSource() &&
+            currentMediaItem?.localConfiguration?.tag === LoopSourceMediaTag
+
     private fun currentRawUs(isReplaying: Boolean): Long = LoopSessionProjection.rawUs(
         isReplaying = isReplaying,
         replayPositionUs = audio.positionUs,

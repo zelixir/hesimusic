@@ -52,6 +52,12 @@ sealed interface PrefillState {
     ) : PrefillState
     data object Ready : PrefillState
     data class Failed(val message: String) : PrefillState
+
+    /**
+     * SOURCE 模式：首块 PCM 加载中（1 秒块，通常 20~40ms）。
+     * 不阻塞播放按钮/拖动；UI 只在超过 300ms 时短暂提示。
+     */
+    data object FirstBlockLoading : PrefillState
 }
 
 /**
@@ -114,6 +120,8 @@ sealed interface LoopPageState {
         val playback: PlaybackState,
         val positionMs: Long,
         val drag: DragState,
+        /** true = 当前页由 SOURCE 数据源驱动（预览页专用；M3′ 模式为 false）。 */
+        val sourceMode: Boolean = false,
     ) : LoopPageState
 
     /** 分析失败 / 入口守卫失败（未找到歌曲、CUE 分轨等）。 */
@@ -148,6 +156,8 @@ sealed interface LoopPageEvent {
         val durationMs: Long,
         val confirmed: Boolean = false,
         val selectedCandidate: Int = 0,
+        /** true = 页面使用 SOURCE 数据源（不启动环缓冲预填）。 */
+        val sourceMode: Boolean = false,
     ) : LoopPageEvent
 
     data class AnalysisFailed(val message: String) : LoopPageEvent
@@ -216,6 +226,9 @@ sealed interface LoopPageEffect {
 
     /** 取消正在进行的预填（新窗口/新候选会让旧预填失效）。 */
     data object CancelPrefill : LoopPageEffect
+
+    /** SOURCE 模式：把新 A/B 应用到数据源（新 timeline/cache key，不重建 player）。 */
+    data class ApplyWindow(val window: LoopWindow) : LoopPageEffect
 
     data class PersistConfirm(val songId: Long, val window: LoopWindow) : LoopPageEffect
     data class PersistDemote(val songId: Long) : LoopPageEffect
@@ -343,15 +356,16 @@ object LoopPageReducer {
             candidates = event.candidates,
             selectedCandidate = selected,
             confirmed = event.confirmed,
-            // 预填由 StartPrefill effect 真正启动(播放器未 prepared 时 VM 会推迟),
-            // 因此这里先 NotStarted;PrefillStarted 再进入 InProgress,避免首次进页
-            // 显示一条没有尽头的「正在准备环缓冲…」。
+            // M3′：预填由 StartPrefill effect 真正启动(播放器未 prepared 时 VM 会推迟)，
+            // 因此这里先 NotStarted;PrefillStarted 再进入 InProgress。
+            // SOURCE：没有环缓冲预填，首块由数据源按需解码。
             prefill = PrefillState.NotStarted,
             playback = PlaybackState.Stopped,
             positionMs = 0L,
             drag = DragState.Idle,
+            sourceMode = event.sourceMode,
         )
-        val effects = if (chosen != null) {
+        val effects = if (chosen != null && !event.sourceMode) {
             listOf(LoopPageEffect.StartPrefill(ready.window()))
         } else {
             emptyList()
@@ -410,6 +424,24 @@ object LoopPageReducer {
         val candidate = state.candidates.getOrNull(index) ?: return noEffects(state)
         val (aMs, bMs) = candidateWindowMs(candidate, state.sampleRate, state.durationMs)
         val startMs = modeStartMs(state.mode, aMs, bMs)
+
+        if (state.sourceMode && state.mode != LoopPageMode.FREE) {
+            // SOURCE：候选点击 = 新窗口（新 cache key）+ 立即 seek/play；没有预填等待。
+            val next = state.copy(
+                selectedCandidate = index,
+                aMs = aMs,
+                bMs = bMs,
+                positionMs = startMs,
+                drag = DragState.Idle,
+                prefill = PrefillState.FirstBlockLoading,
+                playback = PlaybackState.Playing,
+            )
+            return next to listOf(
+                LoopPageEffect.ApplyWindow(next.window()),
+                LoopPageEffect.SeekTo(startMs),
+                LoopPageEffect.Play(state.mode, startMs),
+            )
+        }
 
         // 候选点击本身就是“试听”动作:
         // - 正在播放 / 已在等预填 → AwaitingPrefill(00009:等新 ring,完成必补 Play);
@@ -496,6 +528,28 @@ object LoopPageReducer {
         val startMs = modeStartMs(state.mode, state.aMs, state.bMs)
         val active = state.playback is PlaybackState.Playing ||
             state.playback is PlaybackState.AwaitingPrefill
+
+        if (state.sourceMode) {
+            // SOURCE：A/B 变化只换数据源窗口（新 cache key），不重建 player、不等预填。
+            val next = state.copy(
+                positionMs = startMs,
+                drag = DragState.Idle,
+                prefill = if (active && state.mode != LoopPageMode.FREE) {
+                    PrefillState.FirstBlockLoading
+                } else if (active) {
+                    state.prefill
+                } else {
+                    PrefillState.NotStarted
+                },
+                playback = if (active) PlaybackState.Playing else state.playback,
+            )
+            val effects = mutableListOf<LoopPageEffect>(
+                LoopPageEffect.ApplyWindow(next.window()),
+                LoopPageEffect.SeekTo(startMs),
+            )
+            if (active) effects += LoopPageEffect.Play(state.mode, startMs)
+            return next to effects
+        }
         val next = state.copy(
             positionMs = startMs,
             drag = DragState.Idle,
@@ -533,6 +587,13 @@ object LoopPageReducer {
             mode = mode,
             playback = PlaybackState.Playing,
             positionMs = startMs,
+            prefill = if (state.sourceMode && mode != LoopPageMode.FREE) {
+                PrefillState.FirstBlockLoading
+            } else if (state.sourceMode && mode == LoopPageMode.FREE) {
+                PrefillState.NotStarted
+            } else {
+                state.prefill
+            },
         )
         return next to listOf(
             LoopPageEffect.SeekTo(startMs),
@@ -546,8 +607,14 @@ object LoopPageReducer {
         PlaybackState.Playing -> state.copy(playback = PlaybackState.Paused) to listOf(LoopPageEffect.Pause)
         is PlaybackState.AwaitingPrefill -> state.copy(playback = PlaybackState.Paused) to listOf(LoopPageEffect.Pause)
         PlaybackState.Paused, PlaybackState.Stopped ->
-            state.copy(playback = PlaybackState.Playing) to
-                listOf(LoopPageEffect.Play(state.mode, state.positionMs))
+            state.copy(
+                playback = PlaybackState.Playing,
+                prefill = if (state.sourceMode && state.mode != LoopPageMode.FREE) {
+                    PrefillState.FirstBlockLoading
+                } else {
+                    state.prefill
+                },
+            ) to listOf(LoopPageEffect.Play(state.mode, state.positionMs))
     }
 
     private fun tick(
@@ -558,11 +625,14 @@ object LoopPageReducer {
 
     private fun prefillStarted(
         state: LoopPageState.Ready,
-    ): Pair<LoopPageState, List<LoopPageEffect>> = when (state.prefill) {
+    ): Pair<LoopPageState, List<LoopPageEffect>> {
+        if (state.sourceMode) return noEffects(state)
+        return when (state.prefill) {
         PrefillState.NotStarted, is PrefillState.Failed ->
             state.copy(prefill = PrefillState.InProgress(0f)) to emptyList()
 
         else -> noEffects(state)
+        }
     }
 
     private fun prefillProgress(
@@ -570,7 +640,9 @@ object LoopPageReducer {
         progress: Float,
         coveredMs: Long,
         totalMs: Long,
-    ): Pair<LoopPageState, List<LoopPageEffect>> = when (val prefill = state.prefill) {
+    ): Pair<LoopPageState, List<LoopPageEffect>> {
+        if (state.sourceMode) return noEffects(state)
+        return when (val prefill = state.prefill) {
         PrefillState.Ready -> noEffects(state)
 
         is PrefillState.Partial ->
@@ -596,6 +668,7 @@ object LoopPageReducer {
                 ),
             ) to emptyList()
         }
+        }
     }
 
     private fun prefillPartialReady(
@@ -603,6 +676,7 @@ object LoopPageReducer {
         coveredMs: Long,
         totalMs: Long,
     ): Pair<LoopPageState, List<LoopPageEffect>> {
+        if (state.sourceMode) return noEffects(state)
         // 整环已完整 / 已经前缀就绪:重复信号不重复 Play。
         if (state.prefill == PrefillState.Ready || state.prefill is PrefillState.Partial) {
             return noEffects(state)
@@ -626,6 +700,10 @@ object LoopPageReducer {
     private fun prefillReady(
         state: LoopPageState.Ready,
     ): Pair<LoopPageState, List<LoopPageEffect>> {
+        if (state.sourceMode) {
+            // SOURCE 的首块就绪：只清提示，不改播放状态。
+            return state.copy(prefill = PrefillState.Ready) to emptyList()
+        }
         if (state.prefill == PrefillState.Ready) return noEffects(state)
         // 前缀已就绪(Partial)时补一个“整环完成”不改变播放状态。
         if (state.prefill is PrefillState.Partial) {
@@ -647,6 +725,10 @@ object LoopPageReducer {
         state: LoopPageState.Ready,
         message: String,
     ): Pair<LoopPageState, List<LoopPageEffect>> {
+        if (state.sourceMode) {
+            // SOURCE 的块失败由数据源跳过/上报；页面不进入 AwaitingPrefill。
+            return state.copy(prefill = PrefillState.NotStarted) to emptyList()
+        }
         if (state.prefill == PrefillState.Ready) return noEffects(state)
         // 前缀已就绪:后续分片失败不影响已可播的前缀,保持 Partial/播放不变。
         if (state.prefill is PrefillState.Partial) return noEffects(state)
@@ -707,7 +789,17 @@ object LoopPageReducer {
         positionMs: Long,
     ): Pair<LoopPageState, List<LoopPageEffect>> {
         val target = positionMs.coerceIn(0L, state.durationMs)
-        return state.copy(positionMs = target) to listOf(LoopPageEffect.SeekTo(target))
+        return state.copy(
+            positionMs = target,
+            prefill = if (state.sourceMode &&
+                state.mode != LoopPageMode.FREE &&
+                state.playback is PlaybackState.Playing
+            ) {
+                PrefillState.FirstBlockLoading
+            } else {
+                state.prefill
+            },
+        ) to listOf(LoopPageEffect.SeekTo(target))
     }
 
     // ------------------------------------------------------------------ 纯工具

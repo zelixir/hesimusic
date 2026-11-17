@@ -2,7 +2,7 @@
 
 > 状态：**调查结论 + 最小原型（纯 JVM）已落地**。
 > 不接 UI/service、不碰设备、不加依赖；写域仅 `loop/audio/source/**`、对应测试、本文件。
-> 全量单测基线 1047 → 当前 **1093**（新增 46），0 failures / 0 skipped。
+> 全量单测基线 1047 → 当前 **1103**（新增 56；第二阶段接入后），0 failures / 0 skipped。
 
 ## 0. 结论摘要
 
@@ -335,6 +335,9 @@ app/src/main/java/com/zjr/hesimusic/loop/audio/source/
   LoopingPcmMediaSource.kt     // media3 MediaSource（无限动态 Timeline）
   PcmDecoderRangeProvider.kt  // 生产适配：PcmDecoder.decodePcm16Range
   PcmFileFormatProbe.kt       // MediaExtractor 探测 sr/ch（生产构造前用）
+  LoopSourceMode.kt           // M3_PRIME / SOURCE 开关 + settings 读取 + MediaItem tag
+  LoopSourceProjection.kt     // T ↔ display/seek 投影（纯函数）
+  SourceRenderersFactory.kt   // SOURCE 默认 AudioSink + TapAudioSink（只取证不改 PTS）
 
 app/src/test/java/com/zjr/hesimusic/loop/audio/source/
   LoopingPcmTimelineTest.kt
@@ -344,6 +347,8 @@ app/src/test/java/com/zjr/hesimusic/loop/audio/source/
   LoopingPcmSampleStreamTest.kt
   LoopingPcmMediaSourceTest.kt
   LoopTrackAssignmentTest.kt
+  LoopSourceProjectionTest.kt
+  LoopSourceProjectionTest.kt
   SyntheticPcmProvider.kt
   LoopingPcmTestSupport.kt
 ```
@@ -374,10 +379,10 @@ app/src/test/java/com/zjr/hesimusic/loop/audio/source/
 
 ```
 :app:testDebugUnitTest
-files=66 tests=1093 failures=0 skipped=0
+files=68 tests=1103 failures=0 skipped=0
 ```
 
-（基线 1047，新增 46；最后以实际跑数为准。）
+（基线 1047，新增 56；最后以实际跑数为准。）
 
 覆盖：
 
@@ -402,35 +407,104 @@ files=66 tests=1093 failures=0 skipped=0
 | MediaSource 单窗口动态可 seek | `LoopingPcmMediaSourceTest` |
 | 音频 selection 在 renderer index 1 也正确挂流 | `LoopTrackAssignmentTest` |
 
-## 6. 预览页接入方案（本阶段不实现）
+## 6. 预览页接入（第二阶段，已接）
 
-### 6.1 要改的文件
+### 6.1 开关
+
+`LoopSourceMode` 默认 `M3_PRIME`。真机验证无需改 debug 源集/UI：
+
+```
+adb shell settings put global hesi_loop_source_mode 1   # SOURCE
+adb shell settings put global hesi_loop_source_mode 0   # M3′（默认）
+```
+
+`PreviewPlayer` 在打开结果页时读取该 setting；因此**设置后重新进入结果页**即可。
+默认 0 时页面状态 `sourceMode=false`，行为与改造前完全一致。
+
+### 6.2 启动/拖动时序（SOURCE）
+
+1. **进页**：`PreviewPlayer.prepare()` 只写 song/A/B/window/时长，**不创建播放器**；
+   `LoopPageState.Ready.sourceMode=true`。
+2. **第一次 Play**：按模式选引擎：
+   - FULL/LOOP_ONLY/SEAM：`SourceRenderersFactory` + `LoopingPcmMediaSource`；
+   - FREE：仍走 M3′/普通播放（SOURCE 不接管 FREE）。
+3. **首块**：`MediaPeriod.prepare()` 只解当前 1 秒块 → `onPrepared` → player READY →
+   `PreviewPlayer.sourceFirstBlockEvents` → reducer 把 `FirstBlockLoading` 清为 READY。
+   UI 仅在 >300ms 时显示「正在加载首块…」，不阻塞播放按钮/拖动。
+4. **拖动**：`PreviewPlayer.seekToDisplayMs` 把展示位置反算为数据源时间轴 T，
+   调用普通 `player.seekTo(T)` → `MediaPeriod.seekToUs`。命中块立即出样本；
+   未命中只解目标块；ExoPlayer 自己的 seek flush 约几十 ms（验收 ≤100ms）。
+5. **A/B 变化**：reducer 发 `ApplyWindow` + `SeekTo` + `Play`；`PreviewPlayer.updateWindow`
+   用新 timeline 构建新 `LoopingPcmMediaSource`，`player.setMediaSource(new, resetPosition=false)`，
+   **不重建 ExoPlayer**；新 `PcmBlockCacheKey` 丢弃旧块。
+   同一 A/B 不重建 source，只 seek。
+
+### 6.3 模式差异
+
+- SOURCE 的 FULL 从 **A** 起播（数据源时间轴 T=0 对应 A，前奏不参与循环）；
+  UI 已在该模式下提示。需要严格“从前奏 0 起播”请切回 M3′。
+- LOOP_ONLY：从 A 起。
+- SEAM：从 B−5s 起（数据源 T=L−5s，显示仍 B−5s）。
+- FREE/M3_PRIME：原路径完全不变。
+
+### 6.4 改动的文件
 
 | 文件 | 改动 |
 |---|---|
-| `ui/loop/PreviewPlayer.kt` | 用 `LoopingPcmMediaSource` 替换 `ProgressiveMediaSource`/Clipping；不包 `LoopAudioSink`，用默认 RenderersFactory；A/B 变化时 `player.setMediaSource(newSource, /* resetPosition= */ false)`（同一个 player，新 source/新 cache key）；seek 把显示位置换算成 T |
-| `ui/loop/LoopViewModel.kt` / `LoopPageState.kt` | `PrefillState` 退化为 `FirstBlockLoading`；不再等 `RingChunkedSeeder`；播放/拖动按钮立即可用；首块 >300ms 才显示短提示 |
-| `ui/loop/LoopPageEffectRunner.kt` | 删除 `prefillLoop`/ring 预填触发，改为 observability（首块耗时） |
-| `service/LoopSessionPlayer.kt` | 位置投影改为 `display = A + floorMod(T + entryOffset, L)`；duration 仍用整曲；seek 把 display 换算成 T |
-| `service/LoopPlaybackCoordinator.kt` | 正式播放构造 `LoopingPcmMediaSource`；预览/正式共用；M3′ 保留为 fallback |
-| `di/MediaModule.kt` | 数据源路径需要默认 `AudioSink`（不能全局注入 `LoopRenderersFactory`）；计划给循环 player 单独 RenderersFactory 或让 `LoopAudioSink` 在数据源模式直通 |
-| `tools/loop-smoothness.ts` | 通过数据源调试 tap（`LoopingPcmSampleStream` 增加可选 PCM 监听）抓 PCM；不依赖 sink 重写 |
+| `ui/loop/PreviewPlayer.kt` | SOURCE/M3′ 双引擎；SOURCE 默认 AudioSink + TapAudioSink；A/B 新 source 不重建 player；source 首块事件 |
+| `ui/loop/state/LoopPageState.kt` | `Ready.sourceMode`、`AnalysisDone.sourceMode`、`PrefillState.FirstBlockLoading`、`LoopPageEffect.ApplyWindow`；SOURCE 不启动预填、不进入 AwaitingPrefill |
+| `ui/loop/LoopViewModel.kt` | 读取/传递 sourceMode；SOURCE 跳过 `startPrefillInternal`；`ApplyWindow` 接到 PreviewPlayer；首块事件清提示 |
+| `ui/loop/LoopPageEffectRunner.kt` | 新增 `ApplyWindow` 执行；`StartPrefill/CancelPrefill` 仍保留给 M3′ |
+| `ui/loop/LoopPagePrefillUi.kt` / `LoopScreen.kt` | FirstBlockLoading 文案、300ms 提示、SOURCE 下隐藏 M3 长窗口/前缀未就绪提示 |
+| `service/LoopSessionPlayer.kt` | tag 识别的 source 投影（`A + floorMod(T,L)`，seek 反算 T）；M3′ 分支不变 |
+| `service/LoopPlaybackCoordinator.kt` | 仅对 tagged source item 跳过 M3 shape，避免 sink 二次拦截 |
+| `di/MediaModule.kt` | SOURCE 时选 `SourceRenderersFactory`，M3′ 时保持 `LoopRenderersFactory` |
+| `loop/audio/source/*` | `LoopSourceMode/LoopSourceProjection/SourceRenderersFactory(TapAudioSink)` |
 
-### 6.2 删除 prefill 等待
+### 6.5 无缝取证
 
-- 进页即构造 source + `player.prepare()`；`prepare` 只解首块；
-- 播放按钮/seek 不再等 `PrefillState.READY`；
-- 首块加载中只禁用"播放"以外的最多 300ms 提示，不阻塞拖动；
-- A/B 改动：新 source + 新 `PcmBlockCacheKey`，旧缓存丢弃；
-- 页面位置用 `T mod L` 投影，不再依赖 sink 的 replay 相位。
+- `TapAudioSink` 只委托 `DefaultAudioSink` 并 tap 实际消费的 PCM，不改 PTS；
+- `LoopAudioController.window` 在 SOURCE 启动时写入 A/B，因此既有
+  `POST /debug/tap` + `tools/loop-smoothness.ts` 仍可分析 SOURCE 预览输出；
+- 期望：`seamAlign` 帧距 == L、`zeroRuns/clicks` PASS；用户 seek 的空洞 ≤100ms。
 
-### 6.3 首块延迟预算
+### 6.6 正式播放（边界说明）
 
-- 块大小 1s，48kHz/2ch 解码耗时目标 20~40ms；
-- 首块链路：worker 提交 → `PcmDecoder.decodePcm16Range` → 块缓存 READY → onPrepared；
-  中间无整环、无预取（预取在 onPrepared 之后）；
-- 合成音频测试用 20ms 人工延迟，首块 <500ms 且只解 1 块；
-- 真机验收：进页到首声 ≤300ms；拖动命中 ≤150ms、未命中 ≤250ms（需设备，本阶段不做）。
+`LoopSessionPlayer` 已按 `LoopSourceMediaTag` 支持 source 投影，`LoopPlaybackCoordinator`
+也会跳过 tagged source 的 M3 shape。但把主播放器队列里的当前 item 换成自定义 MediaSource
+需要 `MusicService`/MediaSourceFactory 级改动（不在本阶段写域）；本阶段 SOURCE 的**实际接线是预览页**。
+默认 M3_PRIME 下正式播放路径完全未变；主播放器即使启动时 SourceRenderersFactory，
+也不会自动获得 loop source，需下一阶段接 MediaSourceFactory/队列。
+
+### 6.7 首块延迟预算
+
+- 1s 块，48kHz/2ch 解码目标 20~40ms；
+- 首块链路：worker → `PcmDecoder.decodePcm16Range` → 块 READY → onPrepared；
+  无整环、无预取（预取在 onPrepared 后）；
+- 合成音频 20ms 人工延迟测试：只解 1 块、<500ms；
+- 真机验收：进页首声 ≤300ms；拖动命中 ≤150ms、未命中 ≤250ms。
+
+### 6.8 上机验证步骤（给 lead）
+
+1. 装 debug 包，先保持默认 `hesi_loop_source_mode=0`，进结果页播放/拖动，确认与改造前一致（M3′ 回退）。
+2. `adb shell settings put global hesi_loop_source_mode 1`，退出结果页再进入（让 PreviewPlayer 重新读 setting）。
+3. 选「仅循环段」或「接缝检查」→ Play；logcat 过滤：
+   - `LoopPreview`：`source installed ...`、`play source mode=... startT=...`、`source first block ready`、`source seek display=... targetT=...`、`source window updated ...`;
+   - `LoopSourceMode`：`loop source mode -> SOURCE`；
+   - `LoopPerf`：现有 frame/underrun 统计。
+4. `POST /debug/tap {"path":"/sdcard/Download/source.pcm"}`，播 2~3 圈，停；拉文件 + sidecar：
+   `bun run tools/loop-smoothness.ts source.pcm --events source.pcm.jsonl`；
+   期望 `RESULT: PASS`，`seamAlign` 帧距 == L，`zeroRuns/clicks` 通过。
+5. seek 空洞：在 tap 里量 seek 前后连续非零样本距；或 logcat 记录
+   `applyVolumeShaper/seek` 与 `source first block ready` 的时间差，目标 ≤100ms。
+6. 反复拖同一段：观察 `LoopingPcmSourceCore.decodeCallCount`（可加 1Hz 日志）或
+   `source seek` 日志，第二次起不再出现新的 `decode block`。
+7. A/B 改动：拖动 A/B 松手，确认 logcat 出现 `source window updated` 且没有
+   `preview player created`（没有重建 player）。
+8. 回退：`adb shell settings put global hesi_loop_source_mode 0`，退出重进；
+   确认 `sourceMode=false`，预填/环回行为与改造前一致。
+
+注意：SOURCE 的 FULL 从 A 起播（前奏不参与）；要验证前奏请用 M3′ 或 FREE。
 
 ## 7. 与 M3′ / Seam Splice 的取舍
 

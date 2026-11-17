@@ -26,6 +26,13 @@ interface LoopPageEffectHost {
 
     fun cancelPrefill()
 
+    /**
+     * SOURCE 模式：把新 A/B 应用到循环数据源（新 timeline / 新缓存 key）。
+     * 默认 no-op，保证 M3′/测试宿主无需实现。
+     */
+    fun applyWindow(window: LoopWindow) {}
+
+
     fun persistConfirm(songId: Long, window: LoopWindow, onResult: (Boolean) -> Unit)
 
     fun persistDemote(songId: Long, onResult: (Boolean) -> Unit)
@@ -73,6 +80,8 @@ class LoopPageEffectRunner(
                 is LoopPageEffect.StartPrefill -> host.startPrefill(effect.window)
 
                 LoopPageEffect.CancelPrefill -> host.cancelPrefill()
+
+                is LoopPageEffect.ApplyWindow -> host.applyWindow(effect.window)
 
                 is LoopPageEffect.PersistConfirm -> host.persistConfirm(effect.songId, effect.window) { ok ->
                     if (ok) {

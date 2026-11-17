@@ -15,11 +15,22 @@ import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.loop.LoopPosition
 import com.zjr.hesimusic.loop.LoopWindow
+import com.zjr.hesimusic.loop.analysis.PcmDecoder
 import com.zjr.hesimusic.loop.audio.LoopAudioController
 import com.zjr.hesimusic.loop.audio.LoopPcmEngine
 import com.zjr.hesimusic.loop.audio.LoopRenderersFactory
+import com.zjr.hesimusic.loop.audio.source.LoopSourceMediaTag
+import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
+import com.zjr.hesimusic.loop.audio.source.LoopSourceProjection
+import com.zjr.hesimusic.loop.audio.source.LoopingPcmMediaSource
+import com.zjr.hesimusic.loop.audio.source.LoopingPcmTimeline
+import com.zjr.hesimusic.loop.audio.source.PcmDecoderRangeProvider
+import com.zjr.hesimusic.loop.audio.source.PcmFileFormatProbe
+import com.zjr.hesimusic.loop.audio.source.SourceRenderersFactory
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import javax.inject.Inject
@@ -58,6 +69,7 @@ enum class PreviewMode(val label: String) {
 @UnstableApi
 class PreviewPlayer @Inject constructor(
     @ApplicationContext private val context: Context,
+    private val pcmDecoder: PcmDecoder,
 ) {
 
     companion object {
@@ -80,10 +92,32 @@ class PreviewPlayer @Inject constructor(
         const val MIN_LOOP_LENGTH_MS = 500L
     }
 
+    init {
+        // 打开结果页时读取真机调试开关（默认 M3′）。
+        LoopSourceMode.refreshFromSettings(context)
+    }
+
     /** 独立音频控制器:窗口/ring/位置都只属于预览,不污染主播放。 */
     private val controller = LoopAudioController()
 
+    private enum class EngineKind { M3, SOURCE }
+
+    private var engineKind: EngineKind = EngineKind.M3
+
     private var player: ExoPlayer? = null
+
+    /** SOURCE 路径当前持有的 MediaSource / timeline / 窗口。 */
+    private var source: LoopingPcmMediaSource? = null
+    private var sourceTimeline: LoopingPcmTimeline? = null
+    private var sourceWindow: LoopWindow? = null
+    private var sourceSongId: Long? = null
+
+    /** play 真正创建播放器之前收到的展示口径 seek；首次 play 时使用。 */
+    private var pendingSeekMs: Long? = null
+
+    /** SOURCE 播放器是否正在运行（位置口径/UI 状态用）。 */
+    @Volatile
+    private var sourceActive: Boolean = false
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -126,14 +160,25 @@ class PreviewPlayer @Inject constructor(
     /** 环缓冲区是否已完整覆盖 [A,B)(false 时接缝检查会退化为普通播放)。 */
     val ringReady: StateFlow<Boolean> = _ringReady.asStateFlow()
 
+    private val _sourceFirstBlockReady = MutableStateFlow(false)
+    private val _sourceFirstBlockEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
+
+    /** SOURCE 模式每次首块就绪的事件（StateFlow 会合并，这里用 SharedFlow 保证每次播放/seek 都能通知）。 */
+    val sourceFirstBlockEvents: SharedFlow<Unit> = _sourceFirstBlockEvents
+
     private val _durationMs = MutableStateFlow(0L)
     val durationMs: StateFlow<Long> = _durationMs.asStateFlow()
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    /** 窗口/歌曲已写入（播放器可延迟到 play 时按模式创建）。 */
     val isPrepared: Boolean
-        get() = prepared && player != null
+        get() = prepared && song != null
+
+    /** 实际 ExoPlayer 是否已创建（M3′ 预填延迟判据）。 */
+    val hasPlayer: Boolean
+        get() = player != null
 
     val songId: Long?
         get() = song?.id
@@ -145,7 +190,6 @@ class PreviewPlayer @Inject constructor(
      * 不自动播放(播放由 [play] 触发);重复调用会整体重建。
      */
     fun prepare(song: Song, aMs: Long, bMs: Long) {
-        val p = ensurePlayer()
         val duration = maxOf(song.duration, bMs, 0L)
         this.song = song
         this.mode = PreviewMode.FULL
@@ -156,27 +200,69 @@ class PreviewPlayer @Inject constructor(
         this.aMs = aa
         this.bMs = bb
 
-        val newWindow = buildWindow(song.id, aa, bb)
+        // 播放器延迟到 play 时按模式创建（SOURCE 用默认 AudioSink，M3′ 用 LoopRenderersFactory）。
+        val newWindow = buildWindow(song.id, aa, bb, allowLong = LoopSourceMode.isSource())
         window = newWindow
         controller.fullDurationUs = duration * 1000L
         controller.window = newWindow
-
-        p.setMediaItem(buildMediaItem(song))
-        p.prepare()
-        p.playWhenReady = false
         prepared = true
+        pendingSeekMs = null
+        _positionMs.value = aa
         updatePositionOnce()
     }
 
     /** 按模式起播。已 prepare 时只做窗口切换 + seek + play(MediaItem 不裁剪、不重建)。 */
     fun play(mode: PreviewMode, startMs: Long) {
         val song = this.song ?: return
-        val p = ensurePlayer()
         if (!prepared) {
             prepare(song, aMs, bMs)
         }
+        pendingSeekMs = null
         this.mode = mode
+        val useSource = shouldUseSource(mode)
+        val p = ensurePlayer(if (useSource) EngineKind.SOURCE else EngineKind.M3)
 
+        if (useSource) {
+            _sourceFirstBlockReady.value = false
+            val w = window
+            if (w != null && prepareSource(song, w)) {
+                val currentT = if (sourceActive && p.currentPosition > 0L) {
+                    p.currentPosition * 1000L
+                } else {
+                    sourceStartMs(mode) * 1000L
+                }
+                val startT = LoopSourceProjection.timelineUsForDisplay(
+                    displayUs = startMs.coerceAtLeast(0L) * 1000L,
+                    currentTimelineUs = currentT,
+                    window = w,
+                ) / 1000L
+                p.seekTo(startT)
+                if (p.playbackState == Player.STATE_IDLE) {
+                    p.prepare()
+                }
+                p.play()
+                sourceActive = true
+                markSourceReadyFromState(p)
+                updatePositionOnce()
+                Log.d(
+                    TAG,
+                    "play source mode=" + mode + " startT=" + startT + "Ms window=" + w +
+                        " source=" + source,
+                )
+                return
+            }
+            // 探测/构建失败：释放 SOURCE 播放器，回退 M3′，不阻塞预览。
+            Log.w(TAG, "source prepare failed; fallback to M3' mode=" + mode)
+            releasePlayerOnly()
+            _sourceFirstBlockEvents.tryEmit(Unit)
+            ensurePlayer(EngineKind.M3)
+        }
+
+        playM3(song, mode, startMs)
+    }
+
+    private fun playM3(song: Song, mode: PreviewMode, startMs: Long) {
+        val p = ensurePlayer(EngineKind.M3)
         if (mode == PreviewMode.FREE) {
             applyFreeShape()
         } else {
@@ -191,6 +277,7 @@ class PreviewPlayer @Inject constructor(
             p.prepare()
         }
         p.play()
+        sourceActive = false
         updatePositionOnce()
         Log.d(
             TAG,
@@ -207,10 +294,28 @@ class PreviewPlayer @Inject constructor(
      */
     fun playFromCurrent(mode: PreviewMode) {
         val song = this.song ?: return
-        val p = ensurePlayer()
-        if (!prepared) {
-            // 尚未 prepare 时没有“当前位置”可恢复：退回普通 play，由 prepare 建窗口。
-            play(mode, 0L)
+        val p = player
+        if (!prepared || p == null) {
+            // 尚未真正创建播放器：退回普通 play，并使用播放器就绪前的 pending seek。
+            val start = pendingSeekMs
+                ?: if (shouldUseSource(mode)) sourceStartMs(mode) else modeStartMs()
+            pendingSeekMs = null
+            play(mode, start)
+            return
+        }
+        if (sourceActive && shouldUseSource(mode)) {
+            this.mode = mode
+            if (p.playbackState == Player.STATE_IDLE) p.prepare()
+            p.play()
+            updatePositionOnce()
+            Log.d(TAG, "playFromCurrent source mode=" + mode + " window=" + window)
+            return
+        }
+        val sourceEngine = engineKind == EngineKind.SOURCE
+        val wantSource = shouldUseSource(mode)
+        if (sourceEngine != wantSource) {
+            // 模式跨 SOURCE/M3′：重建播放器（预览页允许，A/B 改动不会走到这里）。
+            play(mode, sourceStartMs(mode))
             return
         }
         this.mode = mode
@@ -265,22 +370,31 @@ class PreviewPlayer @Inject constructor(
         pcm16: ByteArray,
         sampleRate: Int,
         channels: Int,
-    ) = controller.seedRingRange(window, startFrame, pcm16, sampleRate, channels)
+    ): LoopPcmEngine.SeedResult {
+        if (LoopSourceMode.isSource()) {
+            return LoopPcmEngine.SeedResult(
+                status = LoopPcmEngine.SeedStatus.REJECTED_RELEASED,
+                detail = "source mode has no ring prefill",
+            )
+        }
+        return controller.seedRingRange(window, startFrame, pcm16, sampleRate, channels)
+    }
 
     /** 当前 ring 已连续覆盖的前缀帧数（分片预填进度）。 */
     val ringCoveredFrames: Long
-        get() = controller.coveredFrames
+        get() = if (LoopSourceMode.isSource()) 0L else controller.coveredFrames
 
     /** 预览播放器是否已经把窗口写进音频层（= 已 prepare/起播过）。 */
     val hasRingWindow: Boolean
-        get() = controller.window != null
+        get() = if (LoopSourceMode.isSource()) source != null else controller.window != null
 
     /**
      * 当前窗口的 ring 是否已经完整（预填或捕获）。为 true 时后台预填解码可以跳过，
      * 避免同一窗口反复解码大区间。
      */
     fun isRingReadyFor(window: LoopWindow): Boolean =
-        controller.window == window && controller.isRingComplete
+        if (LoopSourceMode.isSource()) sourceWindow == window && source != null
+        else controller.window == window && controller.isRingComplete
 
     /** 暂停(保留位置与已捕获的 ring;resume 走 [play] 从展示位置起播)。 */
     fun pause() {
@@ -288,9 +402,29 @@ class PreviewPlayer @Inject constructor(
         _isPlaying.value = false
     }
 
-    /** 按展示口径 seek(内部经 LoopPosition.rawSeekUs 映射到引擎原始位置)。 */
+    /** 按展示口径 seek。SOURCE 走数据源时间轴 T，M3′ 走 LoopPosition.rawSeekUs。 */
     fun seekToDisplayMs(ms: Long) {
         if (!prepared) return
+        val w = window
+        val p = player
+        if (p == null) {
+            pendingSeekMs = ms.coerceAtLeast(0L)
+            return
+        }
+        if (sourceActive && w != null && engineKind == EngineKind.SOURCE) {
+            _sourceFirstBlockReady.value = false
+            val currentT = p.currentPosition.coerceAtLeast(0L) * 1000L
+            val targetT = LoopSourceProjection.timelineUsForDisplay(
+                displayUs = ms.coerceAtLeast(0L) * 1000L,
+                currentTimelineUs = currentT,
+                window = w,
+            )
+            p.seekTo(targetT / 1000L)
+            markSourceReadyFromState(p)
+            updatePositionOnce()
+            Log.d(TAG, "source seek display=" + ms + "ms targetT=" + (targetT / 1000L) + "ms")
+            return
+        }
         seekRaw(ms.coerceAtLeast(0L))
         updatePositionOnce()
     }
@@ -311,11 +445,45 @@ class PreviewPlayer @Inject constructor(
         this.bMs = bb
         if (this.mode == PreviewMode.FREE) return
 
-        val p = player ?: return
-        val newWindow = buildWindow(song.id, aa, bb)
+        val newWindow = buildWindow(song.id, aa, bb, allowLong = LoopSourceMode.isSource())
         window = newWindow
         controller.window = newWindow
 
+        val p = player
+        if (shouldUseSource(this.mode) && p != null && engineKind == EngineKind.SOURCE) {
+            _sourceFirstBlockReady.value = false
+            val wasPlaying = p.isPlaying
+            if (newWindow == null) {
+                // 窗口失效：回退 M3′/直通，保持播放器不崩。
+                play(this.mode, modeStartMs())
+                return
+            }
+            if (sourceWindow == newWindow && source != null) {
+                // 同窗口（例如只改显示）：只重新定位，不重建 source。
+                p.seekTo(sourceStartMs(this.mode))
+                if (wasPlaying) p.play() else p.pause()
+                updatePositionOnce()
+                return
+            }
+            if (prepareSource(song, newWindow)) {
+                p.seekTo(sourceStartMs(this.mode))
+                if (wasPlaying) p.play() else p.pause()
+                markSourceReadyFromState(p)
+                updatePositionOnce()
+                Log.d(TAG, "source window updated window=" + newWindow + " wasPlaying=" + wasPlaying)
+            } else {
+                Log.w(TAG, "source window update failed; fallback M3'")
+                releasePlayerOnly()
+                _sourceFirstBlockEvents.tryEmit(Unit)
+                play(this.mode, modeStartMs())
+            }
+            return
+        }
+
+        if (p == null) {
+            updatePositionOnce()
+            return
+        }
         val wasPlaying = p.isPlaying
         degradeRetryUsed = false
         seekRaw(modeStartMs())
@@ -325,16 +493,8 @@ class PreviewPlayer @Inject constructor(
 
     /** 释放预览播放器与音频控制器(退出页面/确认保存时调用,幂等)。 */
     fun release() {
+        releasePlayerOnly()
         handler.removeCallbacks(ticker)
-        val p = player
-        player = null
-        if (p != null) {
-            try {
-                p.release()
-            } catch (t: Throwable) {
-                Log.w(TAG, "release failed", t)
-            }
-        }
         controller.window = null
         controller.fullDurationUs = 0L
         song = null
@@ -352,43 +512,167 @@ class PreviewPlayer @Inject constructor(
 
     // ------------------------------------------------------------------ 内部
 
-    private fun ensurePlayer(): ExoPlayer {
-        player?.let { return it }
+    private fun ensurePlayer(kind: EngineKind): ExoPlayer {
+        player?.let { existing ->
+            if (engineKind == kind) return existing
+            releasePlayerOnly()
+        }
         val audioAttributes = AudioAttributes.Builder()
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .setUsage(C.USAGE_MEDIA)
             .build()
+        val renderersFactory = if (kind == EngineKind.SOURCE) {
+            SourceRenderersFactory(context, controller)
+        } else {
+            LoopRenderersFactory(context, controller)
+        }
         val p = ExoPlayer.Builder(context)
-            .setRenderersFactory(LoopRenderersFactory(context, controller))
+            .setRenderersFactory(renderersFactory)
             .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true)
             .setHandleAudioBecomingNoisy(true)
             .build()
         p.addListener(listener)
         player = p
-        // 引擎请求降级(ring 不完整/重放失败)时给调试日志;预览侧不做自动 seek 回补,
-        // 由 UI 提示用户改试听模式(完整循环/仅循环段会重新捕获 ring)。
-        controller.onDegradeRequested = { targetRawUs ->
-            Log.w(TAG, "engine degrade requested targetRawUs=" + targetRawUs)
-            // 补环:引擎发现 ring 没覆盖 [A,B)(典型场景:接缝检查从 B−5s 冷启动)。
-            // 按引擎建议的目标(当前轮起点 −250ms)seek 回去,让 ring 重新完整捕获;
-            // 每次起播只补一次,避免反复跳播。
-            if (!degradeRetryUsed) {
-                degradeRetryUsed = true
-                val targetMs = (targetRawUs / 1000L).coerceAtLeast(0L)
-                Log.w(TAG, "degrade recovery seek -> " + targetMs + "ms")
-                try {
-                    player?.seekTo(targetMs)
-                } catch (t: Throwable) {
-                    Log.w(TAG, "degrade recovery seek failed", t)
+        engineKind = kind
+        sourceActive = false
+        if (kind == EngineKind.M3) {
+            // 引擎请求降级(ring 不完整/重放失败)时给调试日志;预览侧不做自动 seek 回补,
+            // 由 UI 提示用户改试听模式(完整循环/仅循环段会重新捕获 ring)。
+            controller.onDegradeRequested = { targetRawUs ->
+                Log.w(TAG, "engine degrade requested targetRawUs=" + targetRawUs)
+                // 补环:引擎发现 ring 没覆盖 [A,B)(典型场景:接缝检查从 B−5s 冷启动)。
+                // 按引擎建议的目标(当前轮起点 −250ms)seek 回去,让 ring 重新完整捕获;
+                // 每次起播只补一次,避免反复跳播。
+                if (!degradeRetryUsed) {
+                    degradeRetryUsed = true
+                    val targetMs = (targetRawUs / 1000L).coerceAtLeast(0L)
+                    Log.w(TAG, "degrade recovery seek -> " + targetMs + "ms")
+                    try {
+                        player?.seekTo(targetMs)
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "degrade recovery seek failed", t)
+                    }
                 }
             }
+        } else {
+            controller.onDegradeRequested = null
         }
+        handler.removeCallbacks(ticker)
         handler.post(ticker)
-        Log.d(TAG, "preview player created")
+        Log.d(TAG, "preview player created kind=" + kind)
         return p
     }
 
-    private fun applyLoopShape(song: Song) {
+    private fun markSourceReadyFromState(p: ExoPlayer) {
+        val ready = p.playbackState == Player.STATE_READY
+        val newlyReady = ready && !_sourceFirstBlockReady.value
+        _sourceFirstBlockReady.value = ready
+        if (newlyReady) {
+            _sourceFirstBlockEvents.tryEmit(Unit)
+        }
+    }
+
+    private fun releasePlayerOnly() {
+        handler.removeCallbacks(ticker)
+        val p = player
+        player = null
+        if (p != null) {
+            try {
+                p.removeListener(listener)
+                p.release()
+            } catch (t: Throwable) {
+                Log.w(TAG, "release player failed", t)
+            }
+        }
+        source = null
+        sourceTimeline = null
+        sourceWindow = null
+        sourceSongId = null
+        sourceActive = false
+        engineKind = EngineKind.M3
+        controller.window = null
+        controller.onDegradeRequested = null
+        _isReplaying.value = false
+        _ringReady.value = false
+        _sourceFirstBlockReady.value = false
+    }
+
+    /** 当前模式是否走循环数据源：SOURCE + 非 FREE + 有有效窗口。 */
+    private fun shouldUseSource(mode: PreviewMode): Boolean =
+        LoopSourceMode.isSource() && mode != PreviewMode.FREE && window != null
+
+    /**
+     * 为当前窗口构建/安装循环 PCM 数据源。
+     *
+     * - 数据源时间轴 T=0 对应当前 A；
+     * - MediaItem 打 [LoopSourceMediaTag]，供 LoopSessionPlayer 未来识别；
+     * - A/B 变化 = 新 timeline/new source（新缓存 key），不重建 ExoPlayer。
+     */
+    private fun prepareSource(song: Song, window: LoopWindow): Boolean {
+        val p = ensurePlayer(EngineKind.SOURCE)
+        if (source != null &&
+            sourceWindow == window &&
+            sourceSongId == song.id &&
+            engineKind == EngineKind.SOURCE
+        ) {
+            return true
+        }
+        return try {
+            val format = PcmFileFormatProbe.probe(song.filePath)
+            val timeline = LoopingPcmTimeline(
+                songId = song.id,
+                loopStartUs = window.loopStartUs,
+                loopEndUs = window.loopEndUs,
+                format = format,
+                entryPositionUs = window.loopStartUs,
+            )
+            val item = song.toMediaItem().buildUpon()
+                .setTag(LoopSourceMediaTag)
+                .build()
+            val mediaSource = LoopingPcmMediaSource(
+                item = item,
+                timeline = timeline,
+                provider = PcmDecoderRangeProvider(pcmDecoder, song.filePath),
+            )
+            p.setMediaSource(mediaSource, /* resetPosition= */ false)
+            p.prepare()
+            this.source = mediaSource
+            this.sourceTimeline = timeline
+            this.sourceWindow = window
+            this.sourceSongId = song.id
+            sourceActive = true
+            markSourceReadyFromState(p)
+            controller.window = window
+            controller.fullDurationUs = _durationMs.value * 1000L
+            Log.d(
+                TAG,
+                "source installed song=" + song.id + " window=" + window +
+                    " format=" + format + " timelineFrames=" + timeline.loopFrames,
+            )
+            true
+        } catch (t: Throwable) {
+            Log.w(TAG, "prepare source failed", t)
+            source = null
+            sourceTimeline = null
+            sourceWindow = null
+            sourceSongId = null
+            sourceActive = false
+            false
+        }
+    }
+
+    /** SOURCE 模式起始时间轴 T（ms）。FULL/LOOP_ONLY 从 A 起，SEAM 从 B−5s 起。 */
+    private fun sourceStartMs(mode: PreviewMode): Long {
+        val w = window ?: return 0L
+        val startUs = when (mode) {
+            PreviewMode.FULL, PreviewMode.LOOP_ONLY -> w.loopStartUs
+            PreviewMode.SEAM -> maxOf(w.loopStartUs, w.loopEndUs - SEAM_LEAD_MS * 1000L)
+            PreviewMode.FREE -> 0L
+        }
+        return LoopSourceProjection.initialTimelineUs(startUs, w) / 1000L
+    }
+
+        private fun applyLoopShape(song: Song) {
         val w = window ?: buildWindow(song.id, aMs, bMs).also {
             window = it
         }
@@ -415,11 +699,16 @@ class PreviewPlayer @Inject constructor(
      */
     private fun buildMediaItem(song: Song): MediaItem = song.toMediaItem()
 
-    private fun buildWindow(songId: Long, aMs: Long, bMs: Long): LoopWindow? {
+    private fun buildWindow(
+        songId: Long,
+        aMs: Long,
+        bMs: Long,
+        allowLong: Boolean = false,
+    ): LoopWindow? {
         if (songId <= 0L || bMs - aMs < MIN_LOOP_LENGTH_MS) return null
-        // 引擎的 ring 上限(300s / 64MB):超限时引擎会降级直通,这里同步不启用窗口,
-        // 预览按整曲播放而不是在 B 处停住。
-        if (bMs - aMs > LoopPcmEngine.MAX_LOOP_DURATION_US / 1000L) return null
+        // M3′ 的 ring 上限(300s / 64MB):超限时引擎会降级直通,这里同步不启用窗口。
+        // SOURCE 数据源按 1s 块按需解码,没有这个上限。
+        if (!allowLong && bMs - aMs > LoopPcmEngine.MAX_LOOP_DURATION_US / 1000L) return null
         return LoopWindow(songId, aMs * 1000L, bMs * 1000L)
     }
 
@@ -471,6 +760,15 @@ class PreviewPlayer @Inject constructor(
     private fun updatePositionOnce() {
         val p = player ?: return
         val w = window
+        if (sourceActive && engineKind == EngineKind.SOURCE && w != null) {
+            val timelineUs = p.currentPosition.coerceAtLeast(0L) * 1000L
+            val displayUs = LoopSourceProjection.displayUs(timelineUs, w)
+            _positionMs.value = displayUs.coerceAtLeast(0L) / 1000L
+            _isPlaying.value = p.isPlaying
+            _isReplaying.value = _sourceFirstBlockReady.value
+            _ringReady.value = true
+            return
+        }
         val rawUs = if (w != null && controller.isReplaying) {
             val engineUs = controller.positionUs
             if (engineUs > 0L) engineUs else p.currentPosition.coerceAtLeast(0L) * 1000L
@@ -513,6 +811,17 @@ class PreviewPlayer @Inject constructor(
         override fun onPlaybackStateChanged(playbackState: Int) {
             _buffering.value = playbackState == Player.STATE_BUFFERING
             _isPlaying.value = player?.isPlaying == true
+            if (sourceActive && engineKind == EngineKind.SOURCE) {
+                if (playbackState == Player.STATE_READY) {
+                    if (!_sourceFirstBlockReady.value) {
+                        Log.d(TAG, "source first block ready")
+                    }
+                    _sourceFirstBlockReady.value = true
+                    _sourceFirstBlockEvents.tryEmit(Unit)
+                } else if (playbackState == Player.STATE_BUFFERING) {
+                    _sourceFirstBlockReady.value = false
+                }
+            }
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {

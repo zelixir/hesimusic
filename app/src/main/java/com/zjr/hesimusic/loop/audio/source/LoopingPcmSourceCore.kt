@@ -319,6 +319,10 @@ class LoopingPcmSourceCore(
                     data = trimmed.data,
                 ),
             )
+            logger(
+                "decode block=" + block + " frames=" + expectedFrames +
+                    " calls=" + decodeCalls + " cacheBytes=" + cache.cachedBytes(),
+            )
             return true
         }
     }

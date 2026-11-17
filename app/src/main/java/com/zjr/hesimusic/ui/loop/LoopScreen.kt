@@ -382,18 +382,19 @@ private fun ResultContent(
     val playingIntent = state.playback is PlaybackState.Playing ||
         state.playback is PlaybackState.AwaitingPrefill
     val prefill = state.prefill
-    val ringPreparing = prefill is PrefillState.InProgress
+    val firstBlockLoading = prefill is PrefillState.FirstBlockLoading
+    val ringPreparing = prefill is PrefillState.InProgress || firstBlockLoading
     val prefixReady = prefillPrefixReady(prefill)
     val prefillLabel = prefillProgressLabel(prefill)
 
-    // 弱提示:预填超过 1.5s 仍未就绪才显示;前缀就绪(PrefillState.Partial)立即隐藏。
+    // 弱提示:SOURCE 首块超过 300ms、M3′ 预填超过 1.5s 才显示;就绪立即隐藏。
     var showPrefillHint by remember { mutableStateOf(false) }
-    LaunchedEffect(ringPreparing) {
+    LaunchedEffect(ringPreparing, firstBlockLoading) {
         if (!ringPreparing) {
             showPrefillHint = false
         } else {
             showPrefillHint = false
-            delay(1_500L)
+            delay(if (firstBlockLoading) 300L else 1_500L)
             showPrefillHint = true
         }
     }
@@ -403,7 +404,7 @@ private fun ResultContent(
     } else {
         0f
     }
-    val loopTooLong = (bMs - aMs) > 300_000L
+    val loopTooLong = !state.sourceMode && (bMs - aMs) > 300_000L
 
     // 60fps 插值播放头:该状态只在波形 Canvas 绘制作用域读取 → 每帧只失效 draw phase
     val playheadMs = remember { mutableLongStateOf(0L) }
@@ -532,11 +533,15 @@ private fun ResultContent(
             }
         }
         Text(
-            modeHint(mode.toPreviewMode()),
+            if (state.sourceMode && mode == LoopPageMode.FULL) {
+                "SOURCE 模式:直接从循环段 A 起播(前奏不参与循环);需要听前奏请切回 M3′。"
+            } else {
+                modeHint(mode.toPreviewMode())
+            },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (mode == LoopPageMode.SEAM && !prefixReady && !ringPreparing) {
+        if (!state.sourceMode && mode == LoopPageMode.SEAM && !prefixReady && !ringPreparing) {
             Text(
                 "环缓冲前缀尚未就绪:请先完整试听一轮「完整循环」或「仅循环段」,接缝检查才能无缝环回",
                 style = MaterialTheme.typography.bodySmall,

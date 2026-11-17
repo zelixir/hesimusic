@@ -1145,6 +1145,7 @@ object LoopPageMatrix {
                 }
 
                 PrefillState.Ready -> Unit
+                PrefillState.FirstBlockLoading -> Unit
                 is PrefillState.Failed -> Unit
             }
         }

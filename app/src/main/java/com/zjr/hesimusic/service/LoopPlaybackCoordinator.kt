@@ -13,6 +13,8 @@ import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.analysis.PcmDecoder
 import com.zjr.hesimusic.loop.audio.LoopAudioController
+import com.zjr.hesimusic.loop.audio.source.LoopSourceMediaTag
+import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -396,6 +398,18 @@ class LoopPlaybackCoordinator @Inject constructor(
      * - ring 覆盖度必须在写窗口**之后**读：setWindow 会让 ring 失效（可能由后台预分配重建）。
      */
     private fun syncShape(window: LoopWindow?, player: Player, reason: String) {
+        // SOURCE 数据源自己负责循环/PTS/seek；这里不能再写 M3′ 的 window/ring，
+        // 否则 LoopAudioSink 会二次拦截 PCM。A/B 变更由 SOURCE 侧新 source 承接。
+        if (LoopSourceMode.isSource() &&
+            player.currentMediaItem?.localConfiguration?.tag === LoopSourceMediaTag
+        ) {
+            Log.d(
+                TAG,
+                "source mode: skip M3 shape reason=" + reason +
+                    " window=" + window + " item=" + player.currentMediaItem?.mediaId,
+            )
+            return
+        }
         val index = player.currentMediaItemIndex
         val itemSongId = player.currentMediaItem?.mediaId?.let { mediaIdToSongId(it) }
         val targetWindow = LoopShapePlan.targetWindow(itemSongId, window)

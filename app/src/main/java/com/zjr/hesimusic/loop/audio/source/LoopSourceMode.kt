@@ -1,0 +1,56 @@
+package com.zjr.hesimusic.loop.audio.source
+
+import android.content.Context
+import android.provider.Settings
+import android.util.Log
+
+/**
+ * 循环实现路线开关。
+ *
+ * - [M3_PRIME]：现有 M3′（LoopAudioSink 捕获 + 重放 + PTS 改写），默认，保持现网行为；
+ * - [SOURCE]：循环 PCM 数据源（LoopingPcmMediaSource + 块缓存），预览页与正式播放
+ *   在支持的模式下走该路径。
+ *
+ * 默认 M3_PRIME。切换是**会话级**的：预览播放器在创建时读取；主播放器在 ExoPlayer
+ * 构建时读取。运行期可以写 [current]（debug/测试用），已经创建的播放器不会自动换 sink。
+ *
+ * 真机验证开关（不新增 UI，不改 debug 源集）：
+ * ```
+ * adb shell settings put global hesi_loop_source_mode 1   # SOURCE
+ * adb shell settings put global hesi_loop_source_mode 0   # M3′（默认）
+ * ```
+ * 预览播放器在打开结果页时读取；主播放器在进程启动时读取。
+ */
+enum class LoopSourceMode {
+    M3_PRIME,
+    SOURCE,
+    ;
+
+    companion object {
+        private const val TAG = "LoopSourceMode"
+        private const val SETTING_KEY = "hesi_loop_source_mode"
+
+        @Volatile
+        var current: LoopSourceMode = M3_PRIME
+
+        fun isSource(): Boolean = current == SOURCE
+
+        /** 读全局 setting（0/1）；没有设置时保持默认 M3′。 */
+        fun refreshFromSettings(context: Context) {
+            val value = try {
+                Settings.Global.getInt(context.contentResolver, SETTING_KEY, 0)
+            } catch (t: Throwable) {
+                Log.w(TAG, "read $SETTING_KEY failed", t)
+                return
+            }
+            val next = if (value == 1) SOURCE else M3_PRIME
+            if (next != current) {
+                Log.i(TAG, "loop source mode -> $next (global $SETTING_KEY=$value)")
+            }
+            current = next
+        }
+    }
+}
+
+/** 标记“这个 MediaItem 由循环 PCM 数据源产生”，供 LoopSessionPlayer 识别。 */
+object LoopSourceMediaTag

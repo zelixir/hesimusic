@@ -19,6 +19,8 @@ internal fun prefillProgressLabel(prefill: PrefillState): String? = when (prefil
         }
     }
 
+    PrefillState.FirstBlockLoading -> "正在加载首块…"
+
     else -> null
 }
 

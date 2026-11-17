@@ -33,7 +33,7 @@ class LoopingPcmMediaSource(
     private val timeline: LoopingPcmTimeline,
     private val provider: PcmRangeProvider,
     private val maxCacheBytes: Long = PcmBlockCache.DEFAULT_MAX_BYTES,
-    private val logger: (String) -> Unit = { message -> Log.w("LoopPcmSource", message) },
+    private val logger: (String) -> Unit = { message -> Log.d("LoopPcmSource", message) },
 ) : MediaSource {
 
     private val lock = Any()
