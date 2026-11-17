@@ -1369,12 +1369,11 @@ class LoopAudioSinkTest {
             assertEquals("data chunk 长度应为 200", 200, dataSize)
 
             val lines = sidecar.readLines()
-            assertTrue(
-                "window=null 时 run 的 aMs/bMs 应为 null",
+            assertFalse(
+                "窗口未就绪时不应写 aMs/bMs=null 的 run",
                 lines.any {
                     it.contains("\"ev\":\"run\"") &&
-                        it.contains("\"aMs\":null") &&
-                        it.contains("\"bMs\":null")
+                        (it.contains("\"aMs\":null") || it.contains("\"bMs\":null"))
                 },
             )
         } finally {

@@ -12,6 +12,42 @@ import java.nio.ByteOrder
 class LoopAudioControllerTapTest {
 
     @Test
+    fun `format change after setPcmTap keeps same handle and writes new frames`() {
+        val dir = createTempDir(prefix = "loop-tap-format-")
+        val pcm = File(dir, "format.pcm")
+        val controller = LoopAudioController()
+        try {
+            controller.setPcmTap(pcm)
+            controller.onFormatConfigured(48_000, 2, 4, false)
+            // 格式变化（如 AudioSink 重新 configure）不应 close/reopen 掉句柄。
+            controller.onFormatConfigured(44_100, 2, 4, false)
+            val buffer = ByteBuffer.allocate(3 * 4).order(ByteOrder.LITTLE_ENDIAN)
+            repeat(3 * 2) { buffer.putShort(0) }
+            buffer.flip()
+            controller.tapPcm(buffer, 0, buffer.limit())
+            controller.onSinkRelease()
+        } finally {
+            controller.setPcmTap(null)
+        }
+        assertEquals(44 + 3 * 4, pcm.readBytes().size)
+    }
+
+    @Test
+    fun `unwritable tap path sets tapFailed`() {
+        val dir = createTempDir(prefix = "loop-tap-fail-")
+        val blocked = File(dir, "blocked")
+        assertTrue(blocked.mkdirs())
+        val controller = LoopAudioController()
+        try {
+            controller.setPcmTap(blocked)
+            controller.onFormatConfigured(48_000, 2, 4, false)
+            assertTrue(controller.tapFailedForTest)
+        } finally {
+            controller.setPcmTap(null)
+        }
+    }
+
+    @Test
     fun `setPcmTap after configure opens file and writes duplicate view frames`() {
         val dir = createTempDir(prefix = "loop-tap-after-")
         val pcm = File(dir, "after.pcm")

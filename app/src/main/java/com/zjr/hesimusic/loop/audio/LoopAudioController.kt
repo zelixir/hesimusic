@@ -409,17 +409,23 @@ class LoopAudioController @Inject constructor() {
             )
             val changed = tapFormat != newFormat
             tapFormat = newFormat
-            if (tapFile != null && (changed || tapOut == null)) {
-                closeTapLocked()
-                tapFailed = false
-                openTapLocked()
-                openTapEventsLocked()
-                writeTapConfigureLocked()
-                if (window != null) writeTapRunLocked()
-            } else if (tapFile != null) {
-                // 同一 WAV 继续写；新 sink/流只追加一条 configure。
-                writeTapConfigureLocked()
-                if (window != null) writeTapRunLocked()
+            if (tapFile != null) {
+                // 格式变化不 close/reopen：同一个文件继续写，避免重开失败后 tapOut 悬空。
+                if (tapOut == null && !tapFailed) {
+                    openTapLocked()
+                    if (tapOut != null) {
+                        openTapEventsLocked()
+                    }
+                }
+                if (tapOut != null) {
+                    writeTapConfigureLocked()
+                    if (window != null) writeTapRunLocked()
+                } else {
+                    tapDebug(
+                        "tap configure without handle changed=" + changed +
+                            " file=" + tapFile + " failed=" + tapFailed,
+                    )
+                }
             }
         }
     }
@@ -519,6 +525,9 @@ class LoopAudioController @Inject constructor() {
     internal val isTapActive: Boolean
         get() = synchronized(tapLock) { tapOut != null }
 
+    internal val tapFailedForTest: Boolean
+        get() = synchronized(tapLock) { tapFailed }
+
     /** 把 delegate 实际消费的一段 PCM 写入 tap（offset/length 相对 buffer 绝对位置）。 */
     internal fun tapPcm(buffer: ByteBuffer, offset: Int, length: Int) {
         if (length <= 0) return
@@ -573,9 +582,13 @@ class LoopAudioController @Inject constructor() {
             tapOut = raf
             tapDataBytes = 0L
             tapDebug("tapOpened file=" + file + " sr=" + fmt.sampleRate + " ch=" + fmt.channels)
-        } catch (e: IOException) {
+        } catch (t: Throwable) {
             tapFailed = true
             tapOut = null
+            tapDebug(
+                "tapOpenFailed file=" + file + " err=" + t.javaClass.simpleName +
+                    ": " + t.message,
+            )
         }
     }
 
@@ -687,11 +700,12 @@ class LoopAudioController @Inject constructor() {
      */
     private fun writeTapRunLocked() {
         if (tapEventOut == null) return
-        val w = window
+        // 窗口未就绪时不要先写一条 aMs/bMs=null 的 run；等 window setter 再写。
+        val w = window ?: return
         if (tapRunWritten && tapRunWindow == w) return
         val sampleRate = tapFormat?.sampleRate ?: 0
-        val aMs = w?.let { it.loopStartUs / 1000L }
-        val bMs = w?.let { it.loopEndUs / 1000L }
+        val aMs = w.loopStartUs / 1000L
+        val bMs = w.loopEndUs / 1000L
         writeTapEventLocked(
             "run",
             "mode" to "sink",
