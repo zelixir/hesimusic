@@ -1,0 +1,6 @@
+{"t":0,"seq":1,"ev":"configure","sr":16000,"ch":2,"bpf":4}
+{"t":0,"seq":2,"ev":"run","mode":"sink","aMs":0,"bMs":800,"sampleRate":16000}
+{"t":400,"seq":3,"ev":"seam","iter":1,"outFrames":6400,"ptsUs":800000}
+{"t":1200,"seq":4,"ev":"seam","iter":2,"outFrames":19200,"ptsUs":1600000}
+{"t":2000,"seq":5,"ev":"seam","iter":3,"outFrames":32000,"ptsUs":2400000}
+{"t":2800,"seq":100,"ev":"end","totalFrames":48000,"flushCount":0,"degradeCount":0}
