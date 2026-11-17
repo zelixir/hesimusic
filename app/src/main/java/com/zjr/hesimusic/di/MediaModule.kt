@@ -7,8 +7,10 @@ import androidx.media3.common.C
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.extractor.DefaultExtractorsFactory
+import com.zjr.hesimusic.loop.analysis.PcmDecoder
 import com.zjr.hesimusic.loop.audio.LoopAudioController
 import com.zjr.hesimusic.loop.audio.LoopRenderersFactory
+import com.zjr.hesimusic.loop.audio.source.LoopAwareMediaSourceFactory
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
 import com.zjr.hesimusic.loop.audio.source.SourceRenderersFactory
 import dagger.Module
@@ -48,22 +50,26 @@ object MediaModule {
         @ApplicationContext context: Context,
         audioAttributes: AudioAttributes,
         extractorsFactory: DefaultExtractorsFactory,
-        loopAudioController: LoopAudioController
+        loopAudioController: LoopAudioController,
+        pcmDecoder: PcmDecoder,
     ): ExoPlayer {
         Log.i(TAG, "Building ExoPlayer")
         val startTime = System.currentTimeMillis()
-
-        // SOURCE 模式：默认 AudioSink + tap（不包 LoopAudioSink，避免二次拦截 PCM）；
-        // M3_PRIME：保持现有 LoopRenderersFactory，行为完全不变。
+        // 主播放器在进程启动时读取会话开关：SOURCE 用默认 sink + 数据源循环，
+        // M3_PRIME 保持 LoopRenderersFactory，行为完全不变。
+        LoopSourceMode.refreshFromSettings(context)
         val renderersFactory = if (LoopSourceMode.isSource()) {
             SourceRenderersFactory(context, loopAudioController)
         } else {
             LoopRenderersFactory(context, loopAudioController)
         }
+        val defaultMediaSourceFactory = DefaultMediaSourceFactory(context, extractorsFactory)
+        val loopAwareFactory = LoopAwareMediaSourceFactory(
+            delegate = defaultMediaSourceFactory,
+            sourceFactory = LoopAwareMediaSourceFactory.defaultSourceFactory(pcmDecoder),
+        )
         val player = ExoPlayer.Builder(context)
-            .setMediaSourceFactory(
-                DefaultMediaSourceFactory(context, extractorsFactory)
-            )
+            .setMediaSourceFactory(loopAwareFactory)
             .setRenderersFactory(renderersFactory)
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)

@@ -216,6 +216,7 @@ fun LoopScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
+                actions = { LoopEngineSwitch(modifier = Modifier.padding(end = 8.dp)) },
             )
         },
     ) { innerPadding ->

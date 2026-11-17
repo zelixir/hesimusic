@@ -31,7 +31,7 @@ enum class LoopSourceMode {
         private const val SETTING_KEY = "hesi_loop_source_mode"
 
         @Volatile
-        var current: LoopSourceMode = SOURCE
+        var current: LoopSourceMode = M3_PRIME
 
         /**
          * 调试/测试用的强制覆盖:非 null 时**优先于**全局 setting。
@@ -45,9 +45,43 @@ enum class LoopSourceMode {
         fun isSource(): Boolean = current == SOURCE
 
         /** 读全局 setting（0/1）；没有设置时保持默认 M3′。 */
+        private const val PREFS = "loop_settings"
+        private const val PREF_KEY = "loop_engine"
+
+        /** 用户在结果页选的引擎(持久化)。没有选过时返回 null。 */
+        fun saved(context: Context): LoopSourceMode? {
+            val raw = try {
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .getString(PREF_KEY, null)
+            } catch (t: Throwable) {
+                null
+            }
+            return when (raw) {
+                "source" -> SOURCE
+                "m3" -> M3_PRIME
+                else -> null
+            }
+        }
+
+        /** 用户在结果页切换引擎:写偏好并立即生效(重新进页生效)。 */
+        fun select(context: Context, mode: LoopSourceMode) {
+            try {
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .edit().putString(PREF_KEY, if (mode == SOURCE) "source" else "m3").apply()
+            } catch (t: Throwable) {
+                Log.w(TAG, "save engine preference failed", t)
+            }
+            current = mode
+            Log.i(TAG, "loop source mode -> " + mode + " (user)")
+        }
+
         fun refreshFromSettings(context: Context) {
             debugOverride?.let { forced ->
                 current = forced
+                return
+            }
+            saved(context)?.let { chosen ->
+                current = chosen
                 return
             }
             val value = try {
@@ -67,3 +101,14 @@ enum class LoopSourceMode {
 
 /** 标记“这个 MediaItem 由循环 PCM 数据源产生”，供 LoopSessionPlayer 识别。 */
 object LoopSourceMediaTag
+
+/**
+ * 正式播放用 tag：MediaSourceFactory 据此只替换当前 item，不全局改队列。
+ * 文件路径/窗口都在 tag 里，factory 可为该 item 构建 LoopingPcmExtractorMediaSource。
+ */
+data class LoopSourceItemTag(
+    val songId: Long,
+    val loopStartUs: Long,
+    val loopEndUs: Long,
+    val filePath: String,
+)

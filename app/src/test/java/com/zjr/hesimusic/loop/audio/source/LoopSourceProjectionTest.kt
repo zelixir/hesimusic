@@ -42,6 +42,14 @@ class LoopSourceProjectionTest {
     }
 
     @Test
+    fun `display to timeline and back is stable inside AB`() {
+        for (displayUs in listOf(aUs, aUs + 1L, 15_000_000L, 35_000_000L, bUs - 1L)) {
+            val timelineUs = LoopSourceProjection.timelineUsForDisplay(displayUs, 0L, window)
+            assertEquals(displayUs, LoopSourceProjection.displayUs(timelineUs, window))
+        }
+    }
+
+    @Test
     fun `invalid or null window passes through`() {
         assertEquals(123L, LoopSourceProjection.displayUs(123L, null))
         assertEquals(123L, LoopSourceProjection.timelineUsForDisplay(123L, 0L, null))

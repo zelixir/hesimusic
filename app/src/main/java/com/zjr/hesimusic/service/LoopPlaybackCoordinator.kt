@@ -1,10 +1,12 @@
 package com.zjr.hesimusic.service
 
 import android.util.Log
+import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import com.zjr.hesimusic.data.dao.SongLoopDao
 import com.zjr.hesimusic.data.mapper.mediaIdToSongId
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
+import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.repository.SongRepository
 import com.zjr.hesimusic.loop.LoopEligibility
 import com.zjr.hesimusic.loop.LoopIntent
@@ -13,8 +15,10 @@ import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.analysis.PcmDecoder
 import com.zjr.hesimusic.loop.audio.LoopAudioController
+import com.zjr.hesimusic.loop.audio.source.LoopSourceItemTag
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMediaTag
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
+import com.zjr.hesimusic.loop.audio.source.LoopSourceProjection
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -72,6 +76,10 @@ class LoopPlaybackCoordinator @Inject constructor(
 
     /** 当前已应用到播放器/音频层的窗口；值相等即视为形态未变。 */
     private var appliedWindow: LoopWindow? = null
+
+    /** 进入 SOURCE 前当前 item 的原件；退出时只恢复这一项，队列不动。 */
+    private var sourceOriginalItem: MediaItem? = null
+    private var sourceOriginalIndex: Int = -1
 
     private var observeJob: Job? = null
     private var observedSongId: Long? = null
@@ -218,8 +226,13 @@ class LoopPlaybackCoordinator @Inject constructor(
             audio.fullDurationUs = if (willBeEligible) songDurationUs(songId) else 0L
             runtime.refresh(songId, mode.repeatMode, row, armedSongId) // 1) 纯函数重算（唯一窗口来源）
             val window = runtime.window.value
+            val sourceSong = if (LoopSourceMode.isSource() && window != null) {
+                songRepository.getSongsByIds(listOf(window.songId)).firstOrNull()
+            } else {
+                null
+            }
             withContext(mainDispatcher) {                          // 2) 形态只在主线程动播放器
-                syncShape(window, player, reason)
+                syncShape(window, player, sourceSong, reason)
             }
             ensureObservation(songId, player)                      // 3) 行变更订阅
         }
@@ -397,11 +410,22 @@ class LoopPlaybackCoordinator @Inject constructor(
      * - 重放态必须在写窗口**之前**读：写 null 会让音频层状态立刻复位成 PASS_THROUGH；
      * - ring 覆盖度必须在写窗口**之后**读：setWindow 会让 ring 失效（可能由后台预分配重建）。
      */
-    private fun syncShape(window: LoopWindow?, player: Player, reason: String) {
+    private fun syncShape(
+        window: LoopWindow?,
+        player: Player,
+        sourceSong: Song?,
+        reason: String,
+    ) {
+        // SOURCE：只替换当前 item 为带 tag 的循环数据源，队列/首页/通知栏不变。
+        if (LoopSourceMode.isSource()) {
+            syncSourceItem(window, player, sourceSong, reason)
+            return
+        }
         // SOURCE 数据源自己负责循环/PTS/seek；这里不能再写 M3′ 的 window/ring，
         // 否则 LoopAudioSink 会二次拦截 PCM。A/B 变更由 SOURCE 侧新 source 承接。
+        val currentTag = player.currentMediaItem?.localConfiguration?.tag
         if (LoopSourceMode.isSource() &&
-            player.currentMediaItem?.localConfiguration?.tag === LoopSourceMediaTag
+            (currentTag === LoopSourceMediaTag || currentTag is LoopSourceItemTag)
         ) {
             Log.d(
                 TAG,
@@ -458,6 +482,74 @@ class LoopPlaybackCoordinator @Inject constructor(
                     " raw=" + seekRawUs + "us window=" + plan.window,
             )
         }
+    }
+
+
+    private fun syncSourceItem(
+        window: LoopWindow?,
+        player: Player,
+        song: Song?,
+        reason: String,
+    ) {
+        val index = player.currentMediaItemIndex
+        if (index < 0) return
+        val current = player.currentMediaItem ?: return
+        val tag = current.localConfiguration?.tag
+        if (window == null) {
+            if (tag is LoopSourceItemTag) {
+                restoreSourceItem(player, index, tag)
+            }
+            return
+        }
+        if (tag is LoopSourceItemTag &&
+            tag.songId == window.songId &&
+            tag.loopStartUs == window.loopStartUs &&
+            tag.loopEndUs == window.loopEndUs
+        ) {
+            return
+        }
+        if (song == null || song.filePath.isBlank()) {
+            Log.w(TAG, "source item skipped: song/file missing id=" + window.songId)
+            return
+        }
+        if (tag !is LoopSourceItemTag) {
+            sourceOriginalItem = current
+            sourceOriginalIndex = index
+        }
+        val tagged = current.buildUpon()
+            .setTag(
+                LoopSourceItemTag(
+                    songId = window.songId,
+                    loopStartUs = window.loopStartUs,
+                    loopEndUs = window.loopEndUs,
+                    filePath = song.filePath,
+                ),
+            )
+            .build()
+        player.replaceMediaItem(index, tagged)
+        // SOURCE timeline T=0 对应当前 A；进循环从 A 起播。
+        player.seekTo(index, 0L)
+        Log.i(
+            TAG,
+            "source item installed reason=" + reason + " songId=" + window.songId +
+                " window=" + window + " path=" + song.filePath,
+        )
+    }
+
+    private fun restoreSourceItem(player: Player, index: Int, tag: LoopSourceItemTag) {
+        val oldWindow = LoopWindow(tag.songId, tag.loopStartUs, tag.loopEndUs)
+        val displayMs = LoopSourceProjection.displayMs(
+            timelineMs = player.currentPosition,
+            window = oldWindow,
+        )
+        val original = sourceOriginalItem?.takeIf { sourceOriginalIndex == index }
+        val restored = original ?: player.currentMediaItem?.buildUpon()?.setTag(null)?.build()
+        sourceOriginalItem = null
+        sourceOriginalIndex = -1
+        if (restored == null) return
+        player.replaceMediaItem(index, restored)
+        player.seekTo(index, displayMs.coerceAtLeast(0L))
+        Log.i(TAG, "source item restored index=" + index + " displayMs=" + displayMs)
     }
 
     /** 引擎原始位置（µs）：旧窗口属于当前项且处于重放期时用 sink 位置，否则用播放器位置。 */

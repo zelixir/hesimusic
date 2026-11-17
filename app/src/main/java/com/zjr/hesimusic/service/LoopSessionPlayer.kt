@@ -8,6 +8,7 @@ import com.zjr.hesimusic.loop.LoopPosition
 import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.LoopAudioController
+import com.zjr.hesimusic.loop.audio.source.LoopSourceItemTag
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMediaTag
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
 import com.zjr.hesimusic.loop.audio.source.LoopSourceProjection
@@ -177,9 +178,11 @@ class LoopSessionPlayer(
 
     /** 引擎原始位置（µs）：重放期取 sink 推进的位置，否则取播放器自身位置。 */
     /** 当前项是否由循环 PCM 数据源产生（MediaItem tag 标记）。 */
-    private fun isSourceItem(): Boolean =
-        LoopSourceMode.isSource() &&
-            currentMediaItem?.localConfiguration?.tag === LoopSourceMediaTag
+    private fun isSourceItem(): Boolean {
+        if (!LoopSourceMode.isSource()) return false
+        val tag = currentMediaItem?.localConfiguration?.tag
+        return tag === LoopSourceMediaTag || tag is LoopSourceItemTag
+    }
 
     private fun currentRawUs(isReplaying: Boolean): Long = LoopSessionProjection.rawUs(
         isReplaying = isReplaying,

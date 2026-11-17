@@ -2,7 +2,7 @@
 
 > 状态：**调查结论 + 最小原型（纯 JVM）已落地**。
 > 不接 UI/service、不碰设备、不加依赖；写域仅 `loop/audio/source/**`、对应测试、本文件。
-> 全量单测基线 1047 → 当前 **1107**（新增 60；第二阶段接入后），0 failures / 0 skipped。
+> 全量单测基线 1047 → 当前 **1121**（新增 74；第二阶段接入后），0 failures / 0 skipped。
 
 ## 0. 结论摘要
 
@@ -381,10 +381,10 @@ app/src/test/java/com/zjr/hesimusic/loop/audio/source/
 
 ```
 :app:testDebugUnitTest
-files=70 tests=1107 failures=0 skipped=0
+files=75 tests=1121 failures=0 skipped=0
 ```
 
-（基线 1047，新增 60；最后以实际跑数为准。）
+（基线 1047，新增 74；最后以实际跑数为准。）
 
 覆盖：
 
@@ -574,6 +574,228 @@ requestDecode firstBlock=false gen=419 ...（每 10ms 一条，gen 一路涨）
 - 同一 PENDING 块连续 `continueLoading()` 100 次：provider 只调用 **1 次**，
   `currentRequestGeneration()` 保持 **0**，`dedupeSkipCount() >= 100`。
 
+
+### 6.11 首块 ready 后仍 BUFFERING：加载门槛（2026-11-17）
+
+真机第三轮：`first block ready -> onPrepared` 已出现，但 `playerPos=0 state=BUFFERING`。
+根因不是解码，而是加载控制门槛：
+
+- media3 `DefaultLoadControl` 默认 `bufferForPlaybackMs=2500`；
+- 首块 1s ready 后，如果 `continueLoading` 没有继续把 k+1/k+2 解出来，
+  缓冲只有 1s，达不到 2.5s 门槛；
+- `getNextLoadPositionUs()` 旧实现返回 `bufferedEndUs()`，边界情况下容易让
+  loader 误判没有下一段可加载；`getBufferedPositionUs()` 必须返回**连续 READY 块末尾**。
+
+修复：
+
+- `LoopingPcmSourceCore.nextLoadPositionUs()`：从 `nextFrame` 起找到第一个非 READY 块，
+  返回该块起点；预取窗口全部 READY 时返回 null（period 映射为 `C.TIME_END_OF_SOURCE`）；
+- `getBufferedPositionUs()` 保持 `core.bufferedEndUs()`（连续 READY 的 PTS 末尾）；
+- `continueLoading()` 继续调度 1s 块，首块任务最多 4 块、普通任务最多 3 块，
+  覆盖默认 3s minBuffer；
+- SOURCE 的 `ExoPlayer.Builder` 加专用 `DefaultLoadControl`：
+  `minBuffer=3000, maxBuffer=8000, bufferForPlayback=1000, bufferForPlaybackAfterRebuffer=1500`，
+  首块 1s 即可放行，继续后台预取；
+- 新增 1s 一条的 `load pos=... buffered=... nextLoad=... loading=... readyBlocks=...` 日志。
+
+新增测试 `buffered end covers continuous ready blocks ...`：
+
+- 连续喂 3 个 READY 块后，`bufferedEndUs() == 3_000_000`；
+- 预取窗口 k+1/k+2 都 READY 时，`nextLoadPositionUs() == null`。
+
+### 6.12 onPrepared 后无 load/read 的排查（2026-11-17）
+
+真机第四轮：`first block ready -> onPrepared` 后没有任何 `load` 日志，也未见读样本。
+说明不是"加载窗口不够"，而是 **ExoPlayer 侧没有进入 continueLoading / 没有消费者**。
+本轮先补齐可定位证据，并做两处防御：
+
+- `LoopingPcmMediaPeriod.getTrackGroups()` 打印 groups/mime/pcm/sampleRate/channelCount；
+- `selectTracks()` 打印：
+  `renderers`、哪些 renderer 有 selection、streams 哪些非空、audio 槽位下标、
+  `stream.isReady()` 与 core 状态；
+- `LoopingPcmSampleStream.readData()` 打印 format 发送与每秒一次
+  `readData sample=... bytes=... ptsUs=...`；
+- `Format` 补 `maxInputSize=64KB`、`id=loop-pcm`，确保 AudioSink/selector 识别为原始 PCM；
+- `onPrepared` 后主动 `callback.onContinueLoadingRequested(this)` 踢一次 loader，
+  避免某些路径 onPrepared 后等待下一次回调。
+
+新增 `LoopingPcmMediaPeriodTrackTest`：用 2 槽 renderer 数组 + 只在 index=1 放
+`ExoTrackSelection`，验证 `selectTracks` 把唯一 stream 挂到 audio 槽，随后
+`readData` 先返回 FORMAT、再返回 PCM（`buffer.timeUs=0`，bytes>0）。
+
+下一步真机日志判读：
+- 无 `getTrackGroups`：period 没有被 track selector 访问，查 onPrepared 回调/周期挂载；
+- 有 `getTrackGroups` 无 `selectTracks`：selector 未进入选择；
+- `selected=[]`：Format 未被识别为可播放 audio，查 mime/pcm/channel/maxInputSize；
+- 有 `assign audioIndex=...=1` 无 `readData`：renderer 未消费，查 RenderersFactory/AudioSink；
+- 有 `readData` 无 `load`：loader 回调问题，查 onPrepared/continueLoading 踢一次是否生效。
+
+### 6.13 渲染器读数据但位置不动：sink/Analytics 诊断（2026-11-17）
+
+真机第五轮：`readData` 持续返回 PCM（pts 已到 10s），但 state 仍 BUFFERING、playerPos=0。
+说明数据源与 renderer 读链路已通，问题在 renderer→AudioSink→AudioTrack 或 buffered 口径。
+本轮补：
+
+- SOURCE 播放器挂 `AnalyticsListener`：state、isPlaying、audio enabled/format、
+  audio position advancing、audio underrun、audio disabled、renderedFirstFrame；
+- `TapAudioSink`：configure 的格式、handleBuffer 每秒的 n/pts/consumed/delta、
+  handleDiscontinuity/flush/reset；
+- `Player.Listener`：source state/isPlaying；
+- tick 日志增加 `buffered`、`playWhenReady`、`playerError`；
+- `load` 日志增加 `bufferedDuration = buffered - pos`；
+- 单测：连续读 1s 后 `bufferedEndUs - currentPtsUs >= 1s`。
+
+真机判读：
+
+- **tap configure 没有**：renderer 没把 format 送 sink；
+- **tap configure 有、handleBuffer n=0**：renderer 读但没写 sink（看 Analytics audio underrun/disabled）；
+- **handleBuffer 有 n、delta=0**：sink 没消费，AudioTrack 未 play/初始化；
+- **Analytics audio disabled/underrun**：查 AudioTrack/焦点/audio session；
+- **load pos=0 buffered=... bufferedDuration=0**：period buffered 口径；
+- **load 每 1s 正常、bufferedDuration>1s 但 state 仍 BUFFERING**：看 playWhenReady/audio focus。
+
+### 6.14 sink 从未 play / buffer=0 / delta=0（2026-11-17）
+
+真机第六轮：track/readData 正常，但：
+
+```text
+tap configure audio/raw/2 48000Hz/2ch buffer=0
+tap handleBuffer n=1 consumed=true before=0 after=0 delta=0
+tap play 从未出现
+tick playerPos=0 buffered=11000 state=2
+```
+
+判读：
+
+1. `buffer=0` 是 **正常的**：`MediaCodecAudioRenderer` 对 AudioSink 固定传
+   `specifiedBufferSize = 0`，由 `DefaultAudioSink` 内部按采样率/声道计算
+   AudioTrack 大小；不是 `Format.maxInputSize` 丢失。
+2. `DefaultAudioSink.handleBuffer` **不保证移动 ByteBuffer.position**；
+   `before/after/delta=0` 不能证明没消费。Tap 改为 consumed=true 时按剩余区间取证。
+3. `tap play` 缺失说明 `MediaCodecAudioRenderer.onStarted()` 没发生，
+   即 renderer 没进入 STARTED；播放器虽然 buffered 11s，仍在 BUFFERING。
+4. 临时兜底（仅 SOURCE）：`TapAudioSink` 第一次收到 `handleBuffer` 后主动
+   `super.play()` 一次（幂等），验证是否只是 sink 未起播；日志：
+   `tap force play after first handleBuffer`。
+   若确认有效，下一步应改回正确的 renderer 契约（不应由 sink 越权 play）。
+
+同时补了 Analytics：
+`state/isPlaying/audio enabled/format/positionAdvancing/underrun/disabled`，
+tick 增加 `buffered/playWhenReady/error`。
+
+`getBufferedPositionUs` 仍返回连续 READY 的 PTS 末尾；新增单测断言
+`bufferedEndUs - currentPtsUs >= 1s`，避免 buffered==position 门槛死锁。
+
+### 6.15 换路：自定义 Extractor + ProgressiveMediaSource（2026-11-17）
+
+手写 MediaPeriod 在生命周期/tracks/readData/buffered/loader/sink 全部通过后，renderer
+仍不启动；为避免继续和手写 period 的 renderer 契约搏斗，新增 **Extractor 管线**：
+
+- [LoopingPcmExtractor.kt](app/src/main/java/com/zjr/hesimusic/loop/audio/source/LoopingPcmExtractor.kt)
+  - `sniff() == true`；
+  - `init()` 输出 `audio/raw` + PCM16 + 真实采样率/声道；
+  - `read()` 从 `LoopingPcmSourceCore` 取 PCM，写入
+    `TrackOutput.sampleData/sampleMetadata`；PTS 由 core 单调生成，B→A 取模；
+  - 当前块未就绪时在加载线程 `core.pumpDecode()` 解一块再取；
+  - `seek()` → `core.seekToTimelineUs(timeUs)`。
+- [LoopingPcmExtractorMediaSource.kt](app/src/main/java/com/zjr/hesimusic/loop/audio/source/LoopingPcmExtractorMediaSource.kt)
+  - 空 `LoopingPcmDataSource`（Extractor 不读真实字节）；
+  - `ProgressiveMediaSource.Factory(dataSource, ExtractorsFactory)`。
+- [LoopSourcePipeline.kt](app/src/main/java/com/zjr/hesimusic/loop/audio/source/LoopSourcePipeline.kt)
+  - `EXTRACTOR`（默认）/ `CUSTOM_PERIOD`；
+  - 真机回退旧实现：`adb shell settings put global hesi_loop_pipeline 0`。
+- `PreviewPlayer` 的 SOURCE 构建按 pipeline 选择；旧手写 period 及全部测试保留。
+
+新增测试 `LoopingPcmExtractorTest`：
+
+- 连续 read 3 秒 PCM，PTS 单调；
+- seek 到 1s 后第一帧 PTS == 1_000_000；
+- 顺带验证 Format 为 raw/PCM16/真实采样率/声道。
+
+默认切到 EXTRACTOR 是为了复用 media3 已验证的
+period/loader/track/renderer 启动路径；若仍不通，保留 CUSTOM_PERIOD 供回退/留档。
+
+### 6.16 SOURCE PCM tap + 事件侧车（2026-11-17）
+
+TapAudioSink 继续复用 LoopAudioController 的 tap：
+- setPcmTap(file) 由现有 /debug/tap 打开；PCM 写成 WAV（44 字节 RIFF 头 + PCM16 LE），
+  脚本同时支持 RIFF/裸 pcm16；
+- handleBuffer 现在在 DefaultAudioSink 不移动 ByteBuffer.position 时也按
+  consumed=true 的剩余区间写 PCM；
+- run 事件增加 loopStartUs/loopEndUs/channels，保留 aMs/bMs/sampleRate；
+- LoopingPcmSourceCore.read() 跨 B 时回调 onSeamOutputFrames，
+  PreviewPlayer 转给 LoopAudioController.tapSeam(outFrames) 写 seam 事件；
+  outFrames 为累计输出帧号；
+- end 事件同时写 totalFrames 和 frames。
+
+测试 LoopAudioControllerTapTest：
+- 1000 stereo PCM16 帧 → 文件 44 + 4000 字节；
+- seam outFrames=1000；
+- run 事件含 loop 窗口与 channels。
+
+### 6.17 脚本触发预览 seek（00019 复用）
+
+新增 [LoopPreviewDebugBridge.kt](app/src/main/java/com/zjr/hesimusic/loop/audio/source/LoopPreviewDebugBridge.kt)：
+主源集对象，seekRequest: ((Long) -> Unit)?，PreviewPlayer 创建 SOURCE 播放器时注册
+（post 到主线程），requestSeek(ms) 记录 lastRequestedMs。
+
+debug 源集新增：
+
+POST /debug/preview-seek {"positionMs":30000}
+→ {"ok":true,"displayMs":30000}
+
+未注册（SOURCE 播放器未创建）返回 409。测试覆盖注册/未注册和 display target。
+
+### 6.18 tap 只有 44 字节：先 configure 后 setPcmTap / snapshot limit（2026-11-17）
+
+真机 1.9.3：handleBuffer 5000+ 次、tap 文件只有 WAV 头 44 字节。
+
+修复：
+
+- `setPcmTap` 在 `tapFormat != null` 时立即 open + 写头 + configure/run；补
+  `setPcmTap file=... format=...`/`tapOpened ...` 日志；
+- `TapAudioSink` 在 delegate 前、且 tap 已打开时**拷贝真实 PCM 快照**，
+  consumed 时按快照写 tap（delegate 可能 clear/rewind buffer）；
+- `onFormatConfigured` 格式变化**不再 close/reopen**：同一文件继续写；只有
+  `tapOut == null` 时才尝试 open，open 失败置 `tapFailed=true` 并打
+  `tapOpenFailed`；
+- `tapPcm` 的边界检查改为 `safeOffset/safeLength` clamp，避免
+  `offset+length > buffer.limit()` 早退；补前 3 次 + 1s 一条
+  `tapPcm len=... off=... limit=... tapOut=... failed=...`；
+- 关闭时仍按 `buildWavHeader(fmt, tapDataBytes)` 回填 RIFF/data 长度；
+- 新增单测：configure 后 setPcmTap → 写 3 帧后文件 = 44 + 3*4；
+  setPcmTap → 格式变化 → 继续写 3 帧 = 44 + 12；duplicate 视图可写；
+  不可写路径 `tapFailed=true`；关闭后 RIFF size / data size 正确。
+
+### 6.19 tap 四项收尾：时长/seam 爆炸/aMs/WAV 尾（2026-11-17）
+
+- tap 时长: onFormatConfigured 不再 close/reopen；closeTapLocked(reason)/
+  tapSegmentEnd 记录原因；setPcmTap 同一路径直接返回，避免镜像调用互相截断；
+  onSinkRelease 只结束当前段并回填头，不关闭 SOURCE 正在写的文件句柄。
+- seam 爆炸: SOURCE sink 设 tapEngineSeamsEnabled=false，只保留 core 的
+  B→A 回调；tapSeam 增加 0.5s 帧间距去重，事件数与真实环回一致。
+- run.aMs: 新增 LoopAudioController.tapWindow，PreviewPlayer 写 source window
+  时同步；writeTapRunLocked 优先用 tapWindow，sink configure 临时 window=null 不再
+  写出 aMs=null 或播放头值。
+- WAV 尾: tapPcm 每 1MB/1s 回填一次 RIFF/data 头；sink release 也回填；
+  closeTapLocked 关闭前再次回填。即使未收到 /debug/tap null，文件头也可用。
+- 测试：setPcmTap→格式变化→写 3 帧 = 44+12；不可写路径 tapFailed=true；
+  core 40s/L=15s 只产生 2~3 次 seam；M3 tap end/header 测试保持通过。
+
+### 6.20 正式播放接入 SOURCE（主播放器，2026-11-17）
+
+- 新增 LoopSourceItemTag(songId/A/B/filePath)；LoopAwareMediaSourceFactory 只对带该
+  tag 的 MediaItem 返回 LoopingPcmExtractorMediaSource，其余 item 原样走
+  DefaultMediaSourceFactory；M3_PRIME 下即使带 tag 也不接管。
+- LoopPlaybackCoordinator 在 SOURCE + 有窗口时只对当前 index 执行一次
+  replaceMediaItem(tagged) 并 seekTo(0)（T=0 对应 A）；保存原 item，退出时恢复
+  当前项并 seek 回 display 位置。队列、首页、通知栏其余项不变，不做整环预填。
+- 主播放器在 MediaModule 里读取 hesi_loop_source_mode：SOURCE 选
+  SourceRenderersFactory，M3_PRIME 仍选 LoopRenderersFactory。
+- LoopSessionPlayer 的 source 识别同时接受旧 preview 的 LoopSourceMediaTag 和正式
+  播放的 LoopSourceItemTag；位置 display = A + floorMod(T,L)，seek 反算
+  timelineUsForDisplay；duration 仍用整曲 L，不读 player 的 TIME_UNSET。
+- 测试：factory 的 tag/mode 选择；display→T→display 往返；全量 1121。
 
 ## 7. 与 M3′ / Seam Splice 的取舍
 
