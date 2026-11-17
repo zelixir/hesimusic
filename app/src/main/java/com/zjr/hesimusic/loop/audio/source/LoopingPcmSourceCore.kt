@@ -53,6 +53,10 @@ class LoopingPcmSourceCore(
     var lastSeekUs: Long = 0L
         private set
 
+    /** B→A 环回时回调累计输出帧号（tap seam 事件用）。 */
+    @Volatile
+    var onSeamOutputFrames: ((Long) -> Unit)? = null
+
     fun currentPtsUs(): Long = synchronized(lock) {
         ptsBaseUs + framesToUs(emittedFrames)
     }
@@ -139,10 +143,16 @@ class LoopingPcmSourceCore(
         val data = block.data.copyOfRange(startBytes, startBytes + byteLength)
 
         if (advance) {
+            val beforeFrame = nextFrame
+            val rawNext = beforeFrame + frames
+            val seamOutFrames = emittedFrames + (timeline.bFrame - beforeFrame)
             emittedFrames += frames.toLong()
-            nextFrame = timeline.normalizeFrame(nextFrame + frames)
+            nextFrame = timeline.normalizeFrame(rawNext)
             skipStreak = 0
             cache.trimToBudget(timeline.blockIndexForFrame(nextFrame))
+            if (rawNext >= timeline.bFrame) {
+                onSeamOutputFrames?.invoke(seamOutFrames)
+            }
         }
         ReadResult(frames = frames, ptsUs = pts, data = data)
     }

@@ -96,6 +96,18 @@ class LoopingPcmSourceCoreLoopTest {
     }
 
     @Test
+    fun `B to A seam reports cumulative output frame at loop boundary`() {
+        val tl = LoopingPcmTestSupport.timeline()
+        val provider = LoopingPcmTestSupport.provider(tl)
+        val core = LoopingPcmSourceCore(tl, provider)
+        var seamFrames = -1L
+        core.onSeamOutputFrames = { seamFrames = it }
+
+        LoopingPcmTestSupport.readExact(core, (tl.loopFrames + 1L).toInt(), maxFramesPerRead = 257)
+        assertEquals(tl.loopFrames, seamFrames)
+    }
+
+    @Test
     fun `buffered end covers continuous ready blocks and next load ends at prefetch edge`() {
         val tl = LoopingPcmTestSupport.timeline()
         val provider = LoopingPcmTestSupport.provider(tl)

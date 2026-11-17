@@ -565,6 +565,7 @@ class LoopAudioController @Inject constructor() {
         writeTapEventLocked(
             "end",
             "totalFrames" to totalFrames,
+            "frames" to totalFrames,
             "flushCount" to tapFlushCount,
             "degradeCount" to engine.degradeCount,
         )
@@ -593,6 +594,15 @@ class LoopAudioController @Inject constructor() {
             }
         } else {
             tapDataBytes = 0L
+        }
+    }
+
+    /** SOURCE 数据源 B→A 环回：写入与 PCM 累计帧严格对应的 seam 事件。 */
+    internal fun tapSeam(outFrames: Long) {
+        synchronized(tapLock) {
+            if (tapEventOut != null) {
+                writeTapEventLocked("seam", "outFrames" to outFrames)
+            }
         }
     }
 
@@ -666,7 +676,10 @@ class LoopAudioController @Inject constructor() {
             "mode" to "sink",
             "aMs" to aMs,
             "bMs" to bMs,
+            "loopStartUs" to w?.loopStartUs,
+            "loopEndUs" to w?.loopEndUs,
             "sampleRate" to sampleRate,
+            "channels" to tapFormat?.channels,
         )
         tapRunWritten = true
         tapRunWindow = w

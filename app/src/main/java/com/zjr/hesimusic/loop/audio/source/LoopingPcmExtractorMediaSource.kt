@@ -55,8 +55,11 @@ object LoopingPcmExtractorMediaSource {
         timeline: LoopingPcmTimeline,
         provider: PcmRangeProvider,
         logger: (String) -> Unit = {},
+        onSeamOutputFrames: ((Long) -> Unit)? = null,
     ): MediaSource {
-        val core = LoopingPcmSourceCore(timeline, provider)
+        val core = LoopingPcmSourceCore(timeline, provider).also {
+            it.onSeamOutputFrames = onSeamOutputFrames
+        }
         val extractors = ExtractorsFactory {
             arrayOf<Extractor>(LoopingPcmExtractor(core, timeline, logger))
         }

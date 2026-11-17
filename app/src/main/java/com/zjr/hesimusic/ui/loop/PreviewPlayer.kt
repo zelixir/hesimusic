@@ -29,6 +29,7 @@ import com.zjr.hesimusic.loop.audio.source.LoopSourceMediaTag
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
 import com.zjr.hesimusic.loop.audio.source.LoopSourcePipeline
 import com.zjr.hesimusic.loop.audio.source.LoopSourceProjection
+import com.zjr.hesimusic.loop.audio.source.LoopPreviewDebugBridge
 import com.zjr.hesimusic.loop.audio.source.LoopingPcmExtractorMediaSource
 import com.zjr.hesimusic.loop.audio.source.LoopingPcmMediaSource
 import com.zjr.hesimusic.loop.audio.source.LoopingPcmTimeline
@@ -607,6 +608,12 @@ class PreviewPlayer @Inject constructor(
             })
         }
         p.addListener(listener)
+        if (kind == EngineKind.SOURCE) {
+            LoopPreviewDebugBridge.register { positionMs ->
+                // HTTP/debug 线程 → 播放器必须回到主线程。
+                handler.post { seekToDisplayMs(positionMs) }
+            }
+        }
         player = p
         engineKind = kind
         sourceActive = false
@@ -648,6 +655,7 @@ class PreviewPlayer @Inject constructor(
     }
 
     private fun releasePlayerOnly() {
+        LoopPreviewDebugBridge.unregister()
         handler.removeCallbacks(ticker)
         val p = player
         player = null
@@ -711,6 +719,7 @@ class PreviewPlayer @Inject constructor(
                     timeline = timeline,
                     provider = provider,
                     logger = { message -> Log.d("LoopPcmSource", message) },
+                    onSeamOutputFrames = { outFrames -> controller.tapSeam(outFrames) },
                 )
             } else {
                 LoopingPcmMediaSource(

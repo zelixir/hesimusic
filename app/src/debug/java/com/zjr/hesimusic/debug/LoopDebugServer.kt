@@ -13,6 +13,7 @@ import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.loop.LoopPosition
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.SeamBufferMode
+import com.zjr.hesimusic.loop.audio.source.LoopPreviewDebugBridge
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
 import com.zjr.hesimusic.loop.analysis.AnalysisState
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
@@ -354,6 +355,7 @@ object LoopDebugServer {
             method == "POST" && segments == listOf("debug", "pcm-compare") -> handlePcmCompare(body)
             method == "POST" && segments == listOf("debug", "seam") -> handleSeamToggle(body)
             method == "POST" && segments == listOf("debug", "source-mode") -> handleSourceModeToggle(body)
+            method == "POST" && segments == listOf("debug", "preview-seek") -> handlePreviewSeek(body)
             else -> throw HttpError(404, "unknown endpoint: $method ${request.path}")
         }
     }
@@ -1327,6 +1329,16 @@ object LoopDebugServer {
      * path 非空 → LoopAudioController.setPcmTap(File(path));空/缺省 → 关闭。
      * 相对路径按 filesDir 解析;返回 tapping/path,便于 PC 用 run-as 拉文件。
      */
+    /** POST /debug/preview-seek {positionMs} —— 脚本触发 SOURCE 预览 seek。 */
+    private fun handlePreviewSeek(body: JSONObject?): Map<String, Any?> {
+        val requested = body?.requireLong("positionMs")
+            ?: throw HttpError(400, "positionMs is required")
+        if (requested < 0L) throw HttpError(400, "positionMs must be >= 0")
+        val ok = LoopPreviewDebugBridge.requestSeek(requested)
+        if (!ok) throw HttpError(409, "preview seek bridge is not registered (SOURCE player not created)")
+        return linkedMapOf("ok" to true, "displayMs" to requested)
+    }
+
     private suspend fun handleDebugTap(body: JSONObject?): Map<String, Any?> {
         val d = deps()
         // JSON null 时 optString 会返回字面量 "null",必须显式判 isNull。

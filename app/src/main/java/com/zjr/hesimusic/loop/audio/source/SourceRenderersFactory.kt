@@ -68,6 +68,9 @@ class TapAudioSink(
         encodedAccessUnitCount: Int,
     ): Boolean {
         val before = buffer.position()
+        // DefaultAudioSink 可能消费后不移动 position/limit；先留一个视图，
+        // consumed 时按快照写 tap，保证 PCM 不丢。
+        val tapSnapshot = if (buffer.hasRemaining()) buffer.duplicate() else null
         val consumed = super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
         val after = buffer.position()
         handledBuffers += 1L
@@ -83,10 +86,9 @@ class TapAudioSink(
         }
         if (after > before) {
             controller.tapPcm(buffer, before, after - before)
-        } else if (consumed && buffer.hasRemaining()) {
-            // DefaultAudioSink 可能不移动 ByteBuffer.position；consumed=true 时
-            // 按剩余区间取证，避免 tap 永远为空。
-            controller.tapPcm(buffer, buffer.position(), buffer.remaining())
+        } else if (consumed && tapSnapshot != null) {
+            // DefaultAudioSink 不保证移动 ByteBuffer.position；使用之前的快照。
+            controller.tapPcm(tapSnapshot, tapSnapshot.position(), tapSnapshot.remaining())
         }
         if (!forcedPlay) {
             // SOURCE 诊断兜底：renderer 已读数据但未回调 onStarted 时，
