@@ -31,7 +31,7 @@ enum class LoopSourceMode {
         private const val SETTING_KEY = "hesi_loop_source_mode"
 
         @Volatile
-        var current: LoopSourceMode = M3_PRIME
+        var current: LoopSourceMode = SOURCE
 
         /**
          * 调试/测试用的强制覆盖:非 null 时**优先于**全局 setting。
@@ -56,7 +56,7 @@ enum class LoopSourceMode {
                 Log.w(TAG, "read $SETTING_KEY failed", t)
                 return
             }
-            val next = if (value == 1) SOURCE else M3_PRIME
+            val next = if (value == 0) M3_PRIME else SOURCE
             if (next != current) {
                 Log.i(TAG, "loop source mode -> $next (global $SETTING_KEY=$value)")
             }
