@@ -160,6 +160,7 @@ class LoopAudioSinkTest {
 
         assertTrue("立体声 bpf4 必须能切: " + sink.seamDebugStats(), sink.seamDebugStats().contains("switch=1"))
         assertTrue("内存应为 2Δ*4: " + sink.seamDebugStats(), sink.seamDebugStats().contains("bytes=8000"))
+        assertTrue("bDeltaUs 应为 B-Δ: " + sink.seamDebugStats(), sink.seamDebugStats().contains("bDeltaUs=30000000"))
         assertTrue(fake.feeds.any { it.frames > 0 && it.ptsUs >= 30_000_000L })
     }
 
@@ -185,6 +186,32 @@ class LoopAudioSinkTest {
         assertTrue("写失败应立即回源直通: " + sink.seamDebugStats(), sink.seamDebugStats().contains("bypass=true"))
         assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(31_000, 1000), 31_000_000L))
         assertTrue("失败后源 PCM 必须继续写", fake.feeds.any { it.ptsUs >= 31_000_000L })
+    }
+
+    @Test
+    fun `seam 切回源写失败重试一次且位置连续`() {
+        val (controller, sink, fake) = rig(window(0, 31_000))
+        controller.seamBufferMode = SeamBufferMode.ON
+        controller.seamSinkRouteEnabled = true
+        controller.seamDeltaUs = 1_000_000L
+        controller.seamDecodeRange = { s, e ->
+            PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(s.toInt(), (e - s).toInt()))
+        }
+        controller.seamSeekRequested = { }
+
+        var f = 0
+        while (f < 30_000) {
+            assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(f, 1000), f * 1000L))
+            f += 1000
+        }
+        assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(30_000, 1000), 30_000_000L))
+        assertTrue(sink.seamDebugStats().contains("switch=1"))
+
+        // S 已播完，切回源 A+Δ=1s；让 delegate 第一次源写失败，重试应成功。
+        fake.failNextBuffer = true
+        assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(1000, 1000), 1_000_000L))
+        assertFalse("重试成功不得 bypass: " + sink.seamDebugStats(), sink.seamDebugStats().contains("bypass=true"))
+        assertTrue(fake.feeds.any { it.ptsUs >= 1_000_000L && it.ptsUs < 2_000_000L })
     }
 
     @Test

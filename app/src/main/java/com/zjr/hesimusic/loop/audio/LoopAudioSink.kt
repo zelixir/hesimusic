@@ -525,6 +525,12 @@ class LoopAudioSink(
     }
 
     private fun switchSeamToSource() {
+        // S 的 Y 结束在 B+Δ，而源要从 raw A+Δ 继续：这是跨轮回跳。
+        // 先 flush 清掉 delegate 里旧时间轴/残留，再重置时间戳基线。
+        try {
+            super.flush()
+        } catch (_: Throwable) {
+        }
         resetDelegateForSeam("resume")
         seamState = SeamRouteState.NORMAL
         seamSeekIssued = false
@@ -604,17 +610,51 @@ class LoopAudioSink(
         val end = minOf(start + bytes, restoreLimit)
         buffer.limit(end)
         val before = buffer.position()
-        val accepted = try {
+        val accept: () -> Boolean = {
+            buffer.position(start)
+            buffer.limit(end)
             super.handleBuffer(buffer, mediaPtsUs + outputStreamOffsetUs, 1)
+        }
+        var accepted = try {
+            accept()
         } catch (t: Throwable) {
             try {
-                Log.w("LoopPerf", "seam source write failed pts=" + mediaPtsUs, t)
+                Log.w(
+                    "LoopPerf",
+                    "seam source write failed pts=" + mediaPtsUs +
+                        " start=" + start + " end=" + end +
+                        " pos=" + buffer.position() + " limit=" + buffer.limit() +
+                        " state=" + seamState,
+                    t,
+                )
             } catch (_: Throwable) {
             }
-            seamBypass = true
-            seamState = SeamRouteState.NORMAL
-            seamLog("fallback reason=SOURCE_WRITE_FAIL pts=" + mediaPtsUs)
-            return false
+            // 切回源的 PTS 从 B+Δ 回到 A+Δ：delegate 可能仍按旧时间轴拒收。
+            // 先重新通知 discontinuity，再原位置重试一次；成功则继续，不降级。
+            try {
+                super.handleDiscontinuity()
+            } catch (_: Throwable) {
+            }
+            lastDelegatePtsUs = Long.MIN_VALUE
+            lastInputPtsUs = Long.MIN_VALUE
+            seamLog("source retry pts=" + mediaPtsUs + " start=" + start + " end=" + end)
+            try {
+                accept()
+            } catch (t2: Throwable) {
+                try {
+                    Log.w(
+                        "LoopPerf",
+                        "seam source write failed again pts=" + mediaPtsUs +
+                            " start=" + start + " end=" + end,
+                        t2,
+                    )
+                } catch (_: Throwable) {
+                }
+                seamBypass = true
+                seamState = SeamRouteState.NORMAL
+                seamLog("fallback reason=SOURCE_WRITE_FAIL pts=" + mediaPtsUs)
+                return false
+            }
         }
         val after = buffer.position()
         if (after > before) {
@@ -806,6 +846,7 @@ class LoopAudioSink(
             " verifyFail=" + seamVerifyFailCount +
             " gap=" + seamMaxGapFrames +
             " bytes=" + (seamBuffer?.seamBufferBytes ?: 0L) +
+            " bDeltaUs=" + (seamBuffer?.let { frameToUsCeil(it.windowEndFrame - it.deltaFrames) } ?: 0L) +
             " bypass=" + seamBypass
 
     // ------------------------------------------------------------------ 内部
@@ -1119,6 +1160,7 @@ class LoopAudioSink(
             " seamDiscontinuity=" + seamDiscontinuityCount +
             " seamGap=" + seamMaxGapFrames +
             " seamBytes=" + (seamBuffer?.seamBufferBytes ?: 0L) +
+            " seamBDeltaUs=" + (seamBuffer?.let { frameToUsCeil(it.windowEndFrame - it.deltaFrames) } ?: 0L) +
             " seamBypass=" + seamBypass
         try {
             Log.d("LoopPerf", message)
