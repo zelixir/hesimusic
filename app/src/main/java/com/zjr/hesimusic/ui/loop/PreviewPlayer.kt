@@ -647,7 +647,8 @@ class PreviewPlayer @Inject constructor(
             Log.d(
                 TAG,
                 "source installed song=" + song.id + " window=" + window +
-                    " format=" + format + " timelineFrames=" + timeline.loopFrames,
+                    " format=" + format + " timelineFrames=" + timeline.loopFrames +
+                    " path=" + song.filePath,
             )
             true
         } catch (t: Throwable) {

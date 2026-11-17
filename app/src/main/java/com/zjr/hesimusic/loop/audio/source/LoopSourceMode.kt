@@ -33,10 +33,23 @@ enum class LoopSourceMode {
         @Volatile
         var current: LoopSourceMode = M3_PRIME
 
+        /**
+         * 调试/测试用的强制覆盖:非 null 时**优先于**全局 setting。
+         *
+         * 真机上(部分 ROM)adb 没有 WRITE_SECURE_SETTINGS,改不了 global setting,
+         * 只能靠进程内覆盖来验证 SOURCE 路径。
+         */
+        @Volatile
+        var debugOverride: LoopSourceMode? = null
+
         fun isSource(): Boolean = current == SOURCE
 
         /** 读全局 setting（0/1）；没有设置时保持默认 M3′。 */
         fun refreshFromSettings(context: Context) {
+            debugOverride?.let { forced ->
+                current = forced
+                return
+            }
             val value = try {
                 Settings.Global.getInt(context.contentResolver, SETTING_KEY, 0)
             } catch (t: Throwable) {

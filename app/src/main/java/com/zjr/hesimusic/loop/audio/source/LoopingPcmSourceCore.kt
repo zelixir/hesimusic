@@ -71,6 +71,13 @@ class LoopingPcmSourceCore(
 
     fun error(): String? = synchronized(lock) { lastError }
 
+    fun debugStateString(): String = synchronized(lock) {
+        val block = timeline.blockIndexForFrame(nextFrame)
+        "frame=" + nextFrame + " block=" + block + " state=" + cache.state(block) +
+            " ready=" + cache.readyIndices().size + " calls=" + decodeCalls +
+            " skipped=" + skippedBlockCount + " error=" + lastError
+    }
+
     fun isCurrentBlockReady(): Boolean = synchronized(lock) {
         cache.state(timeline.blockIndexForFrame(nextFrame)) == PcmBlockCache.State.READY
     }
@@ -265,12 +272,18 @@ class LoopingPcmSourceCore(
         val expectedFrames = timeline.blockFrames(block)
         var error: String? = null
         var segment: com.zjr.hesimusic.loop.analysis.Pcm16Segment? = null
+        val startedMs = System.currentTimeMillis()
+        logger("decode start block=" + block + " [" + startUs + "," + endUs + ") frames=" + expectedFrames)
         try {
             synchronized(lock) { decodeCalls += 1L }
             segment = provider.decode(startUs, endUs)
         } catch (e: Exception) {
             error = "decode block " + block + " [" + startUs + "," + endUs + ") failed: " +
                 (e.message ?: e.javaClass.simpleName)
+            logger(error + " throwable=" + e.javaClass.name)
+        } catch (e: Throwable) {
+            error = "decode block " + block + " crashed: " + e.javaClass.name + ": " + e.message
+            logger(error)
         }
 
         synchronized(lock) {
@@ -320,8 +333,9 @@ class LoopingPcmSourceCore(
                 ),
             )
             logger(
-                "decode block=" + block + " frames=" + expectedFrames +
-                    " calls=" + decodeCalls + " cacheBytes=" + cache.cachedBytes(),
+                "decode done block=" + block + " frames=" + expectedFrames +
+                    " calls=" + decodeCalls + " ms=" + (System.currentTimeMillis() - startedMs) +
+                    " cacheBytes=" + cache.cachedBytes(),
             )
             return true
         }

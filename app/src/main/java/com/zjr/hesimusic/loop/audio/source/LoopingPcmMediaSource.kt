@@ -33,8 +33,11 @@ class LoopingPcmMediaSource(
     private val timeline: LoopingPcmTimeline,
     private val provider: PcmRangeProvider,
     private val maxCacheBytes: Long = PcmBlockCache.DEFAULT_MAX_BYTES,
+    dispatcher: CallbackDispatcher? = null,
     private val logger: (String) -> Unit = { message -> Log.d("LoopPcmSource", message) },
 ) : MediaSource {
+
+    private val callbackDispatcher: CallbackDispatcher? = dispatcher
 
     private val lock = Any()
     private val callers = CopyOnWriteArrayList<MediaSource.MediaSourceCaller>()
@@ -67,6 +70,10 @@ class LoopingPcmMediaSource(
             if (released) return
             callers.add(caller)
         }
+        logger(
+            "prepareSource callers=" + callers.size + " windows=" + sourceTimeline.windowCount +
+                " periodDurationUs=" + sourceTimeline.getWindow(0, Timeline.Window()).durationUs,
+        )
         caller.onSourceInfoRefreshed(this, sourceTimeline)
     }
 
@@ -77,6 +84,7 @@ class LoopingPcmMediaSource(
 
     override fun enable(caller: MediaSource.MediaSourceCaller) {
         synchronized(lock) { enabled = true }
+        logger("enable callers=" + callers.size)
     }
 
     override fun createPeriod(
@@ -85,16 +93,23 @@ class LoopingPcmMediaSource(
         startPositionUs: Long,
     ): MediaPeriod {
         synchronized(lock) {
-            if (!enabled) throw IllegalStateException("MediaSource is not enabled")
+            // 不因 enable 时序直接抛：某些路径可能先 createPeriod 后 enable；
+            // 记日志即可，createPeriod 本身不依赖 enabled 状态。
+            if (!enabled) logger("createPeriod before enable; continue")
         }
+        logger(
+            "createPeriod startPositionUs=" + startPositionUs + " enabled=" + enabled,
+        )
         val period = LoopingPcmMediaPeriod(
             timeline = timeline,
             provider = provider,
             maxCacheBytes = maxCacheBytes,
             startPositionUs = startPositionUs,
+            dispatcher = callbackDispatcher,
             logger = logger,
         )
         periods.add(period)
+        logger("createPeriod period=" + period + " periods=" + periods.size)
         return period
     }
 

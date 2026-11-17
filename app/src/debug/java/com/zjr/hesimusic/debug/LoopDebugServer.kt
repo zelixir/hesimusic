@@ -13,6 +13,7 @@ import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.loop.LoopPosition
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.SeamBufferMode
+import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
 import com.zjr.hesimusic.loop.analysis.AnalysisState
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
 import com.zjr.hesimusic.loop.analysis.LoopCandidateKt
@@ -352,6 +353,7 @@ object LoopDebugServer {
             method == "POST" && segments == listOf("debug", "reconnect") -> handleDebugReconnect()
             method == "POST" && segments == listOf("debug", "pcm-compare") -> handlePcmCompare(body)
             method == "POST" && segments == listOf("debug", "seam") -> handleSeamToggle(body)
+            method == "POST" && segments == listOf("debug", "source-mode") -> handleSourceModeToggle(body)
             else -> throw HttpError(404, "unknown endpoint: $method ${request.path}")
         }
     }
@@ -1285,6 +1287,26 @@ object LoopDebugServer {
             "seamSinkRouteEnabled" to controller.seamSinkRouteEnabled,
             "windowEligible" to controller.seamWindowEligible,
             "activeForWindow" to controller.seamActiveForWindow,
+        )
+    }
+
+    /**
+     * POST /debug/source-mode {on: Boolean} —— 切换循环实现路线(issue 00017)。
+     *
+     * on=true 走循环 PCM 数据源;false 走 M3′(默认)。
+     * 真机上 settings put 缺 WRITE_SECURE_SETTINGS,这里直接写进程内开关。
+     * 注意:已有播放器不会自动换 sink,需重新进入结果页/重建播放器才生效。
+     */
+    private fun handleSourceModeToggle(body: JSONObject?): Map<String, Any?> {
+        val on = body?.optBoolean("on", LoopSourceMode.isSource()) ?: LoopSourceMode.isSource()
+        val target = if (on) LoopSourceMode.SOURCE else LoopSourceMode.M3_PRIME
+        // 覆盖 refreshFromSettings:真机 ROM 常拒绝 adb settings put。
+        LoopSourceMode.debugOverride = target
+        LoopSourceMode.current = target
+        Log.i(TAG, "debug/source-mode on=" + on)
+        return linkedMapOf(
+            "loopSourceMode" to LoopSourceMode.current.name,
+            "note" to "reopen the loop page for it to take effect",
         )
     }
 

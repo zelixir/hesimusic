@@ -2,7 +2,7 @@
 
 > 状态：**调查结论 + 最小原型（纯 JVM）已落地**。
 > 不接 UI/service、不碰设备、不加依赖；写域仅 `loop/audio/source/**`、对应测试、本文件。
-> 全量单测基线 1047 → 当前 **1103**（新增 56；第二阶段接入后），0 failures / 0 skipped。
+> 全量单测基线 1047 → 当前 **1106**（新增 59；第二阶段接入后），0 failures / 0 skipped。
 
 ## 0. 结论摘要
 
@@ -349,6 +349,8 @@ app/src/test/java/com/zjr/hesimusic/loop/audio/source/
   LoopTrackAssignmentTest.kt
   LoopSourceProjectionTest.kt
   LoopSourceProjectionTest.kt
+  LoopingPcmMediaPeriodPrepareTest.kt
+  LoopingPcmMediaSourceLifecycleTest.kt
   SyntheticPcmProvider.kt
   LoopingPcmTestSupport.kt
 ```
@@ -379,10 +381,10 @@ app/src/test/java/com/zjr/hesimusic/loop/audio/source/
 
 ```
 :app:testDebugUnitTest
-files=68 tests=1103 failures=0 skipped=0
+files=70 tests=1106 failures=0 skipped=0
 ```
 
-（基线 1047，新增 56；最后以实际跑数为准。）
+（基线 1047，新增 59；最后以实际跑数为准。）
 
 覆盖：
 
@@ -505,6 +507,37 @@ adb shell settings put global hesi_loop_source_mode 0   # M3′（默认）
    确认 `sourceMode=false`，预填/环回行为与改造前一致。
 
 注意：SOURCE 的 FULL 从 A 起播（前奏不参与）；要验证前奏请用 M3′ 或 FREE。
+
+### 6.9 真机 BUFFERING 卡死根因与修复（2026-11-17）
+
+真机 1.8.5 首次运行 SOURCE：`source installed` 后一直 `state=BUFFERING`，无
+`LoopPcmSource decode block` 日志。根因：
+
+1. media3 1.8.0 的 `MaskingMediaSource` 在懒准备路径下会**先**
+   `createPeriod()`，再通过 `prepareChildSource()` 触发子 source 的
+   `prepareSource()`/`enable()`；
+2. 旧 `LoopingPcmMediaSource.createPeriod()` 在 `enabled == false` 时直接
+   `throw IllegalStateException("MediaSource is not enabled")`，导致周期根本没创建，
+   自然没有 `MediaPeriod.prepare()`/首块解码，播放器表现就是无限 BUFFERING；
+3. 该异常没有进入首块/解码日志，所以只看到 BUFFERING。
+
+修复：
+
+- `createPeriod()` 不再因 enable 时序抛异常，只记
+  `createPeriod before enable; continue`；enable/disable 仅做日志/记录；
+- `LoopingPcmMediaPeriod` 增加：
+  - `prepare start/after seek`、`requestDecode firstBlock/gen`、
+  - `pumpDecode ... pumped/state`、`first block check ready`、
+  - `decode start/done block=... ms=... calls=...`、`decode failed/crashed`，
+  - `first block ready -> onPrepared`；
+- **首块 2s 超时**：时间到仍不 ready 时置 `prepareError`（含 core 状态），
+  `maybeThrowPrepareError()` 抛 IOException，ExoPlayer 进入错误态而不是无限 BUFFERING；
+- `PcmRangeProvider` 路径：`PreviewPlayer` 用 `song.filePath` probe/解码，
+  `source installed ... path=...` 日志可核对；
+- 新增 JVM 测试：
+  - `LoopingPcmMediaSourceLifecycleTest`：**createPeriod before enable 不抛**且能创建 period；
+  - `LoopingPcmMediaPeriodPrepareTest`：正常 provider 首块 `onPrepared`；
+    provider 永久 pending 时超时后 `maybeThrowPrepareError` 抛错。
 
 ## 7. 与 M3′ / Seam Splice 的取舍
 

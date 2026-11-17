@@ -31,12 +31,34 @@ import java.util.concurrent.atomic.AtomicLong
  * - seek 只改 core cursor 并异步补目标块，不阻塞播放线程；
  * - 解码任务带 generation，连续拖动只有最后一次目标会继续解码。
  */
+/** 回调投递抽象：默认 Handler，JVM 测试可注入假 dispatcher。 */
+interface CallbackDispatcher {
+    fun post(runnable: Runnable)
+    fun postDelayed(runnable: Runnable, delayMs: Long)
+    fun remove(runnable: Runnable)
+}
+
+private class AndroidCallbackDispatcher(private val handler: Handler) : CallbackDispatcher {
+    override fun post(runnable: Runnable) {
+        handler.post(runnable)
+    }
+
+    override fun postDelayed(runnable: Runnable, delayMs: Long) {
+        handler.postDelayed(runnable, delayMs)
+    }
+
+    override fun remove(runnable: Runnable) {
+        handler.removeCallbacks(runnable)
+    }
+}
+
 @UnstableApi
 class LoopingPcmMediaPeriod(
     timeline: LoopingPcmTimeline,
     private val provider: PcmRangeProvider,
     private val maxCacheBytes: Long = PcmBlockCache.DEFAULT_MAX_BYTES,
     startPositionUs: Long = 0L,
+    dispatcher: CallbackDispatcher? = null,
     private val logger: (String) -> Unit = { message -> Log.w(TAG, message) },
 ) : MediaPeriod {
 
@@ -56,7 +78,16 @@ class LoopingPcmMediaPeriod(
 
     private var stream = LoopingPcmSampleStream(core, format)
 
-    private val callbackHandler = Handler(Looper.myLooper() ?: Looper.getMainLooper())
+    private val callbackHandler: CallbackDispatcher = dispatcher
+        ?: AndroidCallbackDispatcher(Handler(Looper.myLooper() ?: Looper.getMainLooper()))
+
+    private fun logD(message: String) = logger("D: " + message)
+    private fun logE(message: String, throwable: Throwable? = null) {
+        logger(
+            "E: " + message + if (throwable == null) "" else
+                " throwable=" + throwable.javaClass.name + ": " + throwable.message,
+        )
+    }
     private val worker: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "loop-pcm-decode").apply {
             isDaemon = true
@@ -71,21 +102,58 @@ class LoopingPcmMediaPeriod(
     private var prepared = false
     private var released = false
     private var prepareError: String? = null
+    private var prepareTimeout: Runnable? = null
 
     init {
         core.seekToTimelineUs(startPositionUs)
+        logD("period created startPositionUs=" + startPositionUs + " " + core.debugStateString())
     }
 
     override fun prepare(callback: MediaPeriod.Callback, positionUs: Long) {
+        logD("prepare start positionUs=" + positionUs + " " + core.debugStateString())
         synchronized(stateLock) {
             this.callback = callback
             if (prepared) {
+                logD("prepare already ready; notify")
                 callbackHandler.post { callback.onPrepared(this) }
                 return
             }
         }
         core.seekToTimelineUs(positionUs)
+        logD("prepare after seek positionUs=" + positionUs + " " + core.debugStateString())
         requestDecode(firstBlock = true)
+        schedulePrepareTimeout()
+    }
+
+    private fun schedulePrepareTimeout() {
+        val timeout = Runnable {
+            val ready = core.isCurrentBlockReady()
+            if (!ready) {
+                val message = "source first block timeout after " + PREPARE_TIMEOUT_MS +
+                    "ms " + core.debugStateString()
+                synchronized(stateLock) {
+                    if (prepareError == null) prepareError = message
+                    grabbedCallback()?.let { cb ->
+                        // 让 ExoPlayer 在下次 maybeThrowPrepareError 时拿到错误，而不是无限 BUFFERING。
+                        logE(message)
+                        callbackHandler.post { cb.onContinueLoadingRequested(this@LoopingPcmMediaPeriod) }
+                    }
+                }
+                logE(message)
+            } else {
+                logD("prepare timeout check: already ready")
+            }
+        }
+        prepareTimeout?.let { callbackHandler.remove(it) }
+        prepareTimeout = timeout
+        callbackHandler.postDelayed(timeout, PREPARE_TIMEOUT_MS)
+    }
+
+    private fun grabbedCallback(): MediaPeriod.Callback? = synchronized(stateLock) { callback }
+
+    private fun clearPrepareTimeout() {
+        prepareTimeout?.let { callbackHandler.remove(it) }
+        prepareTimeout = null
     }
 
     override fun maybeThrowPrepareError() {
@@ -153,6 +221,7 @@ class LoopingPcmMediaPeriod(
             released = true
             callback = null
         }
+        clearPrepareTimeout()
         worker.shutdownNow()
         core.release()
     }
@@ -163,6 +232,7 @@ class LoopingPcmMediaPeriod(
         if (isReleased()) return
         val generation = requestGeneration.incrementAndGet()
         activeTasks.incrementAndGet()
+        logD("requestDecode firstBlock=" + firstBlock + " gen=" + generation + " " + core.debugStateString())
         try {
             worker.execute {
                 var progressed = false
@@ -173,22 +243,41 @@ class LoopingPcmMediaPeriod(
                     for (i in 0 until limit) {
                         if (isReleased()) break
                         if (!firstBlock && requestGeneration.get() != generation) break
-                        if (!core.pumpDecode()) break
+                        val pumped = core.pumpDecode()
+                        logD(
+                            "pumpDecode firstBlock=" + firstBlock + " i=" + i +
+                                " pumped=" + pumped + " " + core.debugStateString(),
+                        )
+                        if (!pumped) break
                         progressed = true
                     }
                     if (firstBlock) {
                         val ready = core.isCurrentBlockReady()
+                        logD(
+                            "first block check ready=" + ready + " " + core.debugStateString(),
+                        )
                         synchronized(stateLock) {
                             if (!ready && prepareError == null) {
                                 prepareError = core.error() ?: "first loop block not ready"
+                                logE("prepare error: " + prepareError)
                             }
-                            if (ready) prepared = true
+                            if (ready && prepareError == null) {
+                                prepared = true
+                                clearPrepareTimeout()
+                            }
                         }
                         val cb = synchronized(stateLock) { callback }
-                        if (ready && cb != null) {
+                        if (ready && prepareError == null && cb != null) {
+                            logD("first block ready -> onPrepared")
                             callbackHandler.post { cb.onPrepared(this) }
                         }
                     }
+                } catch (t: Throwable) {
+                    val message = "decode worker failed: " + t.javaClass.name + ": " + t.message
+                    synchronized(stateLock) {
+                        if (prepareError == null) prepareError = message
+                    }
+                    logE(message, t)
                 } finally {
                     activeTasks.decrementAndGet()
                     val cb = synchronized(stateLock) { callback }
@@ -201,13 +290,24 @@ class LoopingPcmMediaPeriod(
                     }
                 }
             }
-        } catch (_: RejectedExecutionException) {
+        } catch (t: RejectedExecutionException) {
             activeTasks.decrementAndGet()
+            synchronized(stateLock) {
+                if (prepareError == null) prepareError = "decode worker rejected"
+            }
+            logE("decode worker rejected", t)
+        } catch (t: Throwable) {
+            activeTasks.decrementAndGet()
+            synchronized(stateLock) {
+                if (prepareError == null) prepareError = "decode worker submit failed: " + t
+            }
+            logE("decode worker submit failed", t)
         }
     }
 }
 
 private const val TAG = "LoopPcmSource"
+private const val PREPARE_TIMEOUT_MS = 2_000L
 
 /** 把唯一的音频 SampleStream 挂到第一个被选中的 renderer 槽位（纯逻辑，可 JVM 单测）。 */
 internal object LoopTrackAssignment {
