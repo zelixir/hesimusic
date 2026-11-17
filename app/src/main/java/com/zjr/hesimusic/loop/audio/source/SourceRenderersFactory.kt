@@ -27,6 +27,7 @@ class TapAudioSink(
 
     private var handledBuffers = 0L
     private var lastBufferLogMs = 0L
+    private var forcedPlay = false
 
     override fun configure(
         inputFormat: Format,
@@ -82,6 +83,17 @@ class TapAudioSink(
         }
         if (after > before) {
             controller.tapPcm(buffer, before, after - before)
+        } else if (consumed && buffer.hasRemaining()) {
+            // DefaultAudioSink 可能不移动 ByteBuffer.position；consumed=true 时
+            // 按剩余区间取证，避免 tap 永远为空。
+            controller.tapPcm(buffer, buffer.position(), buffer.remaining())
+        }
+        if (!forcedPlay) {
+            // SOURCE 诊断兜底：renderer 已读数据但未回调 onStarted 时，
+            // 主动启动一次 AudioTrack（幂等），打破 BUFFERING 死锁。
+            forcedPlay = true
+            Log.w("LoopPcmSource", "tap force play after first handleBuffer")
+            super.play()
         }
         return consumed
     }
@@ -93,6 +105,7 @@ class TapAudioSink(
 
     override fun pause() {
         Log.d("LoopPcmSource", "tap pause")
+        forcedPlay = false
         super.pause()
     }
 
@@ -103,12 +116,14 @@ class TapAudioSink(
 
     override fun flush() {
         Log.d("LoopPcmSource", "tap flush")
+        forcedPlay = false
         controller.onSinkFlush()
         super.flush()
     }
 
     override fun reset() {
         Log.d("LoopPcmSource", "tap reset")
+        forcedPlay = false
         controller.onSinkReset()
         super.reset()
     }
