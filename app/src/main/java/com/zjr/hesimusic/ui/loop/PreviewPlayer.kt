@@ -10,6 +10,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.model.Song
@@ -526,11 +527,21 @@ class PreviewPlayer @Inject constructor(
         } else {
             LoopRenderersFactory(context, controller)
         }
-        val p = ExoPlayer.Builder(context)
+        val builder = ExoPlayer.Builder(context)
             .setRenderersFactory(renderersFactory)
             .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true)
             .setHandleAudioBecomingNoisy(true)
-            .build()
+        if (kind == EngineKind.SOURCE) {
+            // 源模式 1 秒块：默认 2.5s bufferForPlayback 会要求 3 块才起播。
+            // 放宽为 1s 起播，min 3s/max 8s 继续预取，兼顾首声延迟与稳态。
+            builder.setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(3_000, 8_000, 1_000, 1_500)
+                    .build(),
+            )
+            Log.d(TAG, "source load control min=3000 max=8000 playback=1000 rebuffer=1500")
+        }
+        val p = builder.build()
         p.addListener(listener)
         player = p
         engineKind = kind

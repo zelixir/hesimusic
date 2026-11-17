@@ -96,6 +96,19 @@ class LoopingPcmSourceCoreLoopTest {
     }
 
     @Test
+    fun `buffered end covers continuous ready blocks and next load ends at prefetch edge`() {
+        val tl = LoopingPcmTestSupport.timeline()
+        val provider = LoopingPcmTestSupport.provider(tl)
+        val core = LoopingPcmSourceCore(tl, provider, prefetchBlocks = 2)
+
+        assertTrue(core.pumpDecode()) // 0
+        assertTrue(core.pumpDecode()) // 1
+        assertTrue(core.pumpDecode()) // 2
+        assertEquals(3_000_000L, core.bufferedEndUs())
+        assertEquals(null, core.nextLoadPositionUs())
+    }
+
+    @Test
     fun `first block decode after seek covers at most one second`() {
         val tl = LoopingPcmTestSupport.timeline()
         val provider = LoopingPcmTestSupport.provider(tl)

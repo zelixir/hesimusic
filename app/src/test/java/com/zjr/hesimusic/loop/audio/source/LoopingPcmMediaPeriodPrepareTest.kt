@@ -75,6 +75,10 @@ class LoopingPcmMediaPeriodPrepareTest {
             }
             assertEquals(0L, callback.prepared.count)
             assertTrue("first block decode must call provider", provider.decodeCount() >= 1)
+            assertTrue(
+                "continuous ready blocks must cover at least 3s for LoadControl",
+                period.getBufferedPositionUs() >= 3_000_000L,
+            )
         } finally {
             period.release()
         }

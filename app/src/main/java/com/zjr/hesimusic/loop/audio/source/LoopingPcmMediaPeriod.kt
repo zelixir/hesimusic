@@ -108,6 +108,7 @@ class LoopingPcmMediaPeriod(
     private var lastStartBlock: Int = Int.MIN_VALUE
     private var lastStartLogMs: Long = 0L
     private var pendingSinceMs: Long = 0L
+    private var lastLoadLogMs: Long = 0L
     private var callback: MediaPeriod.Callback? = null
     private var prepared = false
     private var released = false
@@ -232,16 +233,39 @@ class LoopingPcmMediaPeriod(
     override fun getAdjustedSeekPositionUs(positionUs: Long, seekParameters: SeekParameters): Long =
         positionUs
 
-    override fun getBufferedPositionUs(): Long = core.bufferedEndUs()
+    override fun getBufferedPositionUs(): Long {
+        val buffered = core.bufferedEndUs()
+        maybeLogLoad(core.currentPtsUs(), buffered, core.nextLoadPositionUs())
+        return buffered
+    }
 
-    override fun getNextLoadPositionUs(): Long =
-        if (core.needsDecode()) core.bufferedEndUs() else C.TIME_END_OF_SOURCE
+    override fun getNextLoadPositionUs(): Long {
+        val next = core.nextLoadPositionUs()
+        maybeLogLoad(core.currentPtsUs(), core.bufferedEndUs(), next)
+        return next ?: C.TIME_END_OF_SOURCE
+    }
 
     override fun continueLoading(loadingInfo: LoadingInfo): Boolean {
         if (isReleased()) return false
+        maybeLogLoad(
+            loadingInfo.playbackPositionUs,
+            core.bufferedEndUs(),
+            core.nextLoadPositionUs(),
+        )
         if (!core.needsDecode() && core.isCurrentBlockReady()) return false
         requestDecode(firstBlock = false)
         return true
+    }
+
+    private fun maybeLogLoad(playbackPositionUs: Long, bufferedUs: Long, nextLoadUs: Long?) {
+        val now = System.currentTimeMillis()
+        if (now - lastLoadLogMs < 1_000L) return
+        lastLoadLogMs = now
+        logD(
+            "load pos=" + playbackPositionUs + " buffered=" + bufferedUs +
+                " nextLoad=" + (nextLoadUs ?: "END") + " loading=" + isLoading() +
+                " readyBlocks=" + core.cache.readyIndices().size + " " + core.debugStateString(),
+        )
     }
 
     override fun isLoading(): Boolean = activeTasks.get() > 0

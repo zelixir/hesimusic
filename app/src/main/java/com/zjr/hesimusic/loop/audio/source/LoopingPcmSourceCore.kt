@@ -98,14 +98,19 @@ class LoopingPcmSourceCore(
         cache.state(timeline.blockIndexForFrame(nextFrame)) == PcmBlockCache.State.READY
     }
 
-    fun needsDecode(): Boolean = synchronized(lock) {
+    fun needsDecode(): Boolean = synchronized(lock) { needsDecodeLocked() }
+
+    private fun needsDecodeLocked(): Boolean {
         val current = timeline.blockIndexForFrame(nextFrame)
         if (cache.state(current) != PcmBlockCache.State.READY) return true
         for (d in 1..prefetchBlocks) {
             val block = wrappedBlock(current + d)
-            if (block != current && cache.state(block) == null) return true
+            val state = cache.state(block)
+            if (block != current &&
+                (state == null || state == PcmBlockCache.State.PENDING)
+            ) return true
         }
-        false
+        return false
     }
 
     /**
@@ -194,6 +199,31 @@ class LoopingPcmSourceCore(
             val block = target ?: return false
             return decodeBlock(block)
         }
+    }
+
+    /**
+     * 下一块需要解码的起点 PTS；当前 + 预取窗口都已 READY 时返回 null。
+     * 连续 READY 块从 [nextFrame] 开始，遇到第一个非 READY 块停止。
+     */
+    fun nextLoadPositionUs(): Long? = synchronized(lock) {
+        if (!needsDecodeLocked()) return null
+        val current = timeline.blockIndexForFrame(nextFrame)
+        var block = current
+        var aheadFrames = 0L
+        var guard = 0
+        while (guard < timeline.blockCount) {
+            val state = cache.state(block)
+            if (state != PcmBlockCache.State.READY) {
+                return ptsBaseUs + framesToUs(emittedFrames + aheadFrames)
+            }
+            val start = timeline.blockStartFrame(block)
+            val end = start + timeline.blockFrames(block)
+            val from = if (block == current) nextFrame else start
+            aheadFrames += (end - from).coerceAtLeast(0L)
+            block = wrappedBlock(block + 1)
+            guard++
+        }
+        null
     }
 
     /** 当前块 + 已就绪的连续块能覆盖到的 PTS 末尾。 */
