@@ -81,6 +81,39 @@ class LoopingPcmMediaPeriodPrepareTest {
     }
 
     @Test
+    fun `100 continueLoading calls while a target block is pending submit only one decode`() {
+        val tl = LoopingPcmTestSupport.timeline()
+        val provider = LoopingPcmTestSupport.provider(tl)
+        val gate = CountDownLatch(1)
+        provider.gate = gate
+        val dispatcher = FakeDispatcher()
+        val period = LoopingPcmMediaPeriod(
+            timeline = tl,
+            provider = provider,
+            dispatcher = dispatcher,
+            logger = {},
+        )
+        val callback = FakeCallback()
+        try {
+            period.prepare(callback, 0L)
+            provider.awaitDecodeStarted()
+
+            val info = androidx.media3.exoplayer.LoadingInfo.Builder()
+                .setPlaybackPositionUs(0L)
+                .setPlaybackSpeed(1f)
+                .build()
+            repeat(100) { period.continueLoading(info) }
+
+            assertEquals(1, provider.decodeCount())
+            assertEquals(0L, period.currentRequestGeneration())
+            assertTrue("dedupe should skip the repeated requests", period.dedupeSkipCount() >= 100)
+        } finally {
+            gate.countDown()
+            period.release()
+        }
+    }
+
+    @Test
     fun `permanently pending provider times out instead of buffering forever`() {
         val tl = LoopingPcmTestSupport.timeline()
         val provider = LoopingPcmTestSupport.provider(tl)

@@ -19,6 +19,7 @@ import java.io.IOException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -29,7 +30,8 @@ import java.util.concurrent.atomic.AtomicLong
  * - 单线程 executor 串行解码（MediaCodec 单实例约束）；
  * - 当前块优先、预取 2 块；首块就绪后 onPrepared；
  * - seek 只改 core cursor 并异步补目标块，不阻塞播放线程；
- * - 解码任务带 generation，连续拖动只有最后一次目标会继续解码。
+ * - 解码任务同一时刻最多一个（decodeScheduled 去重）；generation 只在 seek 时递增，
+ *   不因 continueLoading/read 递增，也不会中断正在解的目标块。
  */
 /** 回调投递抽象：默认 Handler，JVM 测试可注入假 dispatcher。 */
 interface CallbackDispatcher {
@@ -96,13 +98,22 @@ class LoopingPcmMediaPeriod(
     }
 
     private val stateLock = Any()
+    /** 只在 seek/窗口变化时递增；read/continueLoading 不改变它。 */
     private val requestGeneration = AtomicLong(0L)
+    private val decodeScheduled = AtomicBoolean(false)
     private val activeTasks = AtomicInteger(0)
+    private var dedupeSkips: Long = 0L
+    private var lastDedupeBlock: Int = Int.MIN_VALUE
+    private var lastDedupeLogMs: Long = 0L
+    private var lastStartBlock: Int = Int.MIN_VALUE
+    private var lastStartLogMs: Long = 0L
+    private var pendingSinceMs: Long = 0L
     private var callback: MediaPeriod.Callback? = null
     private var prepared = false
     private var released = false
     private var prepareError: String? = null
     private var prepareTimeout: Runnable? = null
+    private var decodeWatchdog: Runnable? = null
 
     init {
         core.seekToTimelineUs(startPositionUs)
@@ -156,6 +167,28 @@ class LoopingPcmMediaPeriod(
         prepareTimeout = null
     }
 
+    private fun scheduleDecodeWatchdog() {
+        decodeWatchdog?.let { callbackHandler.remove(it) }
+        val watchdog = Runnable {
+            val block = core.currentBlockIndex()
+            if (core.failStuckPendingBlock("decode watchdog timeout")) {
+                logE("decode watchdog marked block=" + block + " FAILED " + core.debugStateString())
+                synchronized(stateLock) {
+                    if (!prepared && prepareError == null) {
+                        prepareError = "decode watchdog timeout block=" + block
+                    }
+                }
+            }
+        }
+        decodeWatchdog = watchdog
+        callbackHandler.postDelayed(watchdog, DECODE_STUCK_TIMEOUT_MS)
+    }
+
+    private fun clearDecodeWatchdog() {
+        decodeWatchdog?.let { callbackHandler.remove(it) }
+        decodeWatchdog = null
+    }
+
     override fun maybeThrowPrepareError() {
         val error = synchronized(stateLock) { prepareError }
         if (error != null) throw IOException(error)
@@ -188,8 +221,10 @@ class LoopingPcmMediaPeriod(
     override fun readDiscontinuity(): Long = C.TIME_UNSET
 
     override fun seekToUs(positionUs: Long): Long {
+        val generation = requestGeneration.incrementAndGet()
         val target = core.seekToTimelineUs(positionUs)
         stream.onSeek()
+        logD("seekToUs positionUs=" + positionUs + " gen=" + generation + " " + core.debugStateString())
         requestDecode(firstBlock = false)
         return target
     }
@@ -222,27 +257,80 @@ class LoopingPcmMediaPeriod(
             callback = null
         }
         clearPrepareTimeout()
+        clearDecodeWatchdog()
         worker.shutdownNow()
         core.release()
     }
 
     private fun isReleased(): Boolean = synchronized(stateLock) { released }
 
+    private fun noteDedupe(firstBlock: Boolean) {
+        dedupeSkips += 1
+        val now = System.currentTimeMillis()
+        val block = core.currentBlockIndex()
+        if (block != lastDedupeBlock || now - lastDedupeLogMs >= 1_000L) {
+            lastDedupeBlock = block
+            lastDedupeLogMs = now
+            logD(
+                "requestDecode dedupe firstBlock=" + firstBlock +
+                    " block=" + block + " skips=" + dedupeSkips + " " + core.debugStateString(),
+            )
+        }
+    }
+
     private fun requestDecode(firstBlock: Boolean) {
         if (isReleased()) return
-        val generation = requestGeneration.incrementAndGet()
+        val nowMs = System.currentTimeMillis()
+        if (core.currentBlockState() == PcmBlockCache.State.PENDING) {
+            if (pendingSinceMs == 0L) pendingSinceMs = nowMs
+            if (nowMs - pendingSinceMs >= DECODE_STUCK_TIMEOUT_MS) {
+                if (core.failStuckPendingBlock("pending " + (nowMs - pendingSinceMs) + "ms")) {
+                    logE("decode pending timeout -> FAILED " + core.debugStateString())
+                }
+                pendingSinceMs = 0L
+            }
+        } else {
+            pendingSinceMs = 0L
+        }
+        // 当前块已有人在解（或刚超时被置 FAILED 前的等待）：不要提交新任务，
+        // 等它 READY/FAILED 或上面的 2s 兜底生效；否则会每 10ms 空转一次。
+        if (core.currentBlockState() == PcmBlockCache.State.PENDING) {
+            noteDedupe(firstBlock)
+            return
+        }
+        if (!firstBlock && core.isCurrentBlockReady() && !core.needsDecode()) return
+
+        // 去重：同一时刻只允许一个 worker 在跑。continueLoading 会被 ExoPlayer
+        // 每 ~10ms 调一次；这里不能递增 generation，也不能重复提交任务。
+        if (decodeScheduled.get()) {
+            noteDedupe(firstBlock)
+            return
+        }
+
+        if (!decodeScheduled.compareAndSet(false, true)) return
         activeTasks.incrementAndGet()
-        logD("requestDecode firstBlock=" + firstBlock + " gen=" + generation + " " + core.debugStateString())
+        scheduleDecodeWatchdog()
+        val startBlock = core.currentBlockIndex()
+        val startNow = System.currentTimeMillis()
+        if (firstBlock || startBlock != lastStartBlock || startNow - lastStartLogMs >= 1_000L) {
+            lastStartBlock = startBlock
+            lastStartLogMs = startNow
+            logD(
+                "requestDecode start firstBlock=" + firstBlock + " gen=" + requestGeneration.get() +
+                    " " + core.debugStateString(),
+            )
+        }
         try {
             worker.execute {
                 var progressed = false
                 try {
                     // 首块任务最多尝试 4 次（覆盖 prepare 期间的 seek 改目标）；
-                    // 普通任务一次最多补 3 块（当前 + 2 预取），且只有最新 generation 继续。
+                    // 普通任务一次最多补 3 块（当前 + 2 预取）。
+                    // 不再按 generation 中断：generation 只在 seek/窗口变化时变化，
+                    // 不会因为 continueLoading 把正在解的目标块顶掉。
                     val limit = if (firstBlock) 4 else 3
                     for (i in 0 until limit) {
                         if (isReleased()) break
-                        if (!firstBlock && requestGeneration.get() != generation) break
                         val pumped = core.pumpDecode()
                         logD(
                             "pumpDecode firstBlock=" + firstBlock + " i=" + i +
@@ -280,34 +368,40 @@ class LoopingPcmMediaPeriod(
                     logE(message, t)
                 } finally {
                     activeTasks.decrementAndGet()
+                    decodeScheduled.set(false)
+                    clearDecodeWatchdog()
                     val cb = synchronized(stateLock) { callback }
-                    if (!firstBlock &&
-                        progressed &&
-                        requestGeneration.get() == generation &&
-                        cb != null
-                    ) {
+                    if (!firstBlock && progressed && cb != null) {
                         callbackHandler.post { cb.onContinueLoadingRequested(this) }
                     }
                 }
             }
         } catch (t: RejectedExecutionException) {
             activeTasks.decrementAndGet()
+            decodeScheduled.set(false)
+            clearDecodeWatchdog()
             synchronized(stateLock) {
                 if (prepareError == null) prepareError = "decode worker rejected"
             }
             logE("decode worker rejected", t)
         } catch (t: Throwable) {
             activeTasks.decrementAndGet()
+            decodeScheduled.set(false)
+            clearDecodeWatchdog()
             synchronized(stateLock) {
                 if (prepareError == null) prepareError = "decode worker submit failed: " + t
             }
             logE("decode worker submit failed", t)
         }
     }
+
+    internal fun currentRequestGeneration(): Long = requestGeneration.get()
+    internal fun dedupeSkipCount(): Long = dedupeSkips
 }
 
 private const val TAG = "LoopPcmSource"
 private const val PREPARE_TIMEOUT_MS = 2_000L
+private const val DECODE_STUCK_TIMEOUT_MS = 2_000L
 
 /** 把唯一的音频 SampleStream 挂到第一个被选中的 renderer 槽位（纯逻辑，可 JVM 单测）。 */
 internal object LoopTrackAssignment {

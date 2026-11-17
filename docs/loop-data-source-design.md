@@ -2,7 +2,7 @@
 
 > 状态：**调查结论 + 最小原型（纯 JVM）已落地**。
 > 不接 UI/service、不碰设备、不加依赖；写域仅 `loop/audio/source/**`、对应测试、本文件。
-> 全量单测基线 1047 → 当前 **1106**（新增 59；第二阶段接入后），0 failures / 0 skipped。
+> 全量单测基线 1047 → 当前 **1107**（新增 60；第二阶段接入后），0 failures / 0 skipped。
 
 ## 0. 结论摘要
 
@@ -381,10 +381,10 @@ app/src/test/java/com/zjr/hesimusic/loop/audio/source/
 
 ```
 :app:testDebugUnitTest
-files=70 tests=1106 failures=0 skipped=0
+files=70 tests=1107 failures=0 skipped=0
 ```
 
-（基线 1047，新增 59；最后以实际跑数为准。）
+（基线 1047，新增 60；最后以实际跑数为准。）
 
 覆盖：
 
@@ -538,6 +538,42 @@ adb shell settings put global hesi_loop_source_mode 0   # M3′（默认）
   - `LoopingPcmMediaSourceLifecycleTest`：**createPeriod before enable 不抛**且能创建 period；
   - `LoopingPcmMediaPeriodPrepareTest`：正常 provider 首块 `onPrepared`；
     provider 永久 pending 时超时后 `maybeThrowPrepareError` 抛错。
+
+### 6.10 活锁：同一块永远 PENDING、requestDecode 每 10ms 刷（2026-11-17）
+
+真机第二轮：生命周期问题修复后能解码了，但播放中同一块长期 `PENDING`：
+
+```text
+requestDecode firstBlock=false gen=418 frame=1429632 block=23 state=PENDING ready=23 calls=24
+requestDecode firstBlock=false gen=419 ...（每 10ms 一条，gen 一路涨）
+```
+
+根因：
+
+- ExoPlayer 的 loading loop 约每 10ms 调一次 `continueLoading()`；
+- 旧 `requestDecode()` **每次调用都 `requestGeneration.incrementAndGet()` 并提交任务**；
+- worker 的非首块循环在每次 `pumpDecode()` 前检查 generation，generation 被
+  `continueLoading` 顶掉后，正在解的目标块任务被“作废”，块一直停在 PENDING；
+- 新任务看到 PENDING 又不再解码，形成活锁。
+
+修复（[LoopingPcmMediaPeriod.kt](app/src/main/java/com/zjr/hesimusic/loop/audio/source/LoopingPcmMediaPeriod.kt)）：
+
+- 增加 `decodeScheduled: AtomicBoolean`：worker 在跑时 `continueLoading` 只累加
+  `dedupeSkips`，**不提交任务、不递增 generation**；dedupe 日志最多 1 秒一条/换块时一条；
+- `requestGeneration` **只在 `seekToUs()` 递增**；read/continueLoading 不改变它；
+- worker 不再按 generation 中断，任务一旦开始就把当前目标解完；
+- 当前块已是 PENDING 时直接 dedupe 返回，不再提交空转任务；
+- 增加 2s decode watchdog / pending 超时：worker 卡住时把当前 PENDING 块置 FAILED 并跳过，
+  迟到的解码结果不会覆盖 FAILED，
+  首块则同时置 `prepareError`，避免整条播放无限等待；
+- 日志保留 `requestDecode start`、`requestDecode dedupe`、`decode start/done`、
+  `decode stuck ... marked FAILED`、`first block ready -> onPrepared`。
+
+新增测试 `LoopingPcmMediaPeriodPrepareTest`：
+
+- 同一 PENDING 块连续 `continueLoading()` 100 次：provider 只调用 **1 次**，
+  `currentRequestGeneration()` 保持 **0**，`dedupeSkipCount() >= 100`。
+
 
 ## 7. 与 M3′ / Seam Splice 的取舍
 

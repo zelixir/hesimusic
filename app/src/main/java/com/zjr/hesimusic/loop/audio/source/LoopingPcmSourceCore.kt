@@ -71,11 +71,27 @@ class LoopingPcmSourceCore(
 
     fun error(): String? = synchronized(lock) { lastError }
 
+    /** 兜底：worker 异常/卡住时把当前 PENDING 块置 FAILED，read 会跳过它继续。 */
+    fun failStuckPendingBlock(reason: String): Boolean {
+        synchronized(lock) {
+            val block = timeline.blockIndexForFrame(nextFrame)
+            if (cache.state(block) != PcmBlockCache.State.PENDING) return false
+            cache.markFailed(block)
+            skippedBlockCount += 1L
+            logger("decode stuck block=" + block + " marked FAILED: " + reason)
+            return true
+        }
+    }
+
     fun debugStateString(): String = synchronized(lock) {
         val block = timeline.blockIndexForFrame(nextFrame)
         "frame=" + nextFrame + " block=" + block + " state=" + cache.state(block) +
             " ready=" + cache.readyIndices().size + " calls=" + decodeCalls +
             " skipped=" + skippedBlockCount + " error=" + lastError
+    }
+
+    fun currentBlockState(): PcmBlockCache.State? = synchronized(lock) {
+        cache.state(timeline.blockIndexForFrame(nextFrame))
     }
 
     fun isCurrentBlockReady(): Boolean = synchronized(lock) {
@@ -322,6 +338,11 @@ class LoopingPcmSourceCore(
                     "byte size mismatch at block " + block +
                         ": got=" + trimmed.data.size + " want=" + expectedBytes,
                 )
+                return true
+            }
+            if (cache.state(block) != PcmBlockCache.State.PENDING) {
+                // 看门狗可能已把该块置 FAILED 并跳过；迟到的结果不能覆盖 FAILED。
+                logger("decode dropped late block=" + block + " state=" + cache.state(block))
                 return true
             }
             cache.put(
