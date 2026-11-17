@@ -20,9 +20,12 @@ import java.nio.ByteOrder
 class LoopingPcmSampleStream(
     private val core: LoopingPcmSourceCore,
     private val format: Format,
+    private val logger: (String) -> Unit = {},
 ) : SampleStream {
 
     private var formatSent = false
+    private var readSamples = 0L
+    private var lastReadLogMs = 0L
 
     override fun isReady(): Boolean = core.isCurrentBlockReady()
 
@@ -38,6 +41,7 @@ class LoopingPcmSampleStream(
         if (!formatSent || (readFlags and SampleStream.FLAG_REQUIRE_FORMAT) != 0) {
             formatHolder.format = format
             formatSent = true
+            logger("readData format sent raw pcm16 " + format.sampleRate + "Hz/" + format.channelCount + "ch")
             return C.RESULT_FORMAT_READ
         }
 
@@ -48,6 +52,15 @@ class LoopingPcmSampleStream(
         buffer.clear()
         buffer.timeUs = result.ptsUs
         buffer.setFlags(C.BUFFER_FLAG_KEY_FRAME)
+        readSamples += 1L
+        val now = System.currentTimeMillis()
+        if (readSamples == 1L || now - lastReadLogMs >= 1_000L) {
+            lastReadLogMs = now
+            logger(
+                "readData sample=" + readSamples + " bytes=" + result.data.size +
+                    " ptsUs=" + result.ptsUs + " peek=" + peek,
+            )
+        }
         if (!omitData) {
             buffer.ensureSpaceForWrite(result.data.size)
             val data = buffer.data ?: return C.RESULT_NOTHING_READ

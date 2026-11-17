@@ -72,13 +72,15 @@ class LoopingPcmMediaPeriod(
     )
 
     private val format: Format = Format.Builder()
+        .setId("loop-pcm")
         .setSampleMimeType(MimeTypes.AUDIO_RAW)
         .setPcmEncoding(C.ENCODING_PCM_16BIT)
         .setSampleRate(timeline.sampleRate)
         .setChannelCount(timeline.channels)
+        .setMaxInputSize(64 * 1024)
         .build()
 
-    private var stream = LoopingPcmSampleStream(core, format)
+    private var stream = LoopingPcmSampleStream(core, format, logger)
 
     private val callbackHandler: CallbackDispatcher = dispatcher
         ?: AndroidCallbackDispatcher(Handler(Looper.myLooper() ?: Looper.getMainLooper()))
@@ -127,7 +129,10 @@ class LoopingPcmMediaPeriod(
             this.callback = callback
             if (prepared) {
                 logD("prepare already ready; notify")
-                callbackHandler.post { callback.onPrepared(this) }
+                callbackHandler.post {
+                    callback.onPrepared(this)
+                    callback.onContinueLoadingRequested(this)
+                }
                 return
             }
         }
@@ -195,7 +200,15 @@ class LoopingPcmMediaPeriod(
         if (error != null) throw IOException(error)
     }
 
-    override fun getTrackGroups(): TrackGroupArray = TrackGroupArray(TrackGroup(format))
+    override fun getTrackGroups(): TrackGroupArray {
+        val groups = TrackGroupArray(TrackGroup(format))
+        logD(
+            "getTrackGroups groups=" + groups.length +
+                " mime=" + format.sampleMimeType + " pcm=" + format.pcmEncoding +
+                " " + format.sampleRate + "Hz/" + format.channelCount + "ch",
+        )
+        return groups
+    }
 
     override fun selectTracks(
         selections: Array<ExoTrackSelection?>,
@@ -206,11 +219,23 @@ class LoopingPcmMediaPeriod(
     ): Long {
         // 注意：数组按 renderer 索引，不保证 audio 在 0（默认 renderers 中 video=0, audio=1）。
         // 只把唯一的音频流挂到第一个非空 selection 上，其余清空。
+        val selected = BooleanArray(selections.size) { selections[it] != null }
+        logD(
+            "selectTracks renderers=" + selections.size +
+                " selected=" + selected.indices.filter { selected[it] } +
+                " streamsBefore=" + streams.indices.filter { streams[it] != null } +
+                " format=" + format.sampleMimeType + "/pcm=" + format.pcmEncoding +
+                "/" + format.sampleRate + "Hz/" + format.channelCount + "ch",
+        )
         LoopTrackAssignment.assign(
-            selected = BooleanArray(selections.size) { selections[it] != null },
+            selected = selected,
             streams = streams,
             stream = stream,
             streamResetFlags = streamResetFlags,
+        )
+        logD(
+            "selectTracks assigned audioIndex=" + streams.indexOfFirst { it === stream } +
+                " streamReady=" + stream.isReady() + " " + core.debugStateString(),
         )
         return positionUs
     }
@@ -381,7 +406,12 @@ class LoopingPcmMediaPeriod(
                         val cb = synchronized(stateLock) { callback }
                         if (ready && prepareError == null && cb != null) {
                             logD("first block ready -> onPrepared")
-                            callbackHandler.post { cb.onPrepared(this) }
+                            callbackHandler.post {
+                                cb.onPrepared(this)
+                                // 有的路径 onPrepared 后 loader 要等下一次回调才继续；
+                                // 主动踢一次，避免 prepared 后不再 continueLoading。
+                                cb.onContinueLoadingRequested(this)
+                            }
                         }
                     }
                 } catch (t: Throwable) {
