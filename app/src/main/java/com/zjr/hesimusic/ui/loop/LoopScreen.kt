@@ -216,7 +216,8 @@ fun LoopScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
-                actions = { LoopEngineSwitch(modifier = Modifier.padding(end = 8.dp)) },
+                // 引擎开关暂时收起：SOURCE 路径还在修（暂停/切换闪退），
+                // 在自测全绿之前不向用户暴露，避免拿到半成品。
             )
         },
     ) { innerPadding ->
