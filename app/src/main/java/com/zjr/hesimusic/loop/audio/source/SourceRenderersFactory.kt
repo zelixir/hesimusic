@@ -70,7 +70,14 @@ class TapAudioSink(
         val before = buffer.position()
         // DefaultAudioSink 可能消费后不移动 position/limit；先留一个视图，
         // consumed 时按快照写 tap，保证 PCM 不丢。
-        val tapSnapshot = if (buffer.hasRemaining()) buffer.duplicate() else null
+        val tapSnapshot = if (controller.isTapActive && buffer.hasRemaining()) {
+            // delegate 可能 clear/rewind buffer；tap 开启时先拷贝真实 PCM。
+            val copy = ByteArray(buffer.remaining())
+            buffer.duplicate().get(copy)
+            ByteBuffer.wrap(copy)
+        } else {
+            null
+        }
         val consumed = super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
         val after = buffer.position()
         handledBuffers += 1L
@@ -87,7 +94,7 @@ class TapAudioSink(
         if (after > before) {
             controller.tapPcm(buffer, before, after - before)
         } else if (consumed && tapSnapshot != null) {
-            // DefaultAudioSink 不保证移动 ByteBuffer.position；使用之前的快照。
+            // DefaultAudioSink 不保证移动 ByteBuffer.position；使用 delegate 前的快照。
             controller.tapPcm(tapSnapshot, tapSnapshot.position(), tapSnapshot.remaining())
         }
         if (!forcedPlay) {

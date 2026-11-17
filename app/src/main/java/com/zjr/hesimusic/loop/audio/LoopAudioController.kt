@@ -331,6 +331,8 @@ class LoopAudioController @Inject constructor() {
     private var tapFormat: TapFormat? = null
     private var tapDataBytes: Long = 0L
     private var tapFailed = false
+    private var tapLogCount = 0L
+    private var lastTapLogMs = 0L
 
     // tap 侧车事件: <file.name>.jsonl
     private var tapEventFile: File? = null
@@ -354,6 +356,7 @@ class LoopAudioController @Inject constructor() {
      */
     fun setPcmTap(file: File?) {
         synchronized(tapLock) {
+            tapDebug("setPcmTap file=" + file + " format=" + tapFormat + " same=" + (tapFile == file))
             if (tapFile == file) return
             closeTapLocked()
             tapFile = file
@@ -512,24 +515,41 @@ class LoopAudioController @Inject constructor() {
         }
     }
 
+    /** tap 是否已打开（SOURCE sink 据此决定是否在 delegate 前拷贝 PCM）。 */
+    internal val isTapActive: Boolean
+        get() = synchronized(tapLock) { tapOut != null }
+
     /** 把 delegate 实际消费的一段 PCM 写入 tap（offset/length 相对 buffer 绝对位置）。 */
     internal fun tapPcm(buffer: ByteBuffer, offset: Int, length: Int) {
         if (length <= 0) return
         synchronized(tapLock) {
-            val out = tapOut ?: return
+            val out = tapOut
+            val limit = buffer.limit()
+            if (tapLogCount < 3L || System.currentTimeMillis() - lastTapLogMs >= 1_000L) {
+                tapLogCount += 1L
+                lastTapLogMs = System.currentTimeMillis()
+                tapDebug(
+                    "tapPcm len=" + length + " off=" + offset + " limit=" + limit +
+                        " tapOut=" + (out != null) + " failed=" + tapFailed +
+                        " bytes=" + tapDataBytes,
+                )
+            }
+            if (out == null) return
             if (tapFailed) return
             if (offset < 0 || length <= 0) return
-            if (offset + length > buffer.limit()) return
-            val data = ByteArray(length)
+            val safeOffset = offset.coerceIn(0, limit)
+            val safeLength = minOf(length, limit - safeOffset)
+            if (safeLength <= 0) return
+            val data = ByteArray(safeLength)
             val dup = buffer.duplicate()
-            dup.position(offset)
-            dup.limit(offset + length)
+            dup.position(safeOffset)
+            dup.limit(safeOffset + safeLength)
             dup.get(data)
             // 第一段实际输出前补 run 快照（若 configure 时窗口尚未写入）。
             if (!tapRunWritten) writeTapRunLocked()
             try {
                 out.write(data)
-                tapDataBytes += length.toLong()
+                tapDataBytes += safeLength.toLong()
             } catch (e: IOException) {
                 tapFailed = true
                 closeTapLocked()
@@ -552,6 +572,7 @@ class LoopAudioController @Inject constructor() {
             raf.seek(44L)
             tapOut = raf
             tapDataBytes = 0L
+            tapDebug("tapOpened file=" + file + " sr=" + fmt.sampleRate + " ch=" + fmt.channels)
         } catch (e: IOException) {
             tapFailed = true
             tapOut = null
@@ -715,6 +736,14 @@ class LoopAudioController @Inject constructor() {
             } catch (e: IOException) {
                 // ignore
             }
+        }
+    }
+
+    private fun tapDebug(message: String) {
+        try {
+            Log.d(TAG, message)
+        } catch (_: Throwable) {
+            // JVM 单测里 android.util.Log 是 stub。
         }
     }
 

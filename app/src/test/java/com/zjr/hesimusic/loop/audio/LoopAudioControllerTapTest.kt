@@ -12,6 +12,33 @@ import java.nio.ByteOrder
 class LoopAudioControllerTapTest {
 
     @Test
+    fun `setPcmTap after configure opens file and writes duplicate view frames`() {
+        val dir = createTempDir(prefix = "loop-tap-after-")
+        val pcm = File(dir, "after.pcm")
+        val controller = LoopAudioController()
+        try {
+            controller.window = LoopWindow(7L, 0L, 3_000_000L)
+            controller.onFormatConfigured(48_000, 2, 4, false)
+            controller.setPcmTap(pcm)
+
+            val full = ByteBuffer.allocate(3 * 4).order(ByteOrder.LITTLE_ENDIAN)
+            repeat(3 * 2) { full.putShort(0x1234) }
+            full.flip()
+            val snapshot = full.duplicate()
+            controller.tapPcm(snapshot, snapshot.position(), snapshot.remaining())
+            controller.onSinkRelease()
+        } finally {
+            controller.setPcmTap(null)
+        }
+
+        val bytes = pcm.readBytes()
+        assertEquals(44 + 3 * 4, bytes.size)
+        val header = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(36 + 3 * 4, header.getInt(4))
+        assertEquals(3 * 4, header.getInt(40))
+    }
+
+    @Test
     fun `tap writes frame aligned pcm and seam event uses output frame index`() {
         val dir = createTempDir(prefix = "loop-tap-")
         val pcm = File(dir, "source.pcm")
