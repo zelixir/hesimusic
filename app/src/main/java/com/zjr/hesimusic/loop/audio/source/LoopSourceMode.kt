@@ -31,7 +31,7 @@ enum class LoopSourceMode {
         private const val SETTING_KEY = "hesi_loop_source_mode"
 
         @Volatile
-        var current: LoopSourceMode = M3_PRIME
+        var current: LoopSourceMode = SOURCE
 
         /**
          * 调试/测试用的强制覆盖:非 null 时**优先于**全局 setting。
@@ -84,8 +84,9 @@ enum class LoopSourceMode {
                 current = chosen
                 return
             }
+            // 成品默认走新引擎;显式写 0 才回到老引擎(回退路径)。
             val value = try {
-                Settings.Global.getInt(context.contentResolver, SETTING_KEY, 0)
+                Settings.Global.getInt(context.contentResolver, SETTING_KEY, 1)
             } catch (t: Throwable) {
                 Log.w(TAG, "read $SETTING_KEY failed", t)
                 return

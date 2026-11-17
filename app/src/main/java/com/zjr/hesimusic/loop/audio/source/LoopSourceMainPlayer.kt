@@ -19,7 +19,7 @@ object LoopSourceMainPlayer {
     private const val SETTING_KEY = "hesi_loop_source_main"
 
     @Volatile
-    var enabled: Boolean = false
+    var enabled: Boolean = true
         private set
 
     @Volatile
@@ -43,11 +43,12 @@ object LoopSourceMainPlayer {
     /** 读取 global setting（0/1），默认 false；debugOverride 优先。 */
     fun refreshFromSettings(context: Context) {
         debugOverride?.let { return }
+        // 与预览开关一致:成品默认开启,显式写 0 才关闭。
         enabled = try {
-            Settings.Global.getInt(context.contentResolver, SETTING_KEY, 0) == 1
+            Settings.Global.getInt(context.contentResolver, SETTING_KEY, 1) != 0
         } catch (t: Throwable) {
             Log.w(TAG, "read $SETTING_KEY failed", t)
-            false
+            true
         }
     }
 
