@@ -46,6 +46,9 @@ class FakeAudioSink : AudioSink {
     /** 下一次 handleBuffer 抛异常（无条件，模拟切回源写失败）。 */
     var failNextBuffer: Boolean = false
 
+    /** 接下来 N 次 handleBuffer 抛异常。 */
+    var failBufferCount: Int = 0
+
     /** 模拟 DefaultAudioSink 内部 PTS 单调断言。 */
     var requireMonotonicPts: Boolean = false
     private var lastAcceptedPtsUs: Long = Long.MIN_VALUE
@@ -102,6 +105,10 @@ class FakeAudioSink : AudioSink {
         if (presentationTimeUs != Long.MIN_VALUE) lastAcceptedPtsUs = presentationTimeUs
         if (failNextBuffer) {
             failNextBuffer = false
+            throw RuntimeException("fake delegate rejected buffer pts=$presentationTimeUs")
+        }
+        if (failBufferCount > 0) {
+            failBufferCount -= 1
             throw RuntimeException("fake delegate rejected buffer pts=$presentationTimeUs")
         }
         val failAt = failNextWriteAtOrAboveUs

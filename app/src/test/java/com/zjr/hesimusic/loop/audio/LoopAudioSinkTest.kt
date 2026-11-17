@@ -200,6 +200,55 @@ class LoopAudioSinkTest {
     }
 
     @Test
+    fun `seam flush 后 bias 归零且 bypass 清除`() {
+        val (controller, sink, _) = rig(window(0, 31_000))
+        controller.seamBufferMode = SeamBufferMode.ON
+        controller.seamSinkRouteEnabled = true
+        controller.seamDeltaUs = 1_000_000L
+        controller.seamDecodeRange = { s, e ->
+            PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(s.toInt(), (e - s).toInt()))
+        }
+        controller.seamSeekRequested = { }
+
+        var f = 0
+        while (f < 30_000) {
+            assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(f, 1000), f * 1000L))
+            f += 1000
+        }
+        assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(30_000, 1000), 30_000_000L))
+        assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(1000, 1000), 1_000_000L))
+        assertTrue("应已累加 bias: " + sink.seamDebugStats(), sink.seamDebugStats().contains("bias=31000000"))
+
+        sink.flush()
+        assertTrue("flush 后 bias 应归零: " + sink.seamDebugStats(), sink.seamDebugStats().contains("bias=0"))
+        assertTrue("flush 后 bypass 应清除: " + sink.seamDebugStats(), sink.seamDebugStats().contains("bypass=false"))
+    }
+
+    @Test
+    fun `seam 源写两次失败只丢一段且不重复同 PTS`() {
+        val (controller, sink, fake) = rig(window(0, 31_000))
+        controller.seamBufferMode = SeamBufferMode.ON
+        controller.seamSinkRouteEnabled = true
+        controller.seamDeltaUs = 1_000_000L
+        controller.seamDecodeRange = { s, e ->
+            PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(s.toInt(), (e - s).toInt()))
+        }
+        controller.seamSeekRequested = { }
+
+        var f = 0
+        while (f < 30_000) {
+            assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(f, 1000), f * 1000L))
+            f += 1000
+        }
+        assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(30_000, 1000), 30_000_000L))
+        fake.failBufferCount = 2
+        assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(1000, 1000), 1_000_000L))
+        assertTrue("两次失败应 bypass: " + sink.seamDebugStats(), sink.seamDebugStats().contains("bypass=true"))
+        assertTrue(feedFully(sink, PcmTestSupport.pcm16Buffer(2000, 1000), 2_000_000L))
+        assertTrue(fake.feeds.any { it.ptsUs >= 31_000_000L })
+    }
+
+    @Test
     fun `seam 切回源写失败重试一次且位置连续`() {
         val (controller, sink, fake) = rig(window(0, 31_000))
         controller.seamBufferMode = SeamBufferMode.ON

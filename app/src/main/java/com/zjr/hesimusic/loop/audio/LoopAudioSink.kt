@@ -634,6 +634,10 @@ class LoopAudioSink(
             buffer.limit(end)
             super.handleBuffer(buffer, mediaPtsUs + outputStreamOffsetUs + seamPtsBiasUs, 1)
         }
+        seamLog(
+            "source write attempt=1 pts=" + mediaPtsUs + " bias=" + seamPtsBiasUs +
+                " start=" + start + " end=" + end,
+        )
         var accepted = try {
             accept()
         } catch (t: Throwable) {
@@ -658,7 +662,10 @@ class LoopAudioSink(
             }
             lastDelegatePtsUs = Long.MIN_VALUE
             lastInputPtsUs = Long.MIN_VALUE
-            seamLog("source retry pts=" + mediaPtsUs + " start=" + start + " end=" + end)
+            seamLog(
+                "source write attempt=2 pts=" + mediaPtsUs + " bias=" + seamPtsBiasUs +
+                    " start=" + start + " end=" + end,
+            )
             try {
                 accept()
             } catch (t2: Throwable) {
@@ -673,8 +680,14 @@ class LoopAudioSink(
                 }
                 seamBypass = true
                 seamState = SeamRouteState.NORMAL
-                seamLog("fallback reason=SOURCE_WRITE_FAIL pts=" + mediaPtsUs)
-                return false
+                seamLog(
+                    "fallback reason=SOURCE_WRITE_FAIL pts=" + mediaPtsUs +
+                        " dropFrames=" + ((end - start) / bytesPerFrame),
+                )
+                // 同一 PTS 再写只会继续触发断言：丢弃本段源输入，下一段 PTS 继续。
+                buffer.position(end)
+                buffer.limit(restoreLimit)
+                return true
             }
         }
         val after = buffer.position()
@@ -816,11 +829,22 @@ class LoopAudioSink(
         pendingReplay = null
         pendingSeam = null
         seamQueue.clear()
+        // 自己的 S 内 seek 需要保留 bias；其它 seek 一律清掉旧 bias/bypass。
+        val preserveBias = seamSeekIssued && seamState == SeamRouteState.SEAM
+        if (!preserveBias) {
+            seamPtsBiasUs = 0L
+            seamBypass = false
+            if (seamBuffer != null) seamState = SeamRouteState.NORMAL
+        }
         if (!seamSeekIssued) {
             seamBuffer?.cancel()
             seamBuffer = null
             seamState = SeamRouteState.FALLBACK
         }
+        seamLog(
+            "flush preserveBias=" + preserveBias + " bias=" + seamPtsBiasUs +
+                " bypass=" + seamBypass + " state=" + seamState,
+        )
         stuckReplayAttempts = 0
         stuckReplaySinceNanos = 0L
         lastDelegatePtsUs = Long.MIN_VALUE
@@ -836,11 +860,12 @@ class LoopAudioSink(
         pendingReplay = null
         pendingSeam = null
         seamQueue.clear()
-        if (!seamSeekIssued) {
-            seamBuffer?.cancel()
-            seamBuffer = null
-            seamState = SeamRouteState.FALLBACK
-        }
+        seamPtsBiasUs = 0L
+        seamBypass = false
+        seamBuffer?.cancel()
+        seamBuffer = null
+        seamState = SeamRouteState.FALLBACK
+        seamSeekIssued = false
         stuckReplayAttempts = 0
         stuckReplaySinceNanos = 0L
         lastDelegatePtsUs = Long.MIN_VALUE
@@ -862,6 +887,8 @@ class LoopAudioSink(
         seamBuffer = null
         seamState = SeamRouteState.FALLBACK
         seamSeekIssued = false
+        seamPtsBiasUs = 0L
+        seamBypass = false
         stuckReplayAttempts = 0
         stuckReplaySinceNanos = 0L
         lastDelegatePtsUs = Long.MIN_VALUE
