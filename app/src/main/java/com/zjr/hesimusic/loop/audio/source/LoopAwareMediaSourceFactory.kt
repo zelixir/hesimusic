@@ -49,7 +49,10 @@ class LoopAwareMediaSourceFactory(
         internal fun loopTagOf(tag: Any?, enabled: Boolean): LoopSourceItemTag? =
             if (enabled && tag is LoopSourceItemTag) tag else null
 
-        fun defaultSourceFactory(pcmDecoder: PcmDecoder): (MediaItem, LoopSourceItemTag) -> MediaSource =
+        fun defaultSourceFactory(
+            pcmDecoder: PcmDecoder,
+            onSeamOutputFrames: ((Long) -> Unit)? = null,
+        ): (MediaItem, LoopSourceItemTag) -> MediaSource =
             { item, tag ->
                 val format = PcmFileFormatProbe.probe(tag.filePath)
                 val timeline = LoopingPcmTimeline(
@@ -63,6 +66,7 @@ class LoopAwareMediaSourceFactory(
                     item = item,
                     timeline = timeline,
                     provider = PcmDecoderRangeProvider(pcmDecoder, tag.filePath),
+                    onSeamOutputFrames = onSeamOutputFrames,
                 )
             }
     }

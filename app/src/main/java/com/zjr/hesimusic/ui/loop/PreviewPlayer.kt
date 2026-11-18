@@ -553,10 +553,10 @@ class PreviewPlayer @Inject constructor(
             // 放宽为 1s 起播，min 3s/max 8s 继续预取，兼顾首声延迟与稳态。
             builder.setLoadControl(
                 DefaultLoadControl.Builder()
-                    .setBufferDurationsMs(3_000, 8_000, 1_000, 1_500)
+                    .setBufferDurationsMs(4_000, 12_000, 1_500, 2_500)
                     .build(),
             )
-            Log.d(TAG, "source load control min=3000 max=8000 playback=1000 rebuffer=1500")
+            Log.d(TAG, "source load control min=4000 max=12000 playback=1500 rebuffer=2500")
         }
         val p = builder.build()
         if (kind == EngineKind.SOURCE) {

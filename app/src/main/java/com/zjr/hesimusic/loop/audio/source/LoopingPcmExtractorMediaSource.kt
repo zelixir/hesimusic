@@ -11,6 +11,7 @@ import androidx.media3.extractor.Extractor
 import androidx.media3.extractor.ExtractorsFactory
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import java.util.concurrent.Executors
 
 /**
  * 虚拟容器 DataSource：Extractor 完全不读取真实字节，所有 PCM 来自块缓存。
@@ -55,15 +56,32 @@ object LoopingPcmExtractorMediaSource {
         timeline: LoopingPcmTimeline,
         provider: PcmRangeProvider,
         logger: (String) -> Unit = {},
+        prefetchBlocks: Int = SOURCE_PREFETCH_BLOCKS,
         onSeamOutputFrames: ((Long) -> Unit)? = null,
     ): MediaSource {
-        val core = LoopingPcmSourceCore(timeline, provider).also {
+        val core = LoopingPcmSourceCore(
+            timeline = timeline,
+            provider = provider,
+            prefetchBlocks = prefetchBlocks,
+        ).also {
             it.onSeamOutputFrames = onSeamOutputFrames
         }
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "LoopPcmPrefetch").apply { isDaemon = true }
+        }
+        val prefetcher = LoopPcmPrefetcher(
+            core = core,
+            executor = executor,
+            targetBlocks = prefetchBlocks,
+            logger = logger,
+        )
         val extractors = ExtractorsFactory {
-            arrayOf<Extractor>(LoopingPcmExtractor(core, timeline, logger))
+            arrayOf<Extractor>(LoopingPcmExtractor(core, timeline, logger, prefetcher))
         }
         val factory = ProgressiveMediaSource.Factory(LoopingPcmDataSource.Factory(), extractors)
         return factory.createMediaSource(item)
     }
+
+    /** 6 块 ≈ 6s；LoadControl max 12s 留出解码抖动余量。 */
+    const val SOURCE_PREFETCH_BLOCKS: Int = 6
 }

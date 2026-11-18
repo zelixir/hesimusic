@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.extractor.DefaultExtractorsFactory
@@ -72,16 +73,27 @@ object MediaModule {
         val loopAwareFactory = LoopAwareMediaSourceFactory(
             delegate = defaultMediaSourceFactory,
             enabled = mainSource,
-            sourceFactory = LoopAwareMediaSourceFactory.defaultSourceFactory(pcmDecoder),
+            sourceFactory = LoopAwareMediaSourceFactory.defaultSourceFactory(
+                pcmDecoder = pcmDecoder,
+                onSeamOutputFrames = { outFrames -> loopAudioController.tapSeam(outFrames) },
+            ),
         )
         // 这里不按 mainSource 另建 delegate：factory 内部用同一条件判断，
         // 普通 item / 开关关闭时原样走 default。
-        val player = ExoPlayer.Builder(context)
+        val builder = ExoPlayer.Builder(context)
             .setMediaSourceFactory(loopAwareFactory)
             .setRenderersFactory(renderersFactory)
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
-            .build()
+        if (mainSource) {
+            // 1s 块 + 解码抖动：4s 起播/12s 上限，避免每 1~2s 饿死。
+            builder.setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(4_000, 12_000, 1_500, 2_500)
+                    .build(),
+            )
+        }
+        val player = builder.build()
 
         val duration = System.currentTimeMillis() - startTime
         Log.i(TAG, "ExoPlayer created in ${duration}ms")

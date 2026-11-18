@@ -35,6 +35,7 @@ class LoopingPcmMediaSource(
     private val maxCacheBytes: Long = PcmBlockCache.DEFAULT_MAX_BYTES,
     dispatcher: CallbackDispatcher? = null,
     private val logger: (String) -> Unit = { message -> Log.d("LoopPcmSource", message) },
+    private val prefetchBlocks: Int = 6,
 ) : MediaSource {
 
     private val callbackDispatcher: CallbackDispatcher? = dispatcher
@@ -107,6 +108,7 @@ class LoopingPcmMediaSource(
             startPositionUs = startPositionUs,
             dispatcher = callbackDispatcher,
             logger = logger,
+            prefetchBlocks = prefetchBlocks,
         )
         periods.add(period)
         logger("createPeriod period=" + period + " periods=" + periods.size)

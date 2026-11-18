@@ -72,6 +72,8 @@ class LoopingPcmSourceCore(
 
     fun decodeCallCount(): Long = synchronized(lock) { decodeCalls }
 
+    fun readyBlockCount(): Int = synchronized(lock) { cache.activeBlockCount() }
+
     fun skippedBlocks(): Long = synchronized(lock) { skippedBlockCount }
 
     fun skippedFrames(): Long = synchronized(lock) { skippedFrameCount }
@@ -285,7 +287,8 @@ class LoopingPcmSourceCore(
         logger(
             "LoopPcmSource cacheBytes=" + cache.cachedBytes() +
                 " maxBytes=" + cache.budgetBytes +
-                " blocks=" + cache.activeBlockCount(),
+                " blocks=" + cache.activeBlockCount() +
+                " bufferedUs=" + bufferedEndUs(),
         )
     }
 

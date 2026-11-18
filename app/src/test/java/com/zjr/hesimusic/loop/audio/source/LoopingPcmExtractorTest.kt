@@ -77,6 +77,19 @@ class LoopingPcmExtractorTest {
     } as ExtractorInput
 
     @Test
+    fun `first read predecodes two blocks before output`() {
+        val tl = LoopingPcmTestSupport.timeline()
+        val provider = LoopingPcmTestSupport.provider(tl)
+        val core = LoopingPcmSourceCore(tl, provider, prefetchBlocks = 6)
+        val out = FakeOutput()
+        val extractor = LoopingPcmExtractor(core, tl)
+        extractor.init(out)
+        assertEquals(Extractor.RESULT_CONTINUE, extractor.read(fakeInput(), PositionHolder()))
+        assertTrue("ready blocks=" + core.readyBlockCount(), core.readyBlockCount() >= 2)
+        assertTrue("first read must output samples", out.track.totalBytes > 0)
+    }
+
+    @Test
     fun `paused gate stops extractor read`() {
         val tl = LoopingPcmTestSupport.timeline()
         val provider = LoopingPcmTestSupport.provider(tl)

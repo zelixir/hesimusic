@@ -14,6 +14,7 @@ import com.zjr.hesimusic.loop.LoopPosition
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.SeamBufferMode
 import com.zjr.hesimusic.loop.audio.source.LoopPreviewDebugBridge
+import com.zjr.hesimusic.loop.audio.source.LoopSourceMainPlayer
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
 import com.zjr.hesimusic.loop.analysis.AnalysisState
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
@@ -1302,6 +1303,11 @@ object LoopDebugServer {
     private fun handleSourceModeToggle(body: JSONObject?): Map<String, Any?> {
         val on = body?.optBoolean("on", LoopSourceMode.isSource()) ?: LoopSourceMode.isSource()
         val target = if (on) LoopSourceMode.SOURCE else LoopSourceMode.M3_PRIME
+        // 主播放器开关同步(自测里要能双向切换)
+        runCatching {
+            LoopSourceMainPlayer.setEnabledForTest(on)
+            LoopSourceMainPlayer.activateMainPlayer(on)
+        }
         // 覆盖 refreshFromSettings:真机 ROM 常拒绝 adb settings put。
         LoopSourceMode.debugOverride = target
         LoopSourceMode.current = target

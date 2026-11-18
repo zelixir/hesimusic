@@ -28,10 +28,12 @@ class LoopingPcmExtractor(
     private val core: LoopingPcmSourceCore,
     private val timeline: LoopingPcmTimeline,
     private val logger: (String) -> Unit = {},
+    private val prefetcher: LoopPcmPrefetcher? = null,
 ) : Extractor {
 
     private var trackOutput: TrackOutput? = null
     private var formatSent = false
+    private var started = false
     private var samples = 0L
 
     private val format: Format = Format.Builder()
@@ -67,10 +69,22 @@ class LoopingPcmExtractor(
     override fun read(input: ExtractorInput, seekPosition: PositionHolder): Int {
         if (LoopSourcePauseGate.paused) return Extractor.RESULT_CONTINUE
         val track = trackOutput ?: return Extractor.RESULT_CONTINUE
+        // 起播门槛：至少 2 块（2s）就绪再吐首个 sample，避免“先出声再断 347ms”。
+        if (!started && core.readyBlockCount() < 2) {
+            var guard = 0
+            while (core.readyBlockCount() < 2 && guard < 4 && core.pumpDecode()) guard += 1
+            if (core.readyBlockCount() < 2) {
+                prefetcher?.kick()
+                return Extractor.RESULT_CONTINUE
+            }
+        }
+        started = true
+        prefetcher?.kick()
         if (!formatSent) {
             track.format(format)
             formatSent = true
         }
+        prefetcher?.kick()
         var result = core.read(READ_CHUNK_BYTES)
         if (result == null) {
             // 虚拟容器没有真实 I/O；加载线程按需解一块，避免空转。
@@ -92,10 +106,13 @@ class LoopingPcmExtractor(
     override fun seek(position: Long, timeUs: Long) {
         core.seekToTimelineUs(timeUs)
         formatSent = false
+        started = false
+        prefetcher?.kick()
         logger("extractor seek position=" + position + " timeUs=" + timeUs)
     }
 
     override fun release() {
+        prefetcher?.release()
         core.release()
     }
 

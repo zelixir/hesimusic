@@ -62,12 +62,14 @@ class LoopingPcmMediaPeriod(
     startPositionUs: Long = 0L,
     dispatcher: CallbackDispatcher? = null,
     private val logger: (String) -> Unit = { message -> Log.w(TAG, message) },
+    private val prefetchBlocks: Int = 6,
 ) : MediaPeriod {
 
     private var core = LoopingPcmSourceCore(
         timeline = timeline,
         provider = provider,
         maxCacheBytes = maxCacheBytes,
+        prefetchBlocks = prefetchBlocks,
         logger = logger,
     )
 
@@ -379,7 +381,7 @@ class LoopingPcmMediaPeriod(
                     // 普通任务一次最多补 3 块（当前 + 2 预取）。
                     // 不再按 generation 中断：generation 只在 seek/窗口变化时变化，
                     // 不会因为 continueLoading 把正在解的目标块顶掉。
-                    val limit = if (firstBlock) 4 else 3
+                    val limit = if (firstBlock) 4 else 8
                     for (i in 0 until limit) {
                         if (isReleased()) break
                         val pumped = core.pumpDecode()
