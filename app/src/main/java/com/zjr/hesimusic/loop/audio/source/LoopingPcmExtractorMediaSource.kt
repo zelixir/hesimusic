@@ -59,6 +59,25 @@ object LoopingPcmExtractorMediaSource {
         prefetchBlocks: Int = SOURCE_PREFETCH_BLOCKS,
         onSeamOutputFrames: ((Long) -> Unit)? = null,
     ): MediaSource {
+        val heap = Runtime.getRuntime().maxMemory()
+        if (RingBandSource.canUse(timeline, heap)) {
+            logger(
+                "RingBand select bandBytes=" + (timeline.loopFrames * timeline.bytesPerFrame) +
+                    " heap=" + heap,
+            )
+            return RingBandSource.create(
+                item = item,
+                timeline = timeline,
+                provider = provider,
+                logger = logger,
+                onSeamOutputFrames = onSeamOutputFrames,
+            )
+        }
+        logger(
+            "RingBand fallback reason=SIZE bandBytes=" +
+                (timeline.loopFrames * timeline.bytesPerFrame) +
+                " budget=" + (heap / 10L),
+        )
         val core = LoopingPcmSourceCore(
             timeline = timeline,
             provider = provider,

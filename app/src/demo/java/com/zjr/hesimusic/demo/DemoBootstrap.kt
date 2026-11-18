@@ -9,6 +9,7 @@ import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.model.SongLoop
 import com.zjr.hesimusic.loop.analysis.LoopCandidateKt
 import com.zjr.hesimusic.loop.analysis.LoopCandidatesJson
+import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
 import com.zjr.hesimusic.utils.AlphabetIndexer
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.CoroutineScope
@@ -54,6 +55,7 @@ internal object DemoBootstrap {
     private const val HILT_RETRY_LIMIT = 300
 
     fun start(app: Application): DemoSession {
+        applyEngineFile(app)
         Log.i(TAG, "demo bootstrap start (auto audition arms every launch)")
         // 每次启动都清掉旧意图后再 arm,避免上次进程/恢复状态残留。
         DemoEntryHooks.clearAutoAudition()
@@ -73,6 +75,39 @@ internal object DemoBootstrap {
             }
         }
         return session
+    }
+
+    /**
+     * demo 专用引擎切换：push 一个文本文件到
+     * getExternalFilesDir(null)/engine，内容 source 或 m3。
+     *
+     * 不存在/内容无效时保持当前默认；写入的是用户偏好，因此后续
+     * LoopSourceMode.refreshFromSettings 会继续使用该模式。
+     */
+    private fun applyEngineFile(app: Application) {
+        val dir = app.getExternalFilesDir(null) ?: return
+        val file = File(dir, "engine")
+        if (!file.isFile) {
+            Log.i(TAG, "engine file absent; keep default mode=" + LoopSourceMode.current)
+            return
+        }
+        val raw = try {
+            file.readText(Charsets.UTF_8).trim().lowercase()
+        } catch (t: Throwable) {
+            Log.w(TAG, "read engine file failed path=" + file.absolutePath, t)
+            return
+        }
+        val mode = when (raw) {
+            "source" -> LoopSourceMode.SOURCE
+            "m3", "m3_prime", "m3-prime" -> LoopSourceMode.M3_PRIME
+            else -> null
+        }
+        if (mode == null) {
+            Log.w(TAG, "engine file invalid content=" + raw + " path=" + file.absolutePath)
+            return
+        }
+        LoopSourceMode.select(app, mode)
+        Log.i(TAG, "engine file applied mode=" + mode + " path=" + file.absolutePath)
     }
 
     private suspend fun seed(app: Application): Long {
