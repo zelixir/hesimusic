@@ -113,6 +113,12 @@ interface Opts {
   maxList: number;
   help: boolean;
   selftest: boolean;
+  /** 基线录音:同时分析普通播放,只报告"循环比基线多出来的异常"。 */
+  baseline: string | null;
+  /** 相对基线的容忍增量(爆音点数)。 */
+  baselineClickTol: number;
+  /** 相对基线的容忍增量(掉档窗数)。 */
+  baselineHoleTol: number;
 }
 
 function defaultOpts(): Opts {
@@ -148,6 +154,9 @@ function defaultOpts(): Opts {
     maxList: 20,
     help: false,
     selftest: false,
+    baseline: null,
+    baselineClickTol: 3,
+    baselineHoleTol: 1,
   };
 }
 
@@ -156,6 +165,9 @@ function usage(): string {
     "usage: bun run tools/loop-smoothness.ts <tap.pcm|tap.wav> [--events <tap.jsonl>] [options]",
     "",
     "  --events <path>        tap 的 sidecar 事件文件(默认自动探测 <pcm>.jsonl / <同名>.jsonl)",
+    "  --baseline <path>      同时分析一段普通播放录音,只报告循环比基线多出来的异常",
+    "  --baseline-click-tol <n> 爆音点允许比基线多的数量(默认 3)",
+    "  --baseline-hole-tol <n>  掉档窗允许比基线多的数量(默认 1)",
     "  --a-ms <ms> --b-ms <ms> 无事件文件时手工给环区间(或 --loop-frames <n>)",
     "  --sr <hz> --ch <n> --pcm-format <auto|pcm16|pcm24|pcm32|float32>  裸 PCM 时必需",
     "  --zero-ms <ms>         静音段判 FAIL 的门限(默认 5)",
@@ -205,6 +217,9 @@ function parseArgs(argv: string[]): Opts {
     };
     switch (a) {
       case "--events": o.events = take(); break;
+      case "--baseline": o.baseline = take(); break;
+      case "--baseline-click-tol": o.baselineClickTol = Number(take()); break;
+      case "--baseline-hole-tol": o.baselineHoleTol = Number(take()); break;
       case "--sr": o.sr = Number(take()); break;
       case "--ch": o.ch = Number(take()); break;
       case "--pcm-format": o.pcmFormat = take(); break;
@@ -1792,7 +1807,54 @@ function main(): number {
       errOut(usage());
       return 2;
     }
-    const res = analyzeFile(opts.pcm, opts);
+    let res = analyzeFile(opts.pcm, opts);
+    if (opts.baseline) {
+      // 基线对比:普通播放自身也会有素材瞬态/RMS 起伏,只应报告"循环多出来的"异常。
+      const baseOpts: Opts = { ...opts, baseline: null, events: null, quiet: true };
+      let base: AnalysisResult;
+      try {
+        base = analyzeFile(opts.baseline, baseOpts);
+      } catch (e: any) {
+        errOut("基线分析失败: " + String(e?.message ?? e));
+        return 2;
+      }
+      const countOf = (it: Item): number => {
+        if (typeof it?.data?.count === "number") return it.data.count;
+        // details 会被 maxList 截断,真实条数从 summary 的开头数字取。
+        const m = /^(\d+)/.exec(String(it?.summary ?? ""));
+        if (m) return Number(m[1]);
+        return Array.isArray(it?.details) ? it.details.length : 0;
+      };
+      const loopClicks = countOf(res.clicks);
+      const baseClicks = countOf(base.clicks);
+      const loopHoles = countOf(res.rmsWindows);
+      const baseHoles = countOf(base.rmsWindows);
+      const clickExtra = loopClicks - baseClicks;
+      const holeExtra = loopHoles - baseHoles;
+      const ok = clickExtra <= opts.baselineClickTol && holeExtra <= opts.baselineHoleTol;
+      const lines = [
+        "",
+        "== baseline ==",
+        `baseline : ${opts.baseline}`,
+        `clicks   : loop=${loopClicks} baseline=${baseClicks} extra=${clickExtra} (tol ${opts.baselineClickTol})`,
+        `rmsHoles : loop=${loopHoles} baseline=${baseHoles} extra=${holeExtra} (tol ${opts.baselineHoleTol})`,
+        ok ? "BASELINE: PASS(循环与普通播放无实质差异)" : "BASELINE: FAIL(循环比普通播放多出异常)",
+        "",
+      ];
+      for (const l of lines) out(l);
+      if (!ok) {
+        res = {
+          ...res,
+          result: "FAIL",
+          exitCode: 1,
+          failReasons: [...res.failReasons, `baseline: clicks ++${clickExtra}, rmsHoles ++${holeExtra}`],
+        };
+      } else {
+        // 素材本身的瞬态/起伏不算循环缺陷:清掉这两类失败理由。
+        const keep = res.failReasons.filter((r) => !/^(clicks|rmsWindows)/.test(r));
+        res = { ...res, failReasons: keep, result: keep.length === 0 ? "PASS" : "FAIL", exitCode: keep.length === 0 ? 0 : 1 };
+      }
+    }
     printResult(res, opts.quiet);
     if (opts.json) {
       const dir = path.dirname(opts.json);
