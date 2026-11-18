@@ -54,14 +54,17 @@ internal object DemoBootstrap {
     private const val HILT_RETRY_LIMIT = 300
 
     fun start(app: Application): DemoSession {
+        Log.i(TAG, "demo bootstrap start (auto audition arms every launch)")
+        // 每次启动都清掉旧意图后再 arm,避免上次进程/恢复状态残留。
+        DemoEntryHooks.clearAutoAudition()
         val session = DemoSessionImpl()
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
                 val songId = seed(app)
                 Log.i(TAG, "demo seed ready: songId=" + songId)
-                // 冷启动首次进入结果页后自动试听「仅循环段」;LoopViewModel 进入 Ready 时
-                // 通过 DemoEntryHooks.consumeAutoAudition 原子消费一次。
-                DemoEntryHooks.autoAuditionSongId = songId
+                // 无条件 arm(与歌曲是否已存在无关):冷启动首次进入结果页后自动试听
+                // 「仅循环段」;LoopViewModel 进入 Ready 或后续收到 arm 时消费一次。
+                DemoEntryHooks.armAutoAudition(songId)
                 Log.i(TAG, "demo auto audition armed: songId=" + songId + " mode=LOOP_ONLY")
                 session.ready(songId)
             } catch (t: Throwable) {
@@ -74,6 +77,11 @@ internal object DemoBootstrap {
 
     private suspend fun seed(app: Application): Long {
         val spec = loadLoopSpec(app)
+        Log.i(
+            TAG,
+            "demo seed spec title=" + spec.title + " aMs=" + spec.aMs + " bMs=" + spec.bMs +
+                " sampleRate=" + spec.sampleRate,
+        )
         val songFile = ensureSongFile(app)
         val audio = readAudioMeta(songFile)
         val entryPoint = awaitEntryPoint(app)
@@ -109,7 +117,10 @@ internal object DemoBootstrap {
             throw IllegalStateException("cannot create demo dir: " + dir.absolutePath)
         }
         val dest = File(dir, SONG_FILE_NAME)
-        if (dest.isFile && dest.length() > 0L) return dest
+        if (dest.isFile && dest.length() > 0L) {
+            Log.i(TAG, "reuse existing demo asset path=" + dest.absolutePath + " bytes=" + dest.length())
+            return dest
+        }
 
         // 先写临时文件再改名,避免进程被杀留下半个文件被下次误判为"已存在"。
         val tmp = File(dir, SONG_FILE_NAME + ".tmp")
@@ -159,6 +170,7 @@ internal object DemoBootstrap {
         val path = songFile.absolutePath
         val existing = songDao.getSongByPathAndStartPosition(path, 0L)
         if (existing != null) {
+            Log.i(TAG, "song row exists (skip insert): id=" + existing.id + " path=" + path)
             if (existing.duration <= 0L && audio.durationMs > 0L) {
                 val repaired = existing.copy(duration = audio.durationMs)
                 songDao.insertAll(listOf(repaired))
@@ -166,6 +178,7 @@ internal object DemoBootstrap {
             }
             return existing
         }
+        Log.i(TAG, "song row missing, inserting: path=" + path)
         val song = Song(
             title = spec.title,
             artist = spec.artist,

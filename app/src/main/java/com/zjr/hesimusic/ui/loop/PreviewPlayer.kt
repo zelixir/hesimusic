@@ -143,6 +143,9 @@ class PreviewPlayer @Inject constructor(
     /** 本次起播是否已经因「ring 不完整」自动补环 seek 过一次(防反复跳)。 */
     private var degradeRetryUsed: Boolean = false
 
+    /** 仅用于 onPlaybackStateChanged before/after 诊断(真机 ENDED 排查)。 */
+    private var lastPlaybackState: Int = Player.STATE_IDLE
+
     private var mode: PreviewMode = PreviewMode.FULL
 
     private var aMs: Long = 0L
@@ -197,11 +200,18 @@ class PreviewPlayer @Inject constructor(
     // ------------------------------------------------------------------ API
 
     /**
-     * 为某首歌建立预览(暂停态):写窗口、建 MediaItem(不裁剪,见 [buildMediaItem])、prepare。
-     * 不自动播放(播放由 [play] 触发);重复调用会整体重建。
+     * 为某首歌建立预览(暂停态):记录歌曲/窗口/时长,**不创建播放器也不播放**。
+     * 播放器与 MediaItem 延迟到首次 [play] 时创建([playM3] 负责 setMediaItem),
+     * 避免预填等待期创建空播放器(86a6b1f 的空 timeline ENDED 回归)。
      */
     fun prepare(song: Song, aMs: Long, bMs: Long) {
         val duration = maxOf(song.duration, bMs, 0L)
+        Log.d(
+            TAG,
+            "prepare path=" + song.filePath + " aMs=" + aMs + " bMs=" + bMs +
+                " durationMs=" + duration + " state=" + (player?.playbackState ?: -1) +
+                " mediaItem=" + (player?.currentMediaItem?.mediaId),
+        )
         this.song = song
         this.mode = PreviewMode.FULL
         _durationMs.value = duration
@@ -227,6 +237,13 @@ class PreviewPlayer @Inject constructor(
     fun play(mode: PreviewMode, startMs: Long) {
         LoopSourcePauseGate.resume()
         val song = this.song ?: return
+        Log.d(
+            TAG,
+            "play mode=" + mode + " startMs=" + startMs + " path=" + song.filePath +
+                " state=" + (player?.playbackState ?: -1) +
+                " durationMs=" + _durationMs.value +
+                " mediaItem=" + (player?.currentMediaItem?.mediaId),
+        )
         if (!prepared) {
             prepare(song, aMs, bMs)
         }
@@ -280,10 +297,12 @@ class PreviewPlayer @Inject constructor(
 
     private fun playM3(song: Song, mode: PreviewMode, startMs: Long) {
         val p = ensurePlayer(EngineKind.M3)
+        ensureM3MediaItem(p, song)
         Log.d(
             TAG,
             "playM3 enter mode=" + mode + " startMs=" + startMs +
-                " state=" + p.playbackState + " pos=" + p.currentPosition,
+                " state=" + p.playbackState + " pos=" + p.currentPosition +
+                " path=" + song.filePath + " durationMs=" + _durationMs.value,
         )
         if (mode == PreviewMode.FREE) {
             applyFreeShape()
@@ -367,6 +386,7 @@ class PreviewPlayer @Inject constructor(
             return
         }
         this.mode = mode
+        ensureM3MediaItem(p, song)
         if (mode == PreviewMode.FREE) applyFreeShape() else applyLoopShape(song)
         degradeRetryUsed = false
         val duration = _durationMs.value.coerceAtLeast(0L)
@@ -667,6 +687,7 @@ class PreviewPlayer @Inject constructor(
         player = p
         engineKind = kind
         sourceActive = false
+        lastPlaybackState = p.playbackState
         if (kind == EngineKind.M3) {
             // 引擎请求降级(ring 不完整/重放失败)时给调试日志;预览侧不做自动 seek 回补,
             // 由 UI 提示用户改试听模式(完整循环/仅循环段会重新捕获 ring)。
@@ -691,7 +712,11 @@ class PreviewPlayer @Inject constructor(
         }
         handler.removeCallbacks(ticker)
         handler.post(ticker)
-        Log.d(TAG, "preview player created kind=" + kind)
+        Log.d(
+            TAG,
+            "preview player created kind=" + kind + " path=" + (song?.filePath) +
+                " state=" + p.playbackState + " durationMs=" + _durationMs.value,
+        )
         return p
     }
 
@@ -724,6 +749,7 @@ class PreviewPlayer @Inject constructor(
         sourceSongId = null
         sourceActive = false
         engineKind = EngineKind.M3
+        lastPlaybackState = Player.STATE_IDLE
         controller.window = null
         controller.tapWindow = null
         controller.onDegradeRequested = null
@@ -850,6 +876,33 @@ class PreviewPlayer @Inject constructor(
      */
     private fun buildMediaItem(song: Song): MediaItem = song.toMediaItem()
 
+    /**
+     * M3 播放器必须持有 MediaItem 才能 prepare。
+     *
+     * 历史回归(86a6b1f):播放器改为 play 时才创建后,prepare() 只记录窗口,
+     * 原 p.setMediaItem(buildMediaItem(song)) 被删掉;于是 playM3 在空 timeline
+     * 上 seek/prepare,ExoPlayer 直接进入 ENDED(真机:进页 state=4、pos 不动)。
+     * 同一个 mediaId 不重复设置,避免每次点模式 chip 重建 source/丢缓存。
+     */
+    private fun ensureM3MediaItem(p: ExoPlayer, song: Song) {
+        val expectedId = song.id.toString()
+        val current = p.currentMediaItem
+        if (current?.mediaId == expectedId && p.mediaItemCount > 0) {
+            Log.d(
+                TAG,
+                "mediaItem ok path=" + song.filePath + " state=" + p.playbackState +
+                    " durationMs=" + _durationMs.value,
+            )
+            return
+        }
+        Log.d(
+            TAG,
+            "setMediaItem path=" + song.filePath + " state=" + p.playbackState +
+                " durationMs=" + _durationMs.value + " hadMediaItem=" + (current != null),
+        )
+        p.setMediaItem(buildMediaItem(song), false)
+    }
+
     private fun buildWindow(
         songId: Long,
         aMs: Long,
@@ -881,6 +934,12 @@ class PreviewPlayer @Inject constructor(
     /** 展示口径 seek → 引擎原始位置(窗口存在时按当前轮次映射,避免把播放拽回第 0 轮)。 */
     private fun seekRaw(displayMs: Long) {
         val p = player ?: return
+        Log.d(
+            TAG,
+            "seekRaw displayMs=" + displayMs + " path=" + (song?.filePath) +
+                " state=" + p.playbackState + " durationMs=" + _durationMs.value +
+                " hasMediaItem=" + (p.currentMediaItem != null),
+        )
         val w = window
         if (w == null) {
             p.seekTo(displayMs)
@@ -890,7 +949,9 @@ class PreviewPlayer @Inject constructor(
             targetUs = displayMs * 1000L,
             w = w,
         )
-        p.seekTo((rawUs / 1000L).coerceAtLeast(0L))
+        val targetMs = (rawUs / 1000L).coerceAtLeast(0L)
+        Log.d(TAG, "seekRaw target=" + targetMs + "Ms window=" + w)
+        p.seekTo(targetMs)
     }
 
     private fun rawNowUs(): Long {
@@ -963,6 +1024,14 @@ class PreviewPlayer @Inject constructor(
 
     private val listener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
+            Log.d(
+                TAG,
+                "onPlaybackStateChanged before=" + lastPlaybackState + " after=" + playbackState +
+                    " path=" + (song?.filePath) + " mediaId=" + (player?.currentMediaItem?.mediaId) +
+                    " pos=" + (player?.currentPosition) + " durationMs=" + _durationMs.value +
+                    " mediaItemCount=" + (player?.mediaItemCount ?: -1),
+            )
+            lastPlaybackState = playbackState
             _buffering.value = playbackState == Player.STATE_BUFFERING
             _isPlaying.value = player?.isPlaying == true
             if (sourceActive && engineKind == EngineKind.SOURCE) {

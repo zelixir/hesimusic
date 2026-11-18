@@ -25,6 +25,7 @@ class DemoBootstrapProvider : ContentProvider() {
     }
 
     override fun onCreate(): Boolean {
+        Log.i(TAG, "DemoBootstrapProvider.onCreate")
         val app = context?.applicationContext as? Application
         if (app == null) {
             Log.w(TAG, "no application context; demo bootstrap skipped")

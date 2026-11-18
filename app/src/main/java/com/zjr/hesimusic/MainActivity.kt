@@ -227,6 +227,10 @@ class MainActivity : ComponentActivity() {
                                 LaunchedEffect(demoSongId) {
                                     if (!demoLandingDone) {
                                         val songId = demoSongId ?: return@LaunchedEffect
+                                        // 双保险:即使 bootstrap 的 arm 因任何原因没执行,
+                                        // 真正导航进结果页前也重新 arm 一次(幂等,消费后清空)。
+                                        DemoEntryHooks.armAutoAudition(songId)
+                                        Log.i(TAG, "demo auto audition arm at navigation songId=$songId")
                                         navController.navigate("loop/$songId")
                                         demoLandingDone = true
                                     }

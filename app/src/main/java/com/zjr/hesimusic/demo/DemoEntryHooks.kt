@@ -1,6 +1,8 @@
 package com.zjr.hesimusic.demo
 
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * main 源集侧的 demo 入口契约(见 app/src/demo)。
@@ -21,14 +23,26 @@ object DemoEntryHooks {
     @Volatile
     var session: DemoSession? = null
 
+    private val _autoAudition = MutableStateFlow<Long?>(null)
+
     /**
      * demo 冷启动首次进入结果页时要自动试听「仅循环段」的歌曲 id。
      *
-     * DemoBootstrap 在发布 songId 前写入;LoopViewModel 在页面进入 Ready 后调用
-     * [consumeAutoAudition] 原子消费一次。正式包恒为 null,不产生任何行为。
+     * 用 StateFlow 而不是一次性普通字段:页面可能因恢复/时序先进入 Ready、随后
+     * bootstrap 才 arm;LoopViewModel 同时做「Ready 时消费一次」与「后续 arm 时消费」,
+     * 两种顺序都不会漏自动试听。正式包恒为 null,不产生任何行为。
      */
-    @Volatile
-    var autoAuditionSongId: Long? = null
+    val autoAudition: StateFlow<Long?> = _autoAudition.asStateFlow()
+
+    /** 每次 demo 启动都会 arm(幂等覆盖);消费后清空。 */
+    fun armAutoAudition(songId: Long) {
+        _autoAudition.value = songId
+    }
+
+    /** 清空待处理意图(demo 启动前清理旧值 / 测试隔离)。 */
+    fun clearAutoAudition() {
+        _autoAudition.value = null
+    }
 
     /**
      * 原子消费一次自动试听意图。
@@ -38,8 +52,8 @@ object DemoEntryHooks {
      */
     @Synchronized
     fun consumeAutoAudition(songId: Long): Boolean {
-        if (autoAuditionSongId != songId) return false
-        autoAuditionSongId = null
+        if (_autoAudition.value != songId) return false
+        _autoAudition.value = null
         return true
     }
 }

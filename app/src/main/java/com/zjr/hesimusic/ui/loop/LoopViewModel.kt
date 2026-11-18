@@ -444,6 +444,13 @@ class LoopViewModel @Inject constructor(
                 }
             }
         }
+        // demo 自动试听:除了 Ready 时消费一次,也监听“Ready 之后才 arm”的时序,
+        // 避免恢复/慢启动导致漏播(正式包该值恒为 null,不影响任何行为)。
+        viewModelScope.launch {
+            DemoEntryHooks.autoAudition.collect { pending ->
+                if (pending != null) maybeStartDemoAutoAudition(pending)
+            }
+        }
         viewModelScope.launch { resolveEntry() }
     }
 
@@ -532,6 +539,8 @@ class LoopViewModel @Inject constructor(
      * 等价于用户点「仅循环段」按钮(该模式点击即试听)。
      */
     private fun maybeStartDemoAutoAudition(songId: Long) {
+        if (songId != this.songId) return
+        if (_pageState.value !is LoopPageState.Ready) return
         if (!DemoEntryHooks.consumeAutoAudition(songId)) return
         Log.i(TAG, "demo auto audition -> LOOP_ONLY song=" + songId)
         dispatch(LoopPageEvent.SwitchMode(LoopPageMode.LOOP_ONLY))
