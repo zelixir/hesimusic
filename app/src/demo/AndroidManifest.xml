@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      demo 包不需要存储权限:内置歌曲在构建时打进 assets/demo,
+      首次启动复制到应用自身 filesDir(/data/data/<pkg>/files/demo),播放与波形解码都只读私有目录。
+      这里显式移除 main 清单里的存储权限,避免 demo 包安装/启动时触发任何存储权限相关路径。
+    -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        tools:node="remove" />
+
+    <application>
+        <!--
+          demo 启动器:ContentProvider.onCreate 早于 Application.onCreate,
+          这里注册 DemoEntryHooks.session 并在后台线程完成素材复制与写库。
+          仅 demo flavor 合并进 APK,正式包不存在该 provider。
+        -->
+        <provider
+            android:name="com.zjr.hesimusic.demo.DemoBootstrapProvider"
+            android:authorities="${applicationId}.demo-bootstrap"
+            android:enabled="true"
+            android:exported="false" />
+    </application>
+</manifest>

@@ -54,6 +54,26 @@ android {
         }
     }
 
+    // 内置 demo 变体(独立包名/版本名/应用名,可与正式包并存):
+    // - prod:正式包,与加入 flavor 前行为一致(无任何后缀);
+    // - demo:只编译 app/src/demo 源集,自带 assets/demo(内置歌曲 + 预置循环结果),
+    //   冷启动由 DemoBootstrap 写入 filesDir/数据库后直达「无缝循环」结果页。
+    // 加入 flavor 后 AGP 的变体名变为 prodDebug/prodRelease 与 demoDebug/demoRelease;
+    // assembleDebug/assembleRelease 仍是 build-type 聚合任务(会构建全部 flavor),
+    // prod 产物由文末的兼容任务复制回旧 APK 路径。
+    flavorDimensions += "channel"
+    productFlavors {
+        create("prod") {
+            dimension = "channel"
+        }
+        create("demo") {
+            dimension = "channel"
+            applicationIdSuffix = ".demo"
+            versionNameSuffix = "-demo"
+            manifestPlaceholders["appLabel"] = "HesiMusic Demo"
+        }
+    }
+
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
@@ -96,6 +116,52 @@ android {
     buildFeatures {
         compose = true
     }
+}
+
+// ---------------------------------------------------------------------------
+// 构建兼容层(仅因新增 flavor 而存在;所有逻辑与 prod/demo 变体行为无关)
+//
+// 加入 flavor 后 AGP 仍生成 build-type 聚合任务(assembleDebug/assembleRelease 等),
+// docs、tools/loop-e2e.ps1 与 .github/workflows/release.yml 的旧任务名继续可用;
+// 但 APK 输出目录变成 outputs/apk/prod/<buildType>、outputs/apk/demo/<buildType>。
+// 因此 prod 变体构建完后把 APK 复制回旧输出目录与旧文件名,工装按固定路径找包不受影响
+// (assembleDebug 会构建两个 flavor,旧路径里的文件始终取 prod 产物)。
+// demo 变体不受影响(仍由 :app:assembleDemoDebug 构建)。
+// ---------------------------------------------------------------------------
+val copyProdDebugApkToLegacyDir = tasks.register<Copy>("copyProdDebugApkToLegacyDir") {
+    from(layout.buildDirectory.dir("outputs/apk/prod/debug")) {
+        include("*.apk")
+    }
+    into(layout.buildDirectory.dir("outputs/apk/debug"))
+    rename { "app-debug.apk" }
+}
+
+val copyProdReleaseApkToLegacyDir = tasks.register<Copy>("copyProdReleaseApkToLegacyDir") {
+    from(layout.buildDirectory.dir("outputs/apk/prod/release")) {
+        include("*.apk")
+    }
+    into(layout.buildDirectory.dir("outputs/apk/release"))
+    rename { "app-release.apk" }
+}
+
+tasks.matching { it.name == "assembleProdDebug" }.configureEach {
+    finalizedBy(copyProdDebugApkToLegacyDir)
+}
+tasks.matching { it.name == "assembleProdRelease" }.configureEach {
+    finalizedBy(copyProdReleaseApkToLegacyDir)
+}
+
+// docs 里仍在用的单变体任务名(flavor 化后只剩 prodDebug/demoDebug 版本)。
+// demo 源集不带额外单测,因此 testDebugUnitTest 等价于 prodDebug 单测(保持 1134 基线)。
+tasks.register("testDebugUnitTest") {
+    group = "verification"
+    description = "Legacy alias: runs the prodDebug unit tests (product flavors split the old debug variant)."
+    dependsOn("testProdDebugUnitTest")
+}
+tasks.register("compileDebugKotlin") {
+    group = "build"
+    description = "Legacy alias: compiles the prodDebug Kotlin sources."
+    dependsOn("compileProdDebugKotlin")
 }
 
 dependencies {

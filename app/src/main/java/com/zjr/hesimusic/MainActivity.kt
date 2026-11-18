@@ -6,9 +6,15 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -19,8 +25,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
@@ -29,6 +37,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.demo.DemoEntryHooks
 import com.zjr.hesimusic.loop.LoopIntent
 import com.zjr.hesimusic.ui.about.AboutScreen
 import com.zjr.hesimusic.ui.common.UiNavigationHooks
@@ -60,6 +69,13 @@ import javax.inject.Inject
 
 private const val STARTUP_IMAGE_DISPLAY_DURATION_MILLIS = 1200L
 
+/**
+ * How long the demo preparing screen stays in the home slot after pushing the
+ * loop page. Longer than NavHost's default fade so the transition never briefly
+ * reveals the (empty) home library underneath. Demo-only.
+ */
+private const val DEMO_LOADER_HOLD_MILLIS = 800L
+
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
@@ -71,6 +87,15 @@ class MainActivity : ComponentActivity() {
          * (process still alive) keeps it and skips the cover.
          */
         private var startupCoverShownUri: String? = null
+
+        /**
+         * Whether this process already pushed the demo loop page.
+         *
+         * Process-scoped on purpose (same lifetime rule as [startupCoverShownUri]):
+         * an Activity recreation must not push it again after the user has backed
+         * out to home, while a cold start after process death must replay it.
+         */
+        private var demoLandingDone: Boolean = false
     }
 
     @Inject
@@ -130,7 +155,34 @@ class MainActivity : ComponentActivity() {
                     }
                     return@HesimusicTheme
                 }
+
+                // ---- demo 包直达结果页(正式包 demoSession 恒为 null,以下逻辑不生效) ----
+                // 会话由 demo 源集的 ContentProvider 在进程启动早期注册;它异步完成
+                // 「复制 assets/demo/night.ogg → 写 songs/song_loop」后给出 songId。
+                // 准备期间不组合 NavHost(避免先闪一下空曲库/触发无关初始化),准备完成后
+                // 进入正常 NavHost,并在首帧后导航到现有 loop/{songId} 路由。
+                val demoSession = remember { DemoEntryHooks.session }
+                val demoSongId: Long?
+                val demoFailure: String?
+                if (demoSession != null) {
+                    demoSongId = demoSession.songId.collectAsState().value
+                    demoFailure = demoSession.failure.collectAsState().value
+                } else {
+                    demoSongId = null
+                    demoFailure = null
+                }
+                if (demoSession != null && demoSongId == null && demoFailure == null) {
+                    DemoPreparingScreen()
+                    return@HesimusicTheme
+                }
+                if (demoFailure != null) {
+                    Log.w(TAG, "demo bootstrap failed, fall back to normal home: $demoFailure")
+                }
+
                 val navController = rememberNavController()
+
+                // 起点始终是 home;demo 首帧由 home 槽位先显示准备页,再把 loop/{songId}
+                // 压到它的上面(home 留在栈底,返回键 / 确认保存后的 pop 行为与原流程一致)。
 
                 // main 侧导航钩子:debug 协议 /navigate 经它真正打开路由(debug 源集只读)。
                 // 回调可能来自调试服务线程,统一切回主线程再调 NavController。
@@ -163,35 +215,55 @@ class MainActivity : ComponentActivity() {
                         }
                         
                         composable("home") {
-                            val homeMusicViewModel: MusicViewModel = hiltViewModel()
-                            val loopActions = rememberLoopMenuActions(
-                                navController = navController,
-                                musicViewModel = homeMusicViewModel,
-                                loopIntent = loopIntent,
-                            )
-                            MainScreen(
-                                musicViewModel = homeMusicViewModel,
-                                onArtistClick = { artist ->
-                                    val encodedName = URLEncoder.encode(artist.name, StandardCharsets.UTF_8.toString()).replace("+", "%20")
-                                    navController.navigate("details/artist/$encodedName")
-                                },
-                                onAlbumClick = { album ->
-                                    val encodedName = URLEncoder.encode(album.name, StandardCharsets.UTF_8.toString()).replace("+", "%20")
-                                    navController.navigate("details/album/$encodedName")
-                                },
-                                onPlayerClick = {
-                                    navController.navigate("player")
-                                },
-                                onScanClick = { navController.navigate("scan") },
-                                onBackupRestoreClick = { navController.navigate("backup_restore") },
-                                onSettingsClick = { navController.navigate("settings") },
-                                onEqualizerClick = { navController.navigate("equalizer") },
-                                onAboutClick = { navController.navigate("about") },
-                                onSleepTimerClick = { navController.navigate("sleep_timer") },
-                                onLogsClick = { navController.navigate("logs") },
-                                onSeamlessLoop = loopActions.onSeamlessLoop,
-                                onSeamlessAnalysis = loopActions.onSeamlessAnalysis,
-                            )
+                            // demo 首帧:home 槽位先显示准备页,把 loop/{songId} 压到栈顶,
+                            // 并在导航过渡期间继续盖住 home,避免露出尚未加载的空曲库。
+                            // 过渡结束/home 被重新组合时,demoLandingDone 已为 true,直接进入正常界面。
+                            var demoLoaderDone by remember { mutableStateOf(demoLandingDone) }
+                            val showDemoLoader = demoSession != null &&
+                                demoSongId != null &&
+                                !demoLoaderDone
+                            if (showDemoLoader) {
+                                DemoPreparingScreen()
+                                LaunchedEffect(demoSongId) {
+                                    if (!demoLandingDone) {
+                                        val songId = demoSongId ?: return@LaunchedEffect
+                                        navController.navigate("loop/$songId")
+                                        demoLandingDone = true
+                                    }
+                                    delay(DEMO_LOADER_HOLD_MILLIS)
+                                    demoLoaderDone = true
+                                }
+                            } else {
+                                val homeMusicViewModel: MusicViewModel = hiltViewModel()
+                                val loopActions = rememberLoopMenuActions(
+                                    navController = navController,
+                                    musicViewModel = homeMusicViewModel,
+                                    loopIntent = loopIntent,
+                                )
+                                MainScreen(
+                                    musicViewModel = homeMusicViewModel,
+                                    onArtistClick = { artist ->
+                                        val encodedName = URLEncoder.encode(artist.name, StandardCharsets.UTF_8.toString()).replace("+", "%20")
+                                        navController.navigate("details/artist/$encodedName")
+                                    },
+                                    onAlbumClick = { album ->
+                                        val encodedName = URLEncoder.encode(album.name, StandardCharsets.UTF_8.toString()).replace("+", "%20")
+                                        navController.navigate("details/album/$encodedName")
+                                    },
+                                    onPlayerClick = {
+                                        navController.navigate("player")
+                                    },
+                                    onScanClick = { navController.navigate("scan") },
+                                    onBackupRestoreClick = { navController.navigate("backup_restore") },
+                                    onSettingsClick = { navController.navigate("settings") },
+                                    onEqualizerClick = { navController.navigate("equalizer") },
+                                    onAboutClick = { navController.navigate("about") },
+                                    onSleepTimerClick = { navController.navigate("sleep_timer") },
+                                    onLogsClick = { navController.navigate("logs") },
+                                    onSeamlessLoop = loopActions.onSeamlessLoop,
+                                    onSeamlessAnalysis = loopActions.onSeamlessAnalysis,
+                                )
+                            }
                         }
 
                         composable("player") {
@@ -339,6 +411,28 @@ class MainActivity : ComponentActivity() {
         }
         Log.d(TAG, "Showing startup image")
         return true
+    }
+}
+
+/**
+ * demo 包准备中的过渡页(仅 demo 包会看到:正式包 demoSession 为 null,不会进入此分支)。
+ *
+ * 素材只有 4MB,通常不到 1 秒;这里只负责在写库完成前占住首帧,避免闪现空曲库。
+ */
+@Composable
+private fun DemoPreparingScreen() {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            CircularProgressIndicator()
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "正在准备 Demo…",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
     }
 }
 
