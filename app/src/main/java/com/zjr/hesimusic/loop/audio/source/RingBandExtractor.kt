@@ -29,6 +29,7 @@ class RingBandExtractor(
     private var samples = 0L
     private var lastLogMs = 0L
     private var lastSeam = -1L
+    private var firstReadLogged = false
 
     private val format: Format = Format.Builder()
         .setId("ring-band")
@@ -94,6 +95,24 @@ class RingBandExtractor(
                     " offset=" + reader.offsetFrames +
                     " reads=" + reader.reads +
                     " underruns=" + reader.underruns,
+            )
+        }
+        if (!firstReadLogged) {
+            firstReadLogged = true
+            logger(
+                "RingBand firstRead filledFrames=" + ring.renderedFrames +
+                    " offset=" + result.offsetFrames +
+                    " frames=" + result.frames,
+            )
+        }
+        val now2 = System.currentTimeMillis()
+        if (now2 - lastLogMs >= 1_000L) {
+            lastLogMs = now2
+            logger(
+                "RingBand read offset=" + reader.offsetFrames +
+                    " filled=" + ring.renderedFrames +
+                    " underruns=" + reader.underruns +
+                    " reads=" + reader.reads,
             )
         }
         if (samples == 1L || samples % 100L == 0L) {

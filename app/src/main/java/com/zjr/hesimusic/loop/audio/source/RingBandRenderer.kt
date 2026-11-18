@@ -5,10 +5,10 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 环带渲染器：后台单线程调用一次连续解码 [A,B)，把 PCM 顺序 append 进环。
+ * 环带渲染器：后台单线程按 1s 块顺序解码 [A,B)，每块 append 进环。
  *
- * 使用现有 PcmRangeProvider 的唯一一次长区间调用，避免每 1s 重启 MediaCodec。
- * 环未满时 Extractor 只返回 CONTINUE；一旦 filledFrames > 0 即可按高水位取数。
+ * 这样首 2 块就绪即可让 Extractor 出样本；剩余块继续在后台填环。
+ * 使用现有 PcmRangeProvider 的块区间接口；块边界由 T0/T1 门禁和真机测量兜底。
  */
 class RingBandRenderer(
     private val timeline: LoopingPcmTimeline,
@@ -35,33 +35,48 @@ class RingBandRenderer(
         try {
             executor.execute {
                 try {
-                    if (releaseRequested) return@execute
                     logger(
                         "RingBand render start [" + timeline.loopStartUs + "," +
-                            timeline.loopEndUs + ") frames=" + timeline.loopFrames,
+                            timeline.loopEndUs + ") frames=" + timeline.loopFrames +
+                            " blocks=" + timeline.blockCount,
                     )
-                    val segment = provider.decode(timeline.loopStartUs, timeline.loopEndUs)
-                    if (releaseRequested) return@execute
-                    if (segment.sampleRate != timeline.sampleRate ||
-                        segment.channels != timeline.channels
-                    ) {
-                        error = "format mismatch sr=" + segment.sampleRate +
-                            "/" + timeline.sampleRate + " ch=" + segment.channels +
-                            "/" + timeline.channels
-                        logger("RingBand render error: " + error)
-                        return@execute
+                    for (block in 0 until timeline.blockCount) {
+                        if (releaseRequested) return@execute
+                        val startUs = timeline.blockDecodeStartUs(block)
+                        val endUs = timeline.blockDecodeEndUs(block)
+                        val expected = timeline.blockFrames(block)
+                        val segment = provider.decode(startUs, endUs)
+                        if (releaseRequested) return@execute
+                        if (segment.sampleRate != timeline.sampleRate ||
+                            segment.channels != timeline.channels
+                        ) {
+                            error = "format mismatch block=" + block +
+                                " sr=" + segment.sampleRate + "/" + timeline.sampleRate +
+                                " ch=" + segment.channels + "/" + timeline.channels
+                            logger("RingBand render error: " + error)
+                            return@execute
+                        }
+                        if (segment.frames < expected) {
+                            error = "short render block=" + block +
+                                " got=" + segment.frames + " want=" + expected
+                            logger("RingBand render error: " + error)
+                            return@execute
+                        }
+                        val trimmed = segment.takeFrames(expected)
+                        val appended = ring.append(trimmed.data, 0)
+                        if (appended < expected) {
+                            error = "ring append short block=" + block +
+                                " wrote=" + appended + " want=" + expected
+                            logger("RingBand render error: " + error)
+                            return@execute
+                        }
+                        logger(
+                            "RingBand append block=" + block +
+                                " filledFrames=" + ring.renderedFrames,
+                        )
                     }
-                    val frames = minOf(segment.frames, ring.frames)
-                    if (frames < ring.frames) {
-                        error = "short render got=" + frames + " want=" + ring.frames
-                        logger("RingBand render error: " + error)
-                        return@execute
-                    }
-                    val bytes = (frames * ring.bytesPerFrame).toInt()
-                    val written = ring.append(segment.data, 0)
                     logger(
-                        "RingBand render done frames=" + written +
-                            " bytes=" + bytes + " decodeFrames=" + segment.frames,
+                        "RingBand render done filledFrames=" + ring.renderedFrames,
                     )
                 } catch (t: Throwable) {
                     error = t.javaClass.simpleName + ": " + t.message
