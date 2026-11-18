@@ -51,6 +51,38 @@ class RingBandExtractorTest {
     }
 
     @Test
+    fun `empty ring waits once and returns instead of spinning`() {
+        val tl = LoopingPcmTestSupport.timeline(aUs = 0L, bUs = 5_000_000L, sr = 1_000)
+        val ring = LoopRing(tl.sampleRate, tl.channels, tl.loopFrames)
+        val reader = RingBandReader(ring)
+        val renderer = RingBandRenderer(
+            timeline = tl,
+            provider = LoopingPcmTestSupport.provider(tl),
+            ring = ring,
+        )
+        val extractor = RingBandExtractor(tl, ring, reader, renderer)
+        val out = FakeOutput()
+        extractor.init(out)
+        val input = Proxy.newProxyInstance(
+            ExtractorInput::class.java.classLoader,
+            arrayOf(ExtractorInput::class.java),
+        ) { _, method, _ ->
+            when (method.returnType) {
+                java.lang.Boolean.TYPE -> false
+                java.lang.Integer.TYPE -> 0
+                java.lang.Long.TYPE -> 0L
+                else -> null
+            }
+        } as ExtractorInput
+        val started = System.nanoTime()
+        assertEquals(Extractor.RESULT_CONTINUE, extractor.read(input, PositionHolder()))
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+        assertTrue("must wait ~8ms, was ${elapsedMs}ms", elapsedMs in 1..100)
+        assertEquals(1L, reader.underruns)
+        assertEquals(0, out.track.totalBytes)
+    }
+
+    @Test
     fun `two filled blocks are readable and PTS starts at zero`() {
         val tl = LoopingPcmTestSupport.timeline(aUs = 0L, bUs = 5_000_000L, sr = 1_000)
         val ring = LoopRing(tl.sampleRate, tl.channels, tl.loopFrames)

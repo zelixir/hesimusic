@@ -35,6 +35,7 @@ class RingBandReader(
     var reads: Long = 0L
         private set
 
+    /** 等待高水位的次数（不是每次 read 的失败次数）。 */
     @Volatile
     var underruns: Long = 0L
         private set
@@ -43,31 +44,20 @@ class RingBandReader(
     var lastSeamOutputFrames: Long = -1L
         private set
 
-    /** 环的渲染高水位（诊断用）。 */
     val filledFrames: Long get() = ring.renderedFrames
 
     fun read(maxFrames: Int): Read? {
         if (maxFrames <= 0) return null
         val filled = ring.renderedFrames
-        if (filled <= 0L) {
-            underruns += 1L
-            return null
-        }
+        if (filled <= 0L) return null
         val offset = offsetFrames
         val available = if (filled >= bandFrames) {
             minOf(maxFrames.toLong(), bandFrames).toInt()
         } else {
-            // 未满时不能跨过已渲染高水位，也不能读入未初始化区域。
-            if (offset >= filled) {
-                underruns += 1L
-                return null
-            }
+            if (offset >= filled) return null
             minOf(maxFrames.toLong(), filled - offset).toInt()
         }
-        if (available <= 0) {
-            underruns += 1L
-            return null
-        }
+        if (available <= 0) return null
 
         val data = ring.copyFrames(offset, available)
         val seam = if (filled >= bandFrames && offset + available >= bandFrames) {
@@ -83,6 +73,11 @@ class RingBandReader(
         return Read(data, available, pts, offset)
     }
 
+    /** Extractor 每等待一次高水位调用一次。 */
+    fun recordWait() {
+        underruns += 1L
+    }
+
     /** seek 目标为环内帧偏移 [0,L)，只改 offset。 */
     fun seekToFrame(offset: Long) {
         offsetFrames = Math.floorMod(offset, bandFrames)
@@ -92,6 +87,4 @@ class RingBandReader(
         val frames = (timeUs.coerceAtLeast(0L) * ring.sampleRate / 1_000_000L)
         seekToFrame(frames)
     }
-
-    fun readFrames(data: ByteArray): Int = data.size / bpf
 }

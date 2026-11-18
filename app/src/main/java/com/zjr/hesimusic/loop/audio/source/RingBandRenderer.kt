@@ -34,58 +34,82 @@ class RingBandRenderer(
         if (!started.compareAndSet(false, true)) return
         try {
             executor.execute {
+                var stopReason = "DONE"
+                var stopBlock = -1
                 try {
-                    logger(
+                    RingBandLog.i(
                         "RingBand render start [" + timeline.loopStartUs + "," +
                             timeline.loopEndUs + ") frames=" + timeline.loopFrames +
                             " blocks=" + timeline.blockCount,
                     )
                     for (block in 0 until timeline.blockCount) {
-                        if (releaseRequested) return@execute
+                        stopBlock = block
+                        if (releaseRequested) {
+                            stopReason = "RELEASE"
+                            break
+                        }
                         val startUs = timeline.blockDecodeStartUs(block)
                         val endUs = timeline.blockDecodeEndUs(block)
                         val expected = timeline.blockFrames(block)
-                        val segment = provider.decode(startUs, endUs)
-                        if (releaseRequested) return@execute
+                        val segment = try {
+                            provider.decode(startUs, endUs)
+                        } catch (t: Throwable) {
+                            error = t.javaClass.simpleName + ": " + t.message
+                            stopReason = "DECODE_EXCEPTION"
+                            break
+                        }
+                        if (releaseRequested) {
+                            stopReason = "RELEASE"
+                            break
+                        }
                         if (segment.sampleRate != timeline.sampleRate ||
                             segment.channels != timeline.channels
                         ) {
                             error = "format mismatch block=" + block +
                                 " sr=" + segment.sampleRate + "/" + timeline.sampleRate +
                                 " ch=" + segment.channels + "/" + timeline.channels
-                            logger("RingBand render error: " + error)
-                            return@execute
+                            stopReason = "FORMAT"
+                            break
                         }
                         if (segment.frames < expected) {
                             error = "short render block=" + block +
                                 " got=" + segment.frames + " want=" + expected
-                            logger("RingBand render error: " + error)
-                            return@execute
+                            stopReason = "SHORT"
+                            break
                         }
                         val trimmed = segment.takeFrames(expected)
                         val appended = ring.append(trimmed.data, 0)
                         if (appended < expected) {
                             error = "ring append short block=" + block +
                                 " wrote=" + appended + " want=" + expected
-                            logger("RingBand render error: " + error)
-                            return@execute
+                            stopReason = "RING_SHORT"
+                            break
                         }
+                        RingBandLog.i(
+                            "RingBand append block=" + block +
+                                " filledFrames=" + ring.renderedFrames +
+                                " expectedFrames=" + expected,
+                        )
                         logger(
                             "RingBand append block=" + block +
                                 " filledFrames=" + ring.renderedFrames,
                         )
                     }
-                    logger(
-                        "RingBand render done filledFrames=" + ring.renderedFrames,
-                    )
                 } catch (t: Throwable) {
                     error = t.javaClass.simpleName + ": " + t.message
-                    logger("RingBand render crash: " + error)
+                    stopReason = "CRASH"
+                } finally {
+                    val message = "RingBand render stop reason=" + stopReason +
+                        " block=" + stopBlock +
+                        " filledFrames=" + ring.renderedFrames +
+                        " err=" + (error ?: "-")
+                    if (stopReason == "DONE") RingBandLog.i(message) else RingBandLog.w(message)
+                    logger(message)
                 }
             }
         } catch (t: Throwable) {
             error = "submit failed: " + t.message
-            logger("RingBand render error: " + error)
+            RingBandLog.w("RingBand render stop reason=SUBMIT block=-1 err=" + error)
         }
     }
 

@@ -35,7 +35,9 @@ class RingBandReaderTest {
         assertEquals(500, first!!.frames)
         assertArrayEquals(pcm(500), first.data)
         assertNull("beyond filled must return null/CONTINUE", reader.read(100))
-        assertTrue(reader.underruns >= 1L)
+        assertEquals(0L, reader.underruns)
+        reader.recordWait()
+        assertEquals(1L, reader.underruns)
 
         ring.append(pcm(500, startFrame = 500))
         val second = reader.read(500)

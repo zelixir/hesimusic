@@ -20,13 +20,14 @@ class LoopRing(
 
     val bytesPerFrame: Int = channels * 2
     private val data = ByteArray((frames * bytesPerFrame).toInt())
+    private val monitor = Object()
 
     @Volatile
     var renderedFrames: Long = 0L
         private set
 
     /** 顺序追加已解码 PCM；返回实际写入帧数（不覆盖已写高水位）。 */
-    fun append(src: ByteArray, srcOffsetBytes: Int = 0): Int {
+    fun append(src: ByteArray, srcOffsetBytes: Int = 0): Int = synchronized(monitor) {
         val available = ((src.size - srcOffsetBytes) / bytesPerFrame).coerceAtLeast(0)
         val writable = (frames - renderedFrames).coerceAtMost(available.toLong()).toInt()
         if (writable <= 0) return 0
@@ -38,7 +39,8 @@ class LoopRing(
             writable * bytesPerFrame,
         )
         renderedFrames += writable
-        return writable
+        monitor.notifyAll()
+        writable
     }
 
     /** 取任意 offset（帧号，可为负/超过 L）开始的 count 帧，按 mod 重复环内容。 */
@@ -74,9 +76,31 @@ class LoopRing(
         return copyFrames(offsetFrames, take)
     }
 
+    /** Extractor 等待高水位；有新 append 会 notify。超时返回当前是否已达标。 */
+    fun awaitRenderedAtLeast(targetFrames: Long, timeoutMs: Long): Boolean {
+        synchronized(monitor) {
+            if (renderedFrames >= targetFrames) return true
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (renderedFrames < targetFrames) {
+                val left = deadline - System.currentTimeMillis()
+                if (left <= 0L) break
+                try {
+                    monitor.wait(left)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    break
+                }
+            }
+            return renderedFrames >= targetFrames
+        }
+    }
+
     fun clear() {
-        data.fill(0)
-        renderedFrames = 0L
+        synchronized(monitor) {
+            data.fill(0)
+            renderedFrames = 0L
+            monitor.notifyAll()
+        }
     }
 
     fun presentationTimeUs(frameIndex: Long): Long =

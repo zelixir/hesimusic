@@ -30,6 +30,7 @@ class RingBandExtractor(
     private var lastLogMs = 0L
     private var lastSeam = -1L
     private var firstReadLogged = false
+    private var lastWaitLogMs = 0L
 
     private val format: Format = Format.Builder()
         .setId("ring-band")
@@ -63,18 +64,21 @@ class RingBandExtractor(
         renderer.error?.let { throw IOException("RingBand render failed: " + it) }
         val track = trackOutput ?: return Extractor.RESULT_CONTINUE
         val minFrames = minOf(timeline.loopFrames, 2L * timeline.sampleRate)
-        if (ring.renderedFrames < minFrames) {
-            // 预渲染不足 2 块（或整环更短）时不出样本；不允许补零。
+        if (ring.renderedFrames < minFrames && !awaitFilled(minFrames)) {
             return Extractor.RESULT_CONTINUE
         }
-        val result = reader.read(READ_CHUNK_BYTES / timeline.bytesPerFrame)
+        var result = reader.read(READ_CHUNK_BYTES / timeline.bytesPerFrame)
         if (result == null) {
-            logger(
-                "RingBand read CONTINUE filled=" + ring.renderedFrames +
-                    " offset=" + reader.offsetFrames +
-                    " underruns=" + reader.underruns,
-            )
-            return Extractor.RESULT_CONTINUE
+            // 高水位后 media3 会立刻重试；必须在这里等新 append，不能空转。
+            val target = if (ring.renderedFrames >= timeline.loopFrames) {
+                reader.offsetFrames + 1L
+            } else {
+                ring.renderedFrames + 1L
+            }
+            if (awaitFilled(target)) {
+                result = reader.read(READ_CHUNK_BYTES / timeline.bytesPerFrame)
+            }
+            if (result == null) return Extractor.RESULT_CONTINUE
         }
         val data = ParsableByteArray(result.data)
         track.sampleData(data, result.data.size)
@@ -99,7 +103,7 @@ class RingBandExtractor(
         }
         if (!firstReadLogged) {
             firstReadLogged = true
-            logger(
+            RingBandLog.i(
                 "RingBand firstRead filledFrames=" + ring.renderedFrames +
                     " offset=" + result.offsetFrames +
                     " frames=" + result.frames,
@@ -108,7 +112,7 @@ class RingBandExtractor(
         val now2 = System.currentTimeMillis()
         if (now2 - lastLogMs >= 1_000L) {
             lastLogMs = now2
-            logger(
+            RingBandLog.i(
                 "RingBand read offset=" + reader.offsetFrames +
                     " filled=" + ring.renderedFrames +
                     " underruns=" + reader.underruns +
@@ -119,6 +123,23 @@ class RingBandExtractor(
             logger("RingBand read n=" + samples + " frames=" + result.frames)
         }
         return Extractor.RESULT_CONTINUE
+    }
+
+    private fun awaitFilled(targetFrames: Long): Boolean {
+        reader.recordWait()
+        val ready = ring.awaitRenderedAtLeast(targetFrames, READ_WAIT_MS)
+        if (!ready) {
+            val now = System.currentTimeMillis()
+            if (now - lastWaitLogMs >= 5_000L) {
+                lastWaitLogMs = now
+                RingBandLog.w(
+                    "RingBand read wait filled=" + ring.renderedFrames +
+                        " offset=" + reader.offsetFrames +
+                        " target=" + targetFrames,
+                )
+            }
+        }
+        return ready
     }
 
     override fun seek(position: Long, timeUs: Long) {
@@ -139,5 +160,6 @@ class RingBandExtractor(
 
     private companion object {
         const val READ_CHUNK_BYTES = 64 * 1024
+        const val READ_WAIT_MS = 8L
     }
 }
