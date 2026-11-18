@@ -212,7 +212,9 @@ class LoopingPcmSourceCoreSeekTest {
     @Test
     fun `decode failure skips one block and continues monotonically`() {
         val (core, provider, tl) = newCore()
-        provider.failWhen = { startUs, _ -> startUs == 4_000_000L }
+        provider.failWhen = { startUs, endUs ->
+            startUs <= 4_000_000L && endUs >= 4_000_000L
+        }
 
         core.seekToTimelineUs(4_000_000L)
         assertTrue(core.pumpDecode()) // block 4 fails

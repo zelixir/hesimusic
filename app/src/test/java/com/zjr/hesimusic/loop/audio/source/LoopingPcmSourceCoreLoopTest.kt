@@ -126,6 +126,32 @@ class LoopingPcmSourceCoreLoopTest {
     }
 
     @Test
+    fun `40s output has no silent run longer than 5ms`() {
+        val tl = LoopingPcmTestSupport.timeline(aUs = 5_000_000L, bUs = 20_000_000L, sr = 48_000)
+        val core = LoopingPcmSourceCore(tl, LoopingPcmTestSupport.provider(tl), prefetchBlocks = 6)
+        val pcm = LoopingPcmTestSupport.readExact(core, 40 * 48_000, maxFramesPerRead = 7_680)
+        var run = 0
+        var longest = 0
+        var frame = 0
+        while (frame < 40 * 48_000) {
+            val offset = frame * tl.bytesPerFrame
+            var zero = true
+            for (c in 0 until tl.channels) {
+                val s = (pcm[offset + c * 2].toInt() and 0xff) or
+                    ((pcm[offset + c * 2 + 1].toInt() and 0xff) shl 8)
+                if (s != 0) {
+                    zero = false
+                    break
+                }
+            }
+            run = if (zero) run + 1 else 0
+            if (run > longest) longest = run
+            frame += 1
+        }
+        assertTrue("longest silent run=" + longest, longest < 48_000 / 1000 * 5)
+    }
+
+    @Test
     fun `B to A seam reports cumulative output frame at loop boundary`() {
         val tl = LoopingPcmTestSupport.timeline()
         val provider = LoopingPcmTestSupport.provider(tl)
@@ -170,7 +196,10 @@ class LoopingPcmSourceCoreLoopTest {
         val calls = provider.callsSnapshot()
         assertEquals(1, calls.size)
         val (startUs, endUs) = calls[0]
-        assertTrue("decode range must be at most 1s: " + startUs + ".." + endUs, endUs - startUs <= 1_000_000L)
+        assertTrue(
+            "decode range must be at most 1s+preroll: " + startUs + ".." + endUs,
+            endUs - startUs <= 1_000_000L + LoopingPcmSourceCore.DECODE_PREROLL_US,
+        )
         assertTrue("seek target block must be ready", core.isCurrentBlockReady())
 
         val result = core.read(1_000 * tl.bytesPerFrame)

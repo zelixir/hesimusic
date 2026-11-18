@@ -35,6 +35,7 @@ class LoopingPcmExtractor(
     private var formatSent = false
     private var started = false
     private var samples = 0L
+    private var lastReadLogMs = 0L
 
     private val format: Format = Format.Builder()
         .setId("loop-pcm-extractor")
@@ -93,10 +94,42 @@ class LoopingPcmExtractor(
         }
         if (result == null) return Extractor.RESULT_CONTINUE
 
+        val bpf = timeline.bytesPerFrame
+        val framesValid = result.data.size / bpf
+        if (bpf <= 0 || result.data.size % bpf != 0 || framesValid != result.frames || result.frames <= 0) {
+            // 绝不把短数据/未填满数组当有效样本；不推进已由 core 负责，这里只拒绝输出。
+            logger(
+                "read invalid bytes=" + result.data.size + " frames=" + result.frames +
+                    " bpf=" + bpf + " block=" + core.currentBlockIndex(),
+            )
+            return Extractor.RESULT_CONTINUE
+        }
         val data = ParsableByteArray(result.data)
         track.sampleData(data, result.data.size)
         track.sampleMetadata(result.ptsUs, C.BUFFER_FLAG_KEY_FRAME, result.data.size, 0, null)
         samples += 1L
+        val framesOut = READ_CHUNK_BYTES / bpf
+        if (framesValid < framesOut) {
+            warnLog(
+                "read short framesOut=" + framesOut + " framesValid=" + framesValid +
+                    " block=" + core.currentBlockIndex() +
+                    " remainingFrames=" + core.currentBlockRemainingFrames() +
+                    " blockState=" + core.currentBlockState() +
+                    " cursorFrames=" + core.currentFrame(),
+            )
+        }
+        val now = System.currentTimeMillis()
+        if (now - lastReadLogMs >= 1_000L) {
+            lastReadLogMs = now
+            logger(
+                "read framesOut=" + framesOut +
+                    " framesValid=" + framesValid +
+                    " block=" + core.currentBlockIndex() +
+                    " remainingFrames=" + core.currentBlockRemainingFrames() +
+                    " blockState=" + core.currentBlockState() +
+                    " cursorFrames=" + core.currentFrame(),
+            )
+        }
         if (samples == 1L || samples % 100L == 0L) {
             logger("extractor read n=" + samples + " bytes=" + result.data.size + " ptsUs=" + result.ptsUs)
         }
@@ -114,6 +147,14 @@ class LoopingPcmExtractor(
     override fun release() {
         prefetcher?.release()
         core.release()
+    }
+
+    private fun warnLog(message: String) {
+        try {
+            android.util.Log.w("LoopPcmSource", message)
+        } catch (_: Throwable) {
+            // JVM 单测里 android.util.Log 是 stub。
+        }
     }
 
     private companion object {

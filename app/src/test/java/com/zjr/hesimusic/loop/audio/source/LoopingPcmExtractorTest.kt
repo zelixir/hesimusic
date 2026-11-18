@@ -90,6 +90,27 @@ class LoopingPcmExtractorTest {
     }
 
     @Test
+    fun `short block is rejected and totalReadFrames does not advance`() {
+        val tl = LoopingPcmTestSupport.timeline()
+        val bad = object : PcmRangeProvider {
+            override fun decode(startUs: Long, endUs: Long) =
+                com.zjr.hesimusic.loop.analysis.Pcm16Segment(
+                    data = ByteArray(0),
+                    sampleRate = tl.sampleRate,
+                    channels = tl.channels,
+                    frames = 0,
+                )
+        }
+        val core = LoopingPcmSourceCore(tl, bad, prefetchBlocks = 6)
+        val out = FakeOutput()
+        val extractor = LoopingPcmExtractor(core, tl)
+        extractor.init(out)
+        assertEquals(Extractor.RESULT_CONTINUE, extractor.read(fakeInput(), PositionHolder()))
+        assertEquals(0L, core.totalReadFrames())
+        assertEquals(0, out.track.totalBytes)
+    }
+
+    @Test
     fun `paused gate stops extractor read`() {
         val tl = LoopingPcmTestSupport.timeline()
         val provider = LoopingPcmTestSupport.provider(tl)

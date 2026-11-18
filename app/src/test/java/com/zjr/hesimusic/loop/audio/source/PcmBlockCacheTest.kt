@@ -101,6 +101,18 @@ class PcmBlockCacheTest {
         assertEquals(PcmBlockCache.State.READY, c.state(0))
     }
 
+    @Test(expected = IllegalArgumentException::class)
+    fun `half filled block data is rejected`() {
+        cache().put(
+            PcmBlock(
+                index = 0,
+                startFrame = 0L,
+                frames = 1_000,
+                data = ByteArray(1_000),
+            ),
+        )
+    }
+
     @Test
     fun `partial last block is accepted`() {
         val c = cache()

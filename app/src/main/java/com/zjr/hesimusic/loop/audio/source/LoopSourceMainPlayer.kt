@@ -19,7 +19,7 @@ object LoopSourceMainPlayer {
     private const val SETTING_KEY = "hesi_loop_source_main"
 
     @Volatile
-    var enabled: Boolean = true
+    var enabled: Boolean = false
         private set
 
     @Volatile
@@ -40,12 +40,38 @@ object LoopSourceMainPlayer {
         isMainPlayerActive = active
     }
 
-    /** 读取 global setting（0/1），默认 false；debugOverride 优先。 */
+    private const val PREFS = "loop_settings"
+    private const val PREF_KEY = "loop_engine_main"
+
+    /** 持久化选择(供 debug/自测跨进程重启使用)。 */
+    fun select(context: Context, on: Boolean) {
+        try {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putString(PREF_KEY, if (on) "source" else "m3").apply()
+        } catch (t: Throwable) {
+            Log.w(TAG, "save main switch failed", t)
+        }
+        enabled = on
+        debugOverride = on
+    }
+
+    private fun saved(context: Context): Boolean? = try {
+        when (context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(PREF_KEY, null)) {
+            "source" -> true
+            "m3" -> false
+            else -> null
+        }
+    } catch (t: Throwable) {
+        null
+    }
+
+    /** 读取 global setting（0/1），默认 false；debugOverride / 持久化选择优先。 */
     fun refreshFromSettings(context: Context) {
         debugOverride?.let { return }
+        saved(context)?.let { enabled = it; return }
         // 与预览开关一致:成品默认开启,显式写 0 才关闭。
         enabled = try {
-            Settings.Global.getInt(context.contentResolver, SETTING_KEY, 1) != 0
+            Settings.Global.getInt(context.contentResolver, SETTING_KEY, 0) != 0
         } catch (t: Throwable) {
             Log.w(TAG, "read $SETTING_KEY failed", t)
             true

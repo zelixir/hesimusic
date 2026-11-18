@@ -1305,7 +1305,8 @@ object LoopDebugServer {
         val target = if (on) LoopSourceMode.SOURCE else LoopSourceMode.M3_PRIME
         // 主播放器开关同步(自测里要能双向切换)
         runCatching {
-            LoopSourceMainPlayer.setEnabledForTest(on)
+            val app = appContext
+            if (app != null) LoopSourceMainPlayer.select(app, on) else LoopSourceMainPlayer.setEnabledForTest(on)
             LoopSourceMainPlayer.activateMainPlayer(on)
         }
         // 覆盖 refreshFromSettings:真机 ROM 常拒绝 adb settings put。

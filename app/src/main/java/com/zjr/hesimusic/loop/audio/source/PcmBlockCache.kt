@@ -87,6 +87,10 @@ class PcmBlockCache(
     fun put(block: PcmBlock) {
         synchronized(lock) {
             val expectedBytes = framesPerBlock * bytesPerFrame
+            require(block.data.size == block.frames * bytesPerFrame) {
+                "block data size mismatch: ${block.data.size} != " +
+                    "${block.frames} * $bytesPerFrame"
+            }
             require(block.data.size <= expectedBytes || block.frames < framesPerBlock) {
                 "block data larger than a full block: ${block.data.size} > $expectedBytes"
             }

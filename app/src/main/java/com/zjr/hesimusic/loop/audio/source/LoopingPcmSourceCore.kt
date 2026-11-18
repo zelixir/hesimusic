@@ -1,5 +1,7 @@
 package com.zjr.hesimusic.loop.audio.source
 
+import com.zjr.hesimusic.loop.analysis.Pcm16Frames
+
 /**
  * 循环 PCM 数据源核心（纯 JVM，不依赖 Android / Media3）。
  *
@@ -70,9 +72,18 @@ class LoopingPcmSourceCore(
         timeline.blockIndexForFrame(nextFrame)
     }
 
+    /** 当前块还剩多少帧到块尾（诊断块边界用）。 */
+    fun currentBlockRemainingFrames(): Long = synchronized(lock) {
+        val block = timeline.blockIndexForFrame(nextFrame)
+        (timeline.blockStartFrame(block) + timeline.blockFrames(block) - nextFrame).coerceAtLeast(0L)
+    }
+
     fun decodeCallCount(): Long = synchronized(lock) { decodeCalls }
 
     fun readyBlockCount(): Int = synchronized(lock) { cache.activeBlockCount() }
+
+    /** 实际 read 出去的累计帧数（seek 不重置；tap seam 口径）。 */
+    fun totalReadFrames(): Long = synchronized(lock) { totalReadFrames }
 
     fun skippedBlocks(): Long = synchronized(lock) { skippedBlockCount }
 
@@ -136,6 +147,15 @@ class LoopingPcmSourceCore(
         var block = currentBlockLocked()
         if (block == null) return null
 
+        if (block.data.size != block.frames * timeline.bytesPerFrame) {
+            cache.markFailed(block.index)
+            logger(
+                "read malformed block=" + block.index +
+                    " bytes=" + block.data.size +
+                    " frames=" + block.frames,
+            )
+            return null
+        }
         val offset = (nextFrame - block.startFrame).toInt()
         if (offset < 0 || offset >= block.frames) return null
         val maxFrames = maxBytes / timeline.bytesPerFrame
@@ -158,6 +178,7 @@ class LoopingPcmSourceCore(
             cache.trimToBudget(timeline.blockIndexForFrame(nextFrame))
             maybeLogCacheLocked()
             if (rawNext >= timeline.bFrame) {
+                logger("LoopPcmSource seam outFrames=" + seamOutFrames)
                 onSeamOutputFrames?.invoke(seamOutFrames)
             }
         }
@@ -344,14 +365,21 @@ class LoopingPcmSourceCore(
         if (!cache.markPending(block)) return false
         val startUs = timeline.blockDecodeStartUs(block)
         val endUs = timeline.blockDecodeEndUs(block)
+        // 每个 1s 块独立起 MediaCodec；带 250ms 预热区，解码后裁掉，避免块边界
+        // 出现 codec priming 造成的低电平/爆音。
+        val decodeStartUs = (startUs - DECODE_PREROLL_US).coerceAtLeast(0L)
+        val dropFrames = Pcm16Frames.frameAtOrAfterUs(startUs - decodeStartUs, timeline.sampleRate)
         val expectedFrames = timeline.blockFrames(block)
         var error: String? = null
         var segment: com.zjr.hesimusic.loop.analysis.Pcm16Segment? = null
         val startedMs = System.currentTimeMillis()
-        logger("decode start block=" + block + " [" + startUs + "," + endUs + ") frames=" + expectedFrames)
+        logger(
+            "decode start block=" + block + " [" + startUs + "," + endUs + ")" +
+                " frames=" + expectedFrames + " prerollUs=" + (startUs - decodeStartUs),
+        )
         try {
             synchronized(lock) { decodeCalls += 1L }
-            segment = provider.decode(startUs, endUs)
+            segment = provider.decode(decodeStartUs, endUs)
         } catch (e: Exception) {
             error = "decode block " + block + " [" + startUs + "," + endUs + ") failed: " +
                 (e.message ?: e.javaClass.simpleName)
@@ -381,15 +409,16 @@ class LoopingPcmSourceCore(
                 )
                 return true
             }
-            if (result.frames < expectedFrames) {
+            if (result.frames < dropFrames + expectedFrames) {
                 cache.markFailed(block)
                 logger(
                     "short decode at block " + block +
-                        ": got=" + result.frames + " want=" + expectedFrames,
+                        ": got=" + result.frames + " want=" + (dropFrames + expectedFrames) +
+                        " drop=" + dropFrames,
                 )
                 return true
             }
-            val trimmed = result.takeFrames(expectedFrames)
+            val trimmed = result.dropFrames(dropFrames).takeFrames(expectedFrames)
             val expectedBytes = (expectedFrames * timeline.bytesPerFrame).toInt()
             if (trimmed.data.size != expectedBytes) {
                 cache.markFailed(block)
@@ -426,7 +455,10 @@ class LoopingPcmSourceCore(
         frames * 1_000_000L / timeline.sampleRate
 
     companion object {
-        /** 当前 + 预取 2 块 = 最多 3 块窗口。 */
+        /** 当前 + 预取块预算（SOURCE 路径显式传 6）。 */
         const val DEFAULT_PREFETCH_BLOCKS: Int = 2
+
+        /** 块解码预热，裁掉后避免 MediaCodec priming 污染块首。 */
+        const val DECODE_PREROLL_US: Long = 250_000L
     }
 }
