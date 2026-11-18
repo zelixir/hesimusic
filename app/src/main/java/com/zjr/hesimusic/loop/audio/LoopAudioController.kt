@@ -550,9 +550,9 @@ class LoopAudioController @Inject constructor() {
     internal val tapFailedForTest: Boolean
         get() = synchronized(tapLock) { tapFailed }
 
-    /** 把 delegate 实际消费的一段 PCM 写入 tap（offset/length 相对 buffer 绝对位置）。 */
-    internal fun tapPcm(buffer: ByteBuffer, offset: Int, length: Int) {
-        if (length <= 0) return
+    /** 把 audio sink 在 delegate 前看到的一段 PCM 写入 tap（offset/length 相对 buffer 绝对位置）。 */
+    internal fun tapPcm(buffer: ByteBuffer, offset: Int, length: Int): Int {
+        if (length <= 0) return 0
         synchronized(tapLock) {
             val out = tapOut
             val limit = buffer.limit()
@@ -565,12 +565,12 @@ class LoopAudioController @Inject constructor() {
                         " bytes=" + tapDataBytes,
                 )
             }
-            if (out == null) return
-            if (tapFailed) return
-            if (offset < 0 || length <= 0) return
+            if (out == null) return 0
+            if (tapFailed) return 0
+            if (offset < 0 || length <= 0) return 0
             val safeOffset = offset.coerceIn(0, limit)
             val safeLength = minOf(length, limit - safeOffset)
-            if (safeLength <= 0) return
+            if (safeLength <= 0) return 0
             val data = ByteArray(safeLength)
             val dup = buffer.duplicate()
             dup.position(safeOffset)
@@ -587,11 +587,14 @@ class LoopAudioController @Inject constructor() {
                 ) {
                     updateTapHeaderLocked(out)
                 }
+                return safeLength
             } catch (e: IOException) {
                 tapFailed = true
                 closeTapLocked()
+                return 0
             }
         }
+        return 0
     }
 
     // ------------------------------------------------------------------ WAV 写盘

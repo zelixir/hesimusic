@@ -13,11 +13,11 @@ import com.zjr.hesimusic.loop.audio.LoopAudioController
 import java.nio.ByteBuffer
 
 /**
- * 只做 PCM 取证的 AudioSink：委托给 [DefaultAudioSink]，不改 PTS、不做环回，
- * 只把 delegate 实际消费的 PCM 片段交给 [LoopAudioController] 的 tap。
+ * 只做 PCM 取证的 AudioSink：委托给 [DefaultAudioSink]，不改 PTS、不做环回。
  *
- * 这样 SOURCE 模式既不包 [com.zjr.hesimusic.loop.audio.LoopAudioSink]（不二次映射 PTS），
- * 又能让既有 /debug/tap + tools/loop-smoothness.ts 继续分析预览页输出。
+ * tap 必须在 delegate 之前写：DefaultAudioSink 会异步消费，consumed=false 时
+ * position 也不一定前移，等 consumed 会漏掉大部分数据。同一个 ByteBuffer 可能被
+ * 多次传入，因此用 buffer 身份 + pts + 已写区间去重。
  */
 @UnstableApi
 class TapAudioSink(
@@ -25,9 +25,26 @@ class TapAudioSink(
     private val controller: LoopAudioController,
 ) : ForwardingAudioSink(delegate) {
 
+    private data class WrittenRange(
+        val ptsUs: Long,
+        val start: Int,
+        val end: Int,
+    )
+
     private var handledBuffers = 0L
     private var lastBufferLogMs = 0L
+    private var lastDutyLogMs = 0L
     private var forcedPlay = false
+    private var tapBytesPerFrame = 0
+    private var seenFrames = 0L
+    private var writtenFrames = 0L
+    private var tapWasActive = false
+
+    /** 只保留最近 16 个 buffer 身份，防止同一块反复回调时重复写。 */
+    private val writtenRanges = object : LinkedHashMap<Int, WrittenRange>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, WrittenRange>?): Boolean =
+            size > 16
+    }
 
     override fun configure(
         inputFormat: Format,
@@ -35,12 +52,11 @@ class TapAudioSink(
         outputChannels: IntArray?,
     ) {
         controller.tapEngineSeamsEnabled = false
+        tapBytesPerFrame = (inputFormat.channelCount * 2).coerceAtLeast(0)
         if (MimeTypes.AUDIO_RAW == inputFormat.sampleMimeType &&
             inputFormat.channelCount > 0 &&
             inputFormat.sampleRate > 0
         ) {
-            // 只告诉 controller tap 格式；临时清 window 避免 M3′ engine 按源窗口
-            // 调度 ring 预分配（SOURCE 不需要 ring，不能白占内存）。
             val window = controller.window
             controller.window = null
             try {
@@ -54,8 +70,7 @@ class TapAudioSink(
                 controller.window = window
             }
         }
-        Log.d(
-            "LoopPcmSource",
+        logD(
             "tap configure " + inputFormat.sampleMimeType + "/" + inputFormat.pcmEncoding +
                 " " + inputFormat.sampleRate + "Hz/" + inputFormat.channelCount +
                 "ch buffer=" + specifiedBufferSize,
@@ -68,71 +83,112 @@ class TapAudioSink(
         presentationTimeUs: Long,
         encodedAccessUnitCount: Int,
     ): Boolean {
-        val before = buffer.position()
-        // DefaultAudioSink 可能消费后不移动 position/limit；先留一个视图，
-        // consumed 时按快照写 tap，保证 PCM 不丢。
-        val tapSnapshot = if (controller.isTapActive && buffer.hasRemaining()) {
-            // delegate 可能 clear/rewind buffer；tap 开启时先拷贝真实 PCM。
-            val copy = ByteArray(buffer.remaining())
-            buffer.duplicate().get(copy)
-            ByteBuffer.wrap(copy)
-        } else {
-            null
-        }
-        val consumed = super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
-        val after = buffer.position()
         handledBuffers += 1L
+        val active = controller.isTapActive
+        if (active && !tapWasActive) {
+            seenFrames = 0L
+            writtenFrames = 0L
+            writtenRanges.clear()
+            lastDutyLogMs = 0L
+        }
+        tapWasActive = active
+
+        val start = buffer.position()
+        val end = buffer.limit()
+        val hasData = buffer.hasRemaining()
+        if (hasData && tapBytesPerFrame > 0) {
+            seenFrames += (end - start).toLong() / tapBytesPerFrame
+        }
+
+        if (active && hasData) {
+            // delegate 之前拷贝并立即写；不能等 consumed。
+            val copy = ByteArray(end - start)
+            buffer.duplicate().get(copy)
+            val identity = System.identityHashCode(buffer)
+            val previous = writtenRanges[identity]
+            val writeFrom = if (previous != null &&
+                previous.ptsUs == presentationTimeUs &&
+                start >= previous.start &&
+                start < previous.end
+            ) {
+                previous.end
+            } else {
+                start
+            }
+            if (writeFrom < end) {
+                val written = controller.tapPcm(
+                    ByteBuffer.wrap(copy),
+                    writeFrom - start,
+                    end - writeFrom,
+                )
+                if (written > 0) {
+                    if (tapBytesPerFrame > 0) {
+                        writtenFrames += written.toLong() / tapBytesPerFrame
+                    }
+                    val newStart = previous?.takeIf {
+                        it.ptsUs == presentationTimeUs && start >= it.start
+                    }?.start ?: start
+                    writtenRanges[identity] = WrittenRange(
+                        ptsUs = presentationTimeUs,
+                        start = newStart,
+                        end = end,
+                    )
+                }
+            }
+        }
+
+        val consumed = super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
         val now = System.currentTimeMillis()
         if (handledBuffers == 1L || now - lastBufferLogMs >= 1_000L) {
             lastBufferLogMs = now
-            Log.d(
-                "LoopPcmSource",
+            logD(
                 "tap handleBuffer n=" + handledBuffers + " ptsUs=" + presentationTimeUs +
-                    " consumed=" + consumed + " before=" + before + " after=" + after +
-                    " delta=" + (after - before),
+                    " consumed=" + consumed + " before=" + start +
+                    " after=" + buffer.position() +
+                    " delta=" + (buffer.position() - start),
             )
         }
-        if (after > before) {
-            controller.tapPcm(buffer, before, after - before)
-        } else if (consumed && tapSnapshot != null) {
-            // DefaultAudioSink 不保证移动 ByteBuffer.position；使用 delegate 前的快照。
-            controller.tapPcm(tapSnapshot, tapSnapshot.position(), tapSnapshot.remaining())
+        if (now - lastDutyLogMs >= 1_000L) {
+            lastDutyLogMs = now
+            logD(
+                "tapDuty writtenFrames=" + writtenFrames +
+                    " seenFrames=" + seenFrames +
+                    " calls=" + handledBuffers,
+            )
         }
         if (!forcedPlay) {
-            // SOURCE 诊断兜底：renderer 已读数据但未回调 onStarted 时，
-            // 主动启动一次 AudioTrack（幂等），打破 BUFFERING 死锁。
             forcedPlay = true
-            Log.w("LoopPcmSource", "tap force play after first handleBuffer")
+            logW("tap force play after first handleBuffer")
             super.play()
         }
         return consumed
     }
 
     override fun play() {
-        Log.d("LoopPcmSource", "tap play")
+        logD("tap play")
         super.play()
     }
 
     override fun pause() {
-        Log.d("LoopPcmSource", "tap pause")
+        logD("tap pause")
         forcedPlay = false
         super.pause()
     }
 
     override fun handleDiscontinuity() {
-        Log.w("LoopPcmSource", "tap handleDiscontinuity")
+        logW("tap handleDiscontinuity")
         super.handleDiscontinuity()
     }
 
     override fun flush() {
-        Log.d("LoopPcmSource", "tap flush")
+        logD("tap flush")
         forcedPlay = false
         controller.onSinkFlush()
         super.flush()
     }
 
     override fun reset() {
-        Log.d("LoopPcmSource", "tap reset")
+        logD("tap reset")
         forcedPlay = false
         controller.onSinkReset()
         super.reset()
@@ -141,6 +197,22 @@ class TapAudioSink(
     override fun release() {
         controller.onSinkRelease()
         super.release()
+    }
+
+    private fun logD(message: String) {
+        try {
+            Log.d("LoopPcmSource", message)
+        } catch (_: Throwable) {
+            // JVM 单测里 android.util.Log 是 stub。
+        }
+    }
+
+    private fun logW(message: String) {
+        try {
+            Log.w("LoopPcmSource", message)
+        } catch (_: Throwable) {
+            // JVM 单测里 android.util.Log 是 stub。
+        }
     }
 }
 
@@ -159,9 +231,7 @@ class SourceRenderersFactory(
         floatOutput: Boolean,
         playbackParams: Boolean,
     ): AudioSink {
-        Log.d("LoopPcmSource", "buildAudioSink source float=" + floatOutput + " params=" + playbackParams)
         val delegate = DefaultAudioSink.Builder(context)
-            // PCM16 直通；float 输出会让 tap 的 bytesPerFrame 口径变化。
             .setEnableFloatOutput(false)
             .setEnableAudioTrackPlaybackParams(playbackParams)
             .build()
