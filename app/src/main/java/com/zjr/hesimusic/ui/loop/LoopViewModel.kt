@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.zjr.hesimusic.data.dao.SongDao
 import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.demo.DemoEntryHooks
 import com.zjr.hesimusic.loop.analysis.AnalysisState
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
 import com.zjr.hesimusic.loop.analysis.LoopCandidateKt
@@ -246,10 +247,21 @@ class LoopViewModel @Inject constructor(
             seekAppliedForNextPlay = null
             try {
                 val previewMode = mode.toPreviewMode()
-                if (seek || appliedSeek != startMs || !previewPlayer.isPrepared) {
-                    previewPlayer.play(previewMode, startMs)
-                } else {
+                val usePlayFromCurrent = !(
+                    seek || appliedSeek != startMs || !previewPlayer.isPrepared
+                )
+                // 模式 chip/播放入口最终走哪条路径,一条日志即可对账(00008/ENDED 回归排查)。
+                Log.d(
+                    TAG,
+                    "effect play mode=" + previewMode + " startMs=" + startMs +
+                        " seek=" + seek + " appliedSeek=" + appliedSeek +
+                        " prepared=" + previewPlayer.isPrepared +
+                        " path=" + (if (usePlayFromCurrent) "playFromCurrent" else "play"),
+                )
+                if (usePlayFromCurrent) {
                     previewPlayer.playFromCurrent(previewMode)
+                } else {
+                    previewPlayer.play(previewMode, startMs)
                 }
                 anchorMs = startMs
                 anchorElapsedRealtime = SystemClock.elapsedRealtime()
@@ -504,11 +516,25 @@ class LoopViewModel @Inject constructor(
                     sourceMode = LoopSourceMode.isSource(),
                 ),
             )
+            maybeStartDemoAutoAudition(song.id)
             refillPeaks(song)
         } else {
             // 无行:Analyzing + RestartAnalysis(由 effect runner 调用 analyze)。
             dispatch(LoopPageEvent.Enter(false))
         }
+    }
+
+    /**
+     * demo 冷启动自动试听:页面首次进入 Ready 后自动切到「仅循环段」并起播。
+     *
+     * 只消费 DemoBootstrap 在导航前写入的一次性意图;正式包该值恒为 null,
+     * 且重复进入页面 / 旋转不会再次自动播放。SwitchMode 本身会产出 SeekTo+Play,
+     * 等价于用户点「仅循环段」按钮(该模式点击即试听)。
+     */
+    private fun maybeStartDemoAutoAudition(songId: Long) {
+        if (!DemoEntryHooks.consumeAutoAudition(songId)) return
+        Log.i(TAG, "demo auto audition -> LOOP_ONLY song=" + songId)
+        dispatch(LoopPageEvent.SwitchMode(LoopPageMode.LOOP_ONLY))
     }
 
     private suspend fun handleAnalysisState(state: AnalysisState) {
@@ -542,6 +568,7 @@ class LoopViewModel @Inject constructor(
                         sourceMode = LoopSourceMode.isSource(),
                     ),
                 )
+                maybeStartDemoAutoAudition(state.songId)
             }
 
             is AnalysisState.Failed -> {

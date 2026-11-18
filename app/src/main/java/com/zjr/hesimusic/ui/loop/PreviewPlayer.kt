@@ -249,8 +249,12 @@ class PreviewPlayer @Inject constructor(
                     currentTimelineUs = currentT,
                     window = w,
                 ) / 1000L
+                val wasEnded = p.playbackState == Player.STATE_ENDED
                 p.seekTo(startT)
-                if (p.playbackState == Player.STATE_IDLE) {
+                if (wasEnded) {
+                    Log.w(TAG, "play source from ENDED -> seek+prepare startT=" + startT + "Ms")
+                    p.prepare()
+                } else if (p.playbackState == Player.STATE_IDLE) {
                     p.prepare()
                 }
                 p.play()
@@ -276,6 +280,11 @@ class PreviewPlayer @Inject constructor(
 
     private fun playM3(song: Song, mode: PreviewMode, startMs: Long) {
         val p = ensurePlayer(EngineKind.M3)
+        Log.d(
+            TAG,
+            "playM3 enter mode=" + mode + " startMs=" + startMs +
+                " state=" + p.playbackState + " pos=" + p.currentPosition,
+        )
         if (mode == PreviewMode.FREE) {
             applyFreeShape()
         } else {
@@ -284,8 +293,14 @@ class PreviewPlayer @Inject constructor(
 
         val duration = _durationMs.value.coerceAtLeast(0L)
         degradeRetryUsed = false
+        val wasEnded = p.playbackState == Player.STATE_ENDED
+        // ENDED 必须先 seek 再 prepare:直接 prepare() 会把位置退回默认点,
+        // 只调 play() 又不会自动回到 A(真机复现:state=ENDED、位置冻结)。
         seekRaw(startMs.coerceIn(0L, duration))
-        if (p.playbackState == Player.STATE_IDLE) {
+        if (wasEnded) {
+            Log.w(TAG, "play from ENDED -> seek+prepare mode=" + mode + " startMs=" + startMs)
+            p.prepare()
+        } else if (p.playbackState == Player.STATE_IDLE) {
             Log.w(TAG, "play from IDLE -> prepare()")
             p.prepare()
         }
@@ -300,10 +315,14 @@ class PreviewPlayer @Inject constructor(
     }
 
     /**
-     * 从当前位置继续播放，**不 seek**。
+     * 从当前位置继续播放；常规路径**不 seek**。
      *
      * effect runner 在同一批 effect 已先执行 SeekTo 时用它，避免 Play 内部再次走
      * [LoopPosition.rawSeekUs]（00008 的重复映射来源）。
+     *
+     * 例外：播放器处于 [Player.STATE_ENDED] 时 prepare() 是 no-op（ExoPlayer 只在 IDLE
+     * 响应 prepare），必须**先** seek 回模式起点触发 ENDED→BUFFERING，再 prepare/play；
+     * 否则会停在 ENDED、位置冻结（真机复现）。
      */
     fun playFromCurrent(mode: PreviewMode) {
         LoopSourcePauseGate.resume()
@@ -317,9 +336,24 @@ class PreviewPlayer @Inject constructor(
             play(mode, start)
             return
         }
+        Log.d(
+            TAG,
+            "playFromCurrent enter mode=" + mode + " state=" + p.playbackState +
+                " prepared=" + prepared,
+        )
         if (sourceActive && shouldUseSource(mode)) {
             this.mode = mode
-            if (p.playbackState == Player.STATE_IDLE) p.prepare()
+            val wasEnded = p.playbackState == Player.STATE_ENDED
+            if (wasEnded) {
+                // SOURCE：ENDED 后 timeline 仍有效,直接回到该模式的初始 T,再 prepare/play。
+                val targetT = sourceStartMs(mode)
+                Log.w(TAG, "play from ENDED(source) -> seek+prepare mode=" + mode + " targetT=" + targetT + "Ms")
+                p.seekTo(targetT)
+                p.prepare()
+            } else if (p.playbackState == Player.STATE_IDLE) {
+                Log.w(TAG, "playFromCurrent from IDLE -> prepare()")
+                p.prepare()
+            }
             p.play()
             updatePositionOnce()
             Log.d(TAG, "playFromCurrent source mode=" + mode + " window=" + window)
@@ -335,10 +369,16 @@ class PreviewPlayer @Inject constructor(
         this.mode = mode
         if (mode == PreviewMode.FREE) applyFreeShape() else applyLoopShape(song)
         degradeRetryUsed = false
-        // 播放器处于 IDLE(被 stop/release 过、或首帧还没 prepare)时,单靠 play() 不会重新起播:
-        // 必须补一次 prepare()。真机复现:连点「接缝检查」第三次后 state=IDLE、位置冻结在 B-5s,
-        // 而 UI 侧仍显示暂停按钮(状态机与实际播放器脱节)。
-        if (p.playbackState == Player.STATE_IDLE) {
+        val duration = _durationMs.value.coerceAtLeast(0L)
+        val wasEnded = p.playbackState == Player.STATE_ENDED
+        // ENDED 时只 prepare/play 不会回到 A(真机复现:位置冻结、state 仍 ENDED):
+        // 必须按 seek → prepare → play 的顺序,先把位置放回当前模式的起点。
+        if (wasEnded) {
+            val target = modeStartMs().coerceIn(0L, duration)
+            Log.w(TAG, "play from ENDED -> seek+prepare mode=" + mode + " targetMs=" + target)
+            seekRaw(target)
+            p.prepare()
+        } else if (p.playbackState == Player.STATE_IDLE) {
             Log.w(TAG, "playFromCurrent from IDLE -> prepare()")
             p.prepare()
         }

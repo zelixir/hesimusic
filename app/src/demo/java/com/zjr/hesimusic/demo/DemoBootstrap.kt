@@ -59,6 +59,10 @@ internal object DemoBootstrap {
             try {
                 val songId = seed(app)
                 Log.i(TAG, "demo seed ready: songId=" + songId)
+                // 冷启动首次进入结果页后自动试听「仅循环段」;LoopViewModel 进入 Ready 时
+                // 通过 DemoEntryHooks.consumeAutoAudition 原子消费一次。
+                DemoEntryHooks.autoAuditionSongId = songId
+                Log.i(TAG, "demo auto audition armed: songId=" + songId + " mode=LOOP_ONLY")
                 session.ready(songId)
             } catch (t: Throwable) {
                 Log.e(TAG, "demo seed failed", t)

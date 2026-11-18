@@ -12,13 +12,36 @@ import kotlinx.coroutines.flow.StateFlow
  * - demo 包:DemoBootstrapProvider(ContentProvider,早于 Application.onCreate)在
  *   [DemoEntryHooks.session] 注册会话,MainActivity 仅在该值非空时才等待并导航。
  *
- * 写入方只有 demo 源集;读取方只有 MainActivity。不放任何 demo 业务逻辑。
+ * 写入方只有 demo 源集;读取方是 MainActivity(导航)与 LoopViewModel(首次自动试听)。
+ * 这里只放跨源集的契约/一次性意图,不放任何 demo 业务逻辑。
  */
 object DemoEntryHooks {
 
     /** demo 会话;正式包恒为 null。provider 注册,进程生命周期内不变。 */
     @Volatile
     var session: DemoSession? = null
+
+    /**
+     * demo 冷启动首次进入结果页时要自动试听「仅循环段」的歌曲 id。
+     *
+     * DemoBootstrap 在发布 songId 前写入;LoopViewModel 在页面进入 Ready 后调用
+     * [consumeAutoAudition] 原子消费一次。正式包恒为 null,不产生任何行为。
+     */
+    @Volatile
+    var autoAuditionSongId: Long? = null
+
+    /**
+     * 原子消费一次自动试听意图。
+     *
+     * @return true = 该歌匹配且本次消费成功(调用方应立即触发一次「仅循环段」);
+     *         false = 无待处理意图/歌曲不匹配(重复进入页面不会再次自动播放)。
+     */
+    @Synchronized
+    fun consumeAutoAudition(songId: Long): Boolean {
+        if (autoAuditionSongId != songId) return false
+        autoAuditionSongId = null
+        return true
+    }
 }
 
 /** demo 启动会话(由 demo 源集实现)。 */
