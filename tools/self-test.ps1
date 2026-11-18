@@ -67,17 +67,29 @@ Step "播放/暂停 x$PlayPauseCycles(暂停必须位置不动)" {
     if (-not $SongId) { throw "需要 -SongId" }
     Api POST "/player/play" @{ songId = [long]$SongId } | Out-Null
     Start-Sleep -Seconds 3
+    # 确保真的在播(play 命令可能因队列状态没生效,用 playWhenReady 判定)
+    for ($k = 0; $k -lt 3; $k++) {
+        if ((Api GET "/state").playback.playWhenReady) { break }
+        Api POST "/player/play-pause" | Out-Null
+        Start-Sleep -Seconds 1
+    }
+    if (-not (Api GET "/state").playback.playWhenReady) { throw "无法开始播放" }
     for ($i = 1; $i -le $PlayPauseCycles; $i++) {
         Api POST "/player/play-pause" | Out-Null
         Start-Sleep -Milliseconds 1200
-        $p1 = (Api GET "/state").playback.positionMs
+        $st = (Api GET "/state").playback
+        if ($st.playWhenReady) { throw "第 $i 次暂停未生效(playWhenReady 仍为 true)" }
+        $p1 = $st.positionMs
+        & $adb -s $Device logcat -c
         Start-Sleep -Milliseconds 1500
         $p2 = (Api GET "/state").playback.positionMs
+        $writes = (& $adb -s $Device logcat -d | Select-String -Pattern "tap handleBuffer" | Measure-Object).Count
         if ($p1 -ne $p2) { throw "第 $i 次暂停后位置仍在走:$p1 -> $p2" }
+        if ($writes -gt 2) { throw "第 $i 次暂停后仍在写音频:$writes 条 handleBuffer" }
         Api POST "/player/play-pause" | Out-Null
         Start-Sleep -Milliseconds 900
     }
-    "$PlayPauseCycles 次暂停均静止"
+    "$PlayPauseCycles 次暂停均静止且无音频写入"
 }
 
 Step "进出循环页 x$LoopCycles" {

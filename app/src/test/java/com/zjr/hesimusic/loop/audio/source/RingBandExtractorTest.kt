@@ -50,6 +50,17 @@ class RingBandExtractorTest {
         override fun seekMap(seekMap: SeekMap) = Unit
     }
 
+    private fun emptyDecoder(): RingBandStreamDecoder = object : RingBandStreamDecoder {
+        override fun stream(
+            startUs: Long,
+            endUs: Long,
+            prerollUs: Long,
+            onPcm: (data: ByteArray, size: Int) -> Unit,
+        ) = Unit
+
+        override fun close() = Unit
+    }
+
     @Test
     fun `empty ring waits once and returns instead of spinning`() {
         val tl = LoopingPcmTestSupport.timeline(aUs = 0L, bUs = 5_000_000L, sr = 1_000)
@@ -57,7 +68,7 @@ class RingBandExtractorTest {
         val reader = RingBandReader(ring)
         val renderer = RingBandRenderer(
             timeline = tl,
-            provider = LoopingPcmTestSupport.provider(tl),
+            decoder = emptyDecoder(),
             ring = ring,
         )
         val extractor = RingBandExtractor(tl, ring, reader, renderer)
@@ -92,7 +103,7 @@ class RingBandExtractorTest {
         val reader = RingBandReader(ring)
         val renderer = RingBandRenderer(
             timeline = tl,
-            provider = LoopingPcmTestSupport.provider(tl),
+            decoder = emptyDecoder(),
             ring = ring,
         )
         val extractor = RingBandExtractor(tl, ring, reader, renderer)

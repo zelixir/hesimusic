@@ -4,17 +4,24 @@ import android.content.Context
 import android.util.Log
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.extractor.DefaultExtractorsFactory
+import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.analysis.PcmDecoder
 import com.zjr.hesimusic.loop.audio.LoopAudioController
 import com.zjr.hesimusic.loop.audio.LoopRenderersFactory
 import com.zjr.hesimusic.loop.audio.source.LoopAwareMediaSourceFactory
+import com.zjr.hesimusic.loop.audio.source.LoopSourceItemTag
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMainPlayer
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
 import com.zjr.hesimusic.loop.audio.source.SourceRenderersFactory
+import com.zjr.hesimusic.service.LoopSourceFallback
+import com.zjr.hesimusic.service.MainPlayerRoute
+import com.zjr.hesimusic.service.MainPlayerRouting
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -61,10 +68,12 @@ object MediaModule {
         // M3_PRIME 保持 LoopRenderersFactory，行为完全不变。
         LoopSourceMode.refreshFromSettings(context)
         LoopSourceMainPlayer.refreshFromSettings(context)
-        val mainSource = LoopSourceMainPlayer.shouldUseSourceForMainPlayer()
-        LoopSourceMainPlayer.activateMainPlayer(mainSource)
-        // renderers 与 MediaSourceFactory 必须同源，避免半切换。
-        val renderersFactory = if (mainSource) {
+        // ★ 唯一一次判定：renderers / MediaSourceFactory / 协调器 / 会话层四处接线点
+        //   全部从这一个快照取值，杜绝「换了输出通路、播放源还是普通文件」的半切换。
+        val route = MainPlayerRoute.of(LoopSourceMainPlayer.shouldUseSourceForMainPlayer())
+        MainPlayerRouting.activate(route)
+        LoopSourceMainPlayer.activateMainPlayer(route.useSourceForMainPlayer)
+        val renderersFactory = if (MainPlayerRouting.renderersUseSource(route)) {
             SourceRenderersFactory(context, loopAudioController)
         } else {
             LoopRenderersFactory(context, loopAudioController)
@@ -72,20 +81,23 @@ object MediaModule {
         val defaultMediaSourceFactory = DefaultMediaSourceFactory(context, extractorsFactory)
         val loopAwareFactory = LoopAwareMediaSourceFactory(
             delegate = defaultMediaSourceFactory,
-            enabled = mainSource,
-            sourceFactory = LoopAwareMediaSourceFactory.defaultSourceFactory(
-                pcmDecoder = pcmDecoder,
-                onSeamOutputFrames = { outFrames -> loopAudioController.tapSeam(outFrames) },
+            enabled = MainPlayerRouting.mediaSourceFactoryEnabled(route),
+            sourceFactory = guardedSourceFactory(
+                build = LoopAwareMediaSourceFactory.defaultSourceFactory(
+                    pcmDecoder = pcmDecoder,
+                    onSeamOutputFrames = { outFrames -> loopAudioController.tapSeam(outFrames) },
+                ),
+                delegate = defaultMediaSourceFactory,
             ),
         )
-        // 这里不按 mainSource 另建 delegate：factory 内部用同一条件判断，
+        // 这里不按 route 另建 delegate：factory 内部用同一条件判断，
         // 普通 item / 开关关闭时原样走 default。
         val builder = ExoPlayer.Builder(context)
             .setMediaSourceFactory(loopAwareFactory)
             .setRenderersFactory(renderersFactory)
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
-        if (mainSource) {
+        if (MainPlayerRouting.renderersUseSource(route)) {
             // 1s 块 + 解码抖动：4s 起播/12s 上限，避免每 1~2s 饿死。
             builder.setLoadControl(
                 DefaultLoadControl.Builder()
@@ -96,8 +108,43 @@ object MediaModule {
         val player = builder.build()
 
         val duration = System.currentTimeMillis() - startTime
-        Log.i(TAG, "ExoPlayer created in ${duration}ms")
+        Log.i(
+            TAG,
+            "ExoPlayer created in " + duration + "ms route=" + route.useSourceForMainPlayer +
+                " renderers=" + renderersFactory.javaClass.simpleName +
+                " factoryEnabled=" + MainPlayerRouting.mediaSourceFactoryEnabled(route),
+        )
 
         return player
+    }
+
+    /**
+     * 循环数据源的**最后一道**失败防线。
+     *
+     * 预检在 LoopPlaybackCoordinator（格式/预算/文件都存在性）已经做过，这里兜运行期异常
+     * （探测和构建之间的文件变化、解码器初始化失败、环分配失败…）：登记回退、打日志、
+     * 返回普通文件源，绝不让异常抛回主线程打崩播放。
+     */
+    private fun guardedSourceFactory(
+        build: (MediaItem, LoopSourceItemTag) -> MediaSource,
+        delegate: MediaSource.Factory,
+    ): (MediaItem, LoopSourceItemTag) -> MediaSource = { item, tag ->
+        try {
+            build(item, tag)
+        } catch (t: Throwable) {
+            LoopSourceFallback.reportBuildFailure(
+                songId = tag.songId,
+                window = LoopWindow(tag.songId, tag.loopStartUs, tag.loopEndUs),
+                throwable = t,
+            )
+            Log.w(
+                TAG,
+                "source build failed -> fallback M3' songId=" + tag.songId +
+                    " window=[" + tag.loopStartUs + "," + tag.loopEndUs + ")" +
+                    " path=" + tag.filePath,
+                t,
+            )
+            delegate.createMediaSource(item)
+        }
     }
 }

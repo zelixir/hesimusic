@@ -2,7 +2,7 @@
 
 > 状态：**调查结论 + 最小原型（纯 JVM）已落地**。
 > 不接 UI/service、不碰设备、不加依赖；写域仅 `loop/audio/source/**`、对应测试、本文件。
-> 全量单测基线 1047 → 当前 **1128**（新增 81；第二阶段接入后），0 failures / 0 skipped。
+> 全量单测基线 1047 → 当前 **1134**（新增 87；第二阶段接入后），0 failures / 0 skipped。
 
 ## 0. 结论摘要
 
@@ -381,10 +381,10 @@ app/src/test/java/com/zjr/hesimusic/loop/audio/source/
 
 ```
 :app:testDebugUnitTest
-files=76 tests=1128 failures=0 skipped=0
+files=77 tests=1134 failures=0 skipped=0
 ```
 
-（基线 1047，新增 81；最后以实际跑数为准。）
+（基线 1047，新增 87；最后以实际跑数为准。）
 
 覆盖：
 
@@ -816,6 +816,52 @@ POST /debug/preview-seek {"positionMs":30000}
 - JVM 自测：40s/L=15s seam 恰为 720000、1440000；预算 3 强插 10 块 blocks<=3
   且播放头保留；402MB→32MB；双开关同源；暂停后 extractor read 不推进；切换 5 次
   bridge 为空。分析器 selftest clean PASS/click clicks FAIL(seamAlign PASS)。
+
+### 6.22 主播放器 SOURCE 欠载修复（2026-11-18）
+
+- LoadControl：主播放器（仅 mainSource）与预览 SOURCE 都改为
+  min=4000 / max=12000 / playback=1500 / rebuffer=2500。
+- Extractor 路径新增 LoopPcmPrefetcher：后台单线程把当前块之后再解到 6 块；
+  Extractor.read 在首次输出前同步确保 2 块就绪，避免 408ms 起的长静音。
+- 自定义 MediaPeriod 路径同样预取 6 块、单次任务最多泵 8 块。
+- 主播放器 MediaSourceFactory 把 core 的 B→A 回调接到
+  LoopAudioController.tapSeam，tap 侧车才有 ev=seam/outFrames。
+- LoopPcmSource 每秒日志：cacheBytes=... maxBytes=... blocks=... bufferedUs=...
+- 测试：Extractor 首读前至少 2 块并输出；原有 40s/L=15s seam 精确 2 条。
+
+### 6.23 tap 写入完整性（2026-11-18）
+
+- TapAudioSink 在 delegate 之前拷贝并立即写，不再等 consumed/after>before；
+  DefaultAudioSink 异步消费导致的 10% 写入问题消除。
+- 同一 ByteBuffer 去重：identity + ptsUs + 已写 [start,end) 区间，最近 16 个，
+  重复传入只写未覆盖尾部。
+- 每秒日志：tapDuty writtenFrames=... seenFrames=... calls=...；可据此看是否 100%。
+- tapPcm 返回实际写入字节数，TapAudioSink 用帧数统计 duty。
+- 单测：100 次 handleBuffer（30 次 consumed=false）写入 100 帧；同一 buffer 两次
+  只写一次。
+
+### 6.24 短样本/未填充数据防线（2026-11-18）
+
+- PcmBlockCache.put 严格要求 data.size == frames*bytesPerFrame；块缓存不再接受
+  半填充/未初始化 ByteArray。
+- LoopingPcmSourceCore.read 额外校验块数据尺寸；异常块直接 markFailed 并返回 null，
+  不把首尾拼接的错误字节当样本。
+- LoopingPcmExtractor 输出前校验 data.size % bpf == 0 且 framesValid == result.frames；
+  不匹配返回 CONTINUE，不推进输出；sampleData/sampleMetadata 永远用实际字节数，
+  绝不 0 填充到请求长度。
+- 每秒日志 read framesOut=... framesValid=... blockState=... cursorFrames=...；
+  framesValid < framesOut 时打 Log.w（通过 logger 打点）。
+- 单测：坏块被拒绝；40s/L=15s 输出无 >=5ms 全零段；坏解码器首读 CONTINUE
+  且 totalReadFrames 不推进。
+
+### 6.25 块边界爆音/掉档排查（2026-11-18）
+
+- 每块解码增加 250ms preroll（DECODE_PREROLL_US），解码后按帧裁掉，避免独立
+  MediaCodec 每 1s 启动时的 priming 低电平/爆音污染块首。
+- Extractor 每秒日志增加 block / remainingFrames：
+  read framesOut=... framesValid=... block=... remainingFrames=... blockState=... cursorFrames=...
+- read short 仍立即 Log.w，带 block/remainingFrames，便于把分析器的掉档窗对到块号。
+- 严格块数据尺寸校验与短读 CONTINUE 防线保留。
 
 ## 7. 与 M3′ / Seam Splice 的取舍
 

@@ -2,6 +2,7 @@ package com.zjr.hesimusic.service
 
 import com.zjr.hesimusic.loop.LoopPosition
 import com.zjr.hesimusic.loop.LoopWindow
+import com.zjr.hesimusic.loop.audio.source.LoopSourceProjection
 
 /**
  * 会话层位置/时长投影（纯函数，无 Android / Media3 依赖，可在纯 JVM 单测穷举）。
@@ -38,6 +39,22 @@ object LoopSessionProjection {
     /** 原始位置 → 展示位置（µs）；window = null 时完全透传。非法窗口同样透传（见 LoopPosition）。 */
     fun displayUs(rawUs: Long, window: LoopWindow?): Long =
         if (window == null) rawUs else LoopPosition.displayUs(rawUs, window)
+
+    // ---------------------------------------------------------------- SOURCE 口径
+
+    /**
+     * SOURCE 模式：数据源时间轴 T(ms) → 对外媒体时间(µs)。
+     *
+     * 与 [displayUs] 的区别：SOURCE 的 T 从 0 单调递增且 **T=0 对应当前窗口的 A**，没有
+     * 「前奏只播一次」语义，所以对外位置恒为 `A + floorMod(T, L)`（不做 raw < A 的透传）。
+     * 通知栏 / MediaSession / 进度条必须读媒体时间，不能读带 offset 的 T。
+     */
+    fun sourceDisplayUs(timelineMs: Long, window: LoopWindow?): Long =
+        LoopSourceProjection.displayUs(timelineMs * US_PER_MS, window)
+
+    /** SOURCE 模式：数据源时间轴 T(ms) → 对外媒体时间(ms)（[getCurrentPosition] 的口径）。 */
+    fun sourceDisplayMs(timelineMs: Long, window: LoopWindow?): Long =
+        LoopSourceProjection.displayMs(timelineMs, window)
 
     /**
      * 对外时长（µs）。返回 0 表示「不投影」，调用方要透传播放器原生时长。

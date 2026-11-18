@@ -5,14 +5,12 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 环带渲染器：后台单线程按 1s 块顺序解码 [A,B)，每块 append 进环。
- *
- * 这样首 2 块就绪即可让 Extractor 出样本；剩余块继续在后台填环。
- * 使用现有 PcmRangeProvider 的块区间接口；块边界由 T0/T1 门禁和真机测量兜底。
+ * 环带渲染器：后台单线程用**一次连续解码会话**从 A-preroll 解到 B，
+ * 每收到一段 PCM 就 append 进环；首 2 块就绪后 Extractor 即可出样本。
  */
 class RingBandRenderer(
     private val timeline: LoopingPcmTimeline,
-    private val provider: PcmRangeProvider,
+    private val decoder: RingBandStreamDecoder,
     private val ring: LoopRing,
     private val logger: (String) -> Unit = {},
 ) {
@@ -36,69 +34,52 @@ class RingBandRenderer(
             executor.execute {
                 var stopReason = "DONE"
                 var stopBlock = -1
+                var lastLoggedBlock = -1
                 try {
                     RingBandLog.i(
                         "RingBand render start [" + timeline.loopStartUs + "," +
                             timeline.loopEndUs + ") frames=" + timeline.loopFrames +
                             " blocks=" + timeline.blockCount,
                     )
-                    for (block in 0 until timeline.blockCount) {
+                    RingBandLog.i("RingBand decode session open prerollMs=" + PREROLL_US / 1000L)
+                    decoder.stream(
+                        startUs = timeline.loopStartUs,
+                        endUs = timeline.loopEndUs,
+                        prerollUs = PREROLL_US,
+                    ) { data, size ->
+                        if (releaseRequested) return@stream
+                        val frames = size / timeline.bytesPerFrame
+                        if (frames <= 0) return@stream
+                        val appended = ring.append(data, 0)
+                        if (appended < frames) {
+                            error = "ring append short wrote=" + appended + " want=" + frames
+                            throw IllegalStateException(error)
+                        }
+                        val block = (ring.renderedFrames / timeline.sampleRate).toInt()
                         stopBlock = block
-                        if (releaseRequested) {
-                            stopReason = "RELEASE"
-                            break
+                        if (block != lastLoggedBlock) {
+                            lastLoggedBlock = block
+                            RingBandLog.i(
+                                "RingBand append block=" + block +
+                                    " filledFrames=" + ring.renderedFrames,
+                            )
                         }
-                        val startUs = timeline.blockDecodeStartUs(block)
-                        val endUs = timeline.blockDecodeEndUs(block)
-                        val expected = timeline.blockFrames(block)
-                        val segment = try {
-                            provider.decode(startUs, endUs)
-                        } catch (t: Throwable) {
-                            error = t.javaClass.simpleName + ": " + t.message
-                            stopReason = "DECODE_EXCEPTION"
-                            break
-                        }
-                        if (releaseRequested) {
-                            stopReason = "RELEASE"
-                            break
-                        }
-                        if (segment.sampleRate != timeline.sampleRate ||
-                            segment.channels != timeline.channels
-                        ) {
-                            error = "format mismatch block=" + block +
-                                " sr=" + segment.sampleRate + "/" + timeline.sampleRate +
-                                " ch=" + segment.channels + "/" + timeline.channels
-                            stopReason = "FORMAT"
-                            break
-                        }
-                        if (segment.frames < expected) {
-                            error = "short render block=" + block +
-                                " got=" + segment.frames + " want=" + expected
-                            stopReason = "SHORT"
-                            break
-                        }
-                        val trimmed = segment.takeFrames(expected)
-                        val appended = ring.append(trimmed.data, 0)
-                        if (appended < expected) {
-                            error = "ring append short block=" + block +
-                                " wrote=" + appended + " want=" + expected
-                            stopReason = "RING_SHORT"
-                            break
-                        }
-                        RingBandLog.i(
-                            "RingBand append block=" + block +
-                                " filledFrames=" + ring.renderedFrames +
-                                " expectedFrames=" + expected,
-                        )
-                        logger(
-                            "RingBand append block=" + block +
-                                " filledFrames=" + ring.renderedFrames,
-                        )
+                    }
+                    RingBandLog.i("RingBand decode session close")
+                    if (ring.renderedFrames < timeline.loopFrames) {
+                        error = "decoder short filled=" + ring.renderedFrames +
+                            " want=" + timeline.loopFrames
+                        stopReason = "SHORT"
                     }
                 } catch (t: Throwable) {
                     error = t.javaClass.simpleName + ": " + t.message
-                    stopReason = "CRASH"
+                    stopReason = if (releaseRequested) "RELEASE" else "DECODE_EXCEPTION"
                 } finally {
+                    try {
+                        decoder.close()
+                    } catch (t: Throwable) {
+                        if (error == null) error = "close: " + t.message
+                    }
                     val message = "RingBand render stop reason=" + stopReason +
                         " block=" + stopBlock +
                         " filledFrames=" + ring.renderedFrames +
@@ -116,5 +97,9 @@ class RingBandRenderer(
     fun release() {
         releaseRequested = true
         executor.shutdownNow()
+    }
+
+    private companion object {
+        const val PREROLL_US = 300_000L
     }
 }

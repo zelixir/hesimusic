@@ -83,6 +83,8 @@ class RingBandReader(
         offsetFrames = Math.floorMod(offset, bandFrames)
     }
 
+    fun seekToOffset(frames: Long) = seekToFrame(frames)
+
     fun seekToUs(timeUs: Long) {
         val frames = (timeUs.coerceAtLeast(0L) * ring.sampleRate / 1_000_000L)
         seekToFrame(frames)

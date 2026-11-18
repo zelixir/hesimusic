@@ -147,7 +147,7 @@ class RingBandExtractor(
             timeline.frameAtTimeline(timeUs) - timeline.aFrame,
             timeline.loopFrames,
         )
-        reader.seekToFrame(offset)
+        reader.seekToOffset(offset)
         logger(
             "RingBand seek position=" + position + " timeUs=" + timeUs +
                 " offsetFrames=" + offset,

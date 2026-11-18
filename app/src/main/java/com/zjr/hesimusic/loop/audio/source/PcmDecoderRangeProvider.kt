@@ -13,7 +13,7 @@ import kotlinx.coroutines.runBlocking
  */
 class PcmDecoderRangeProvider(
     private val decoder: PcmDecoder,
-    private val path: String,
+    val path: String,
 ) : PcmRangeProvider {
 
     override fun decode(startUs: Long, endUs: Long): Pcm16Segment = runBlocking {

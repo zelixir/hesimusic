@@ -354,6 +354,7 @@ object LoopDebugServer {
             method == "POST" && segments == listOf("debug", "tap") -> handleDebugTap(body)
             method == "POST" && segments == listOf("debug", "reconnect") -> handleDebugReconnect()
             method == "POST" && segments == listOf("debug", "pcm-compare") -> handlePcmCompare(body)
+            method == "POST" && segments == listOf("debug", "decode-range") -> handleDecodeRange(body)
             method == "POST" && segments == listOf("debug", "seam") -> handleSeamToggle(body)
             method == "POST" && segments == listOf("debug", "source-mode") -> handleSourceModeToggle(body)
             method == "POST" && segments == listOf("debug", "preview-seek") -> handlePreviewSeek(body)
@@ -1177,6 +1178,39 @@ object LoopDebugServer {
                 .onFailure { Log.e(TAG, "navigate hook failed", it) }
         }
         return linkedMapOf("navigated" to true, "route" to route)
+    }
+
+    /**
+     * POST /debug/decode-range {path, aMs, bMs}
+     *
+     * 用真实 MediaCodec 解 [aMs,bMs) 并返回指纹,供"格式矩阵"脚本在真机上比对:
+     * 同一区间解两次指纹应一致;不同容器/格式的样本对齐差异由此量化。
+     */
+    private suspend fun handleDecodeRange(body: JSONObject?): Map<String, Any?> {
+        val d = deps()
+        val obj = body ?: throw HttpError(400, "JSON body required")
+        val path = obj.optString("path", "").trim()
+        if (path.isEmpty()) throw HttpError(400, "path required")
+        val aMs = obj.optLong("aMs", 0L)
+        val bMs = obj.optLong("bMs", 0L)
+        if (bMs <= aMs) throw HttpError(400, "bMs must be > aMs")
+        val t0 = System.currentTimeMillis()
+        val seg = d.pcmDecoder().decodePcm16Range(path, aMs * 1000L, bMs * 1000L)
+        val elapsed = System.currentTimeMillis() - t0
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        md.update(seg.data)
+        val hex = md.digest().joinToString("") { String.format("%02x", it) }
+        return linkedMapOf(
+            "path" to path,
+            "aMs" to aMs,
+            "bMs" to bMs,
+            "sampleRate" to seg.sampleRate,
+            "channels" to seg.channels,
+            "frames" to seg.frames,
+            "bytes" to seg.data.size,
+            "sha256" to hex,
+            "elapsedMs" to elapsed,
+        )
     }
 
     /**

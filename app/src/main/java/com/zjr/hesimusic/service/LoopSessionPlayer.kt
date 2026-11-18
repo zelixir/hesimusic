@@ -4,14 +4,9 @@ import android.util.Log
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.Player
 import com.zjr.hesimusic.data.mapper.mediaIdToSongId
-import com.zjr.hesimusic.loop.LoopPosition
 import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.LoopAudioController
-import com.zjr.hesimusic.loop.audio.source.LoopSourceItemTag
-import com.zjr.hesimusic.loop.audio.source.LoopSourceMainPlayer
-import com.zjr.hesimusic.loop.audio.source.LoopSourceMediaTag
-import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
 import com.zjr.hesimusic.loop.audio.source.LoopSourcePauseGate
 import com.zjr.hesimusic.loop.audio.source.LoopSourceProjection
 
@@ -23,7 +18,11 @@ import com.zjr.hesimusic.loop.audio.source.LoopSourceProjection
  *
  * 为什么需要它：环回发生在 PCM 层（M3'），ExoPlayer 看到的位置会一直增长到 B+kL；
  * 但对外必须表现为「落在 [A,B) 内的进度 + 整曲时长」。折返算术全部在纯函数
- * [LoopSessionProjection] 里，本类只负责取 raw、选窗口与单位换算（µs ↔ ms）。
+ * [LoopSessionProjection] / [LoopSourceProjection] 里，本类只负责取 raw、选窗口与单位换算（µs ↔ ms）。
+ *
+ * 路线（C 复核）：是否按 SOURCE 数据源时间轴投影由 [MainPlayerRouting] 的**同一个**
+ * 构建时布尔决定；SOURCE 构建失败被 [LoopSourceFallback] 登记后，本层立即回到媒体时间透传
+ * （绝不用带 offset 的 T 冒充进度）。
  *
  * 窗口来源（C2 修复）：优先 [LoopRuntime.window]（服务层派生态）；若它暂不可用
  * **且正在重放**，回退到 [LoopAudioController.window]（音频层同步写的权威值）——
@@ -38,10 +37,11 @@ class LoopSessionPlayer(
     private val audio: LoopAudioController,
 ) : ForwardingPlayer(player) {
 
-    /** 一次读取内共享的口径快照：窗口 + 是否重放（两者必须同源）。 */
+    /** 一次读取内共享的口径快照：窗口 + 是否重放 + SOURCE 是否已回退（三者必须同源）。 */
     private class Snapshot(
         val window: LoopWindow?,
         val isReplaying: Boolean,
+        val sourceUnavailable: Boolean,
     )
 
     /** 回退日志节流：每次「runtime.window 不可用但仍在重放」的区间只打一次。 */
@@ -54,15 +54,17 @@ class LoopSessionPlayer(
     }
 
     override fun pause() {
-        if (isSourceItem()) LoopSourcePauseGate.pause()
+        if (isSourceItem(snapshot())) LoopSourcePauseGate.pause()
         super.pause()
     }
 
     override fun getCurrentPosition(): Long {
         val snapshot = snapshot()
+        if (snapshot.sourceUnavailable) return super.getCurrentPosition()
         val window = snapshot.window ?: return super.getCurrentPosition()
-        if (isSourceItem()) {
-            return LoopSourceProjection.displayMs(super.getCurrentPosition(), window)
+        if (isSourceItem(snapshot)) {
+            // T → 媒体时间：对外读到的是 A + floorMod(T,L)，不是带 offset 的数据源时间轴 T。
+            return LoopSessionProjection.sourceDisplayMs(super.getCurrentPosition(), window)
         }
         val rawUs = currentRawUs(snapshot.isReplaying)
         return LoopSessionProjection.displayUs(rawUs, window) / LoopSessionProjection.US_PER_MS
@@ -70,14 +72,15 @@ class LoopSessionPlayer(
 
     override fun getBufferedPosition(): Long {
         val snapshot = snapshot()
+        if (snapshot.sourceUnavailable) return super.getBufferedPosition()
         val window = snapshot.window ?: return super.getBufferedPosition()
-        if (isSourceItem()) {
-            val currentDisplayUs = LoopSourceProjection.displayUs(
-                super.getCurrentPosition() * LoopSessionProjection.US_PER_MS,
+        if (isSourceItem(snapshot)) {
+            val currentDisplayUs = LoopSessionProjection.sourceDisplayUs(
+                super.getCurrentPosition(),
                 window,
             )
-            val bufferedUs = LoopSourceProjection.displayUs(
-                super.getBufferedPosition() * LoopSessionProjection.US_PER_MS,
+            val bufferedUs = LoopSessionProjection.sourceDisplayUs(
+                super.getBufferedPosition(),
                 window,
             )
             val atLeastCurrent = maxOf(bufferedUs, currentDisplayUs)
@@ -97,10 +100,12 @@ class LoopSessionPlayer(
     }
 
     override fun getDuration(): Long {
-        val window = snapshot().window ?: return super.getDuration()
+        val snapshot = snapshot()
+        if (snapshot.sourceUnavailable) return super.getDuration()
+        val window = snapshot.window ?: return super.getDuration()
         val projectedUs = projectedDurationUs(window)
         // SOURCE 播放器原生 duration 是 TIME_UNSET；对外仍返回整曲时长。
-        if (isSourceItem() && projectedUs > 0L) {
+        if (isSourceItem(snapshot) && projectedUs > 0L) {
             return projectedUs / LoopSessionProjection.US_PER_MS
         }
         // 防御性覆盖：不裁剪时播放器原生时长本来就等于整曲时长，这里只是保证「窗口生效期间
@@ -123,18 +128,17 @@ class LoopSessionPlayer(
     }
 
     /**
-     * seek 投影：窗口不适用（服务层/音频层都没有属于当前项的窗口）/ 目标不是当前项 → 完全透传；
-     * 否则走 [LoopSessionProjection.seekUs]（[LoopPosition.rawSeekUs] 三分支 +
-     * ring 不完整时该轮起点前 250ms 的降级预卷）。
+     * seek 投影：窗口不适用（服务层/音频层都没有属于当前项的窗口）/ 目标不是当前项 / SOURCE 已回退
+     * → 完全透传；否则走 [LoopSessionProjection.seekUs] 或 [LoopSourceProjection.timelineUsForDisplay]。
      */
     private fun seekToInternal(mediaItemIndex: Int, positionMs: Long) {
         val snapshot = snapshot()
         val window = snapshot.window
-        if (window == null || mediaItemIndex != currentMediaItemIndex) {
+        if (snapshot.sourceUnavailable || window == null || mediaItemIndex != currentMediaItemIndex) {
             super.seekTo(mediaItemIndex, positionMs)
             return
         }
-        if (isSourceItem()) {
+        if (isSourceItem(snapshot)) {
             val targetT = LoopSourceProjection.timelineUsForDisplay(
                 displayUs = positionMs * LoopSessionProjection.US_PER_MS,
                 currentTimelineUs = super.getCurrentPosition() * LoopSessionProjection.US_PER_MS,
@@ -159,8 +163,8 @@ class LoopSessionPlayer(
      * - 它为 null/不属于当前项且**正在重放** → 回退 audio.window（同样校验归属）；
      * - 都不可用 → 返回 window = null，调用方完全透传。
      *
-     * isReplaying 只读一次，窗口选择与 raw 取值都基于它，避免
-     * 「用 audio.window 折返、却用 player 位置当 raw」的混口径。
+     * isReplaying 与 sourceUnavailable 都只读一次，窗口选择、raw 取值、投影开关基于同一份快照，
+     * 避免「用 audio.window 折返、却用 player 位置当 raw」的混口径。
      */
     private fun snapshot(): Snapshot {
         val isReplaying = audio.isReplaying
@@ -171,6 +175,8 @@ class LoopSessionPlayer(
             audioWindow = audio.window,
             isReplaying = isReplaying,
         )
+        // SOURCE 构建失败已被登记：本窗口不再投影，位置/时长回到媒体时间。
+        val sourceUnavailable = LoopSourceFallback.isUnavailable(songId, resolved.window)
         val usedAudioFallback = resolved.source == LoopSessionProjection.WindowSource.AUDIO_FALLBACK
         if (usedAudioFallback) {
             if (!fallbackLogged) {
@@ -185,24 +191,25 @@ class LoopSessionPlayer(
         } else {
             fallbackLogged = false
         }
-        return Snapshot(resolved.window, isReplaying)
+        return Snapshot(resolved.window, isReplaying, sourceUnavailable)
     }
 
     /** 引擎原始位置（µs）：重放期取 sink 推进的位置，否则取播放器自身位置。 */
-    /** 当前项是否由循环 PCM 数据源产生（MediaItem tag 标记）。 */
-    private fun isSourceItem(): Boolean {
-        val tag = currentMediaItem?.localConfiguration?.tag
-        if (tag is LoopSourceItemTag) {
-            return LoopSourceMainPlayer.isMainPlayerActive
-        }
-        return LoopSourceMode.isSource() && tag === LoopSourceMediaTag
-    }
-
     private fun currentRawUs(isReplaying: Boolean): Long = LoopSessionProjection.rawUs(
         isReplaying = isReplaying,
         replayPositionUs = audio.positionUs,
         playerPositionMs = super.getCurrentPosition(),
     )
+
+    /**
+     * 当前项是否按循环数据源口径投影：由**同一个**路线快照 + 当前 item 的循环 tag 决定，
+     * 且该窗口没有被登记为 SOURCE 不可用。
+     */
+    private fun isSourceItem(snapshot: Snapshot): Boolean =
+        MainPlayerRouting.sessionProjectsSource(
+            tag = currentMediaItem?.localConfiguration?.tag,
+            sourceUnavailable = snapshot.sourceUnavailable,
+        )
 
     /** 对外时长（µs）；0 = 不投影（整曲时长未知）。 */
     private fun projectedDurationUs(window: LoopWindow): Long =

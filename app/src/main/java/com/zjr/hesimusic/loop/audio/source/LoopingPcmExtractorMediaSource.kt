@@ -60,7 +60,8 @@ object LoopingPcmExtractorMediaSource {
         onSeamOutputFrames: ((Long) -> Unit)? = null,
     ): MediaSource {
         val heap = Runtime.getRuntime().maxMemory()
-        if (RingBandSource.canUse(timeline, heap)) {
+        val ringProvider = provider as? PcmDecoderRangeProvider
+        if (RingBandSource.canUse(timeline, heap) && ringProvider != null) {
             logger(
                 "RingBand select bandBytes=" + (timeline.loopFrames * timeline.bytesPerFrame) +
                     " heap=" + heap,
@@ -74,7 +75,9 @@ object LoopingPcmExtractorMediaSource {
             )
         }
         logger(
-            "RingBand fallback reason=SIZE bandBytes=" +
+            "RingBand fallback reason=" + (
+                if (ringProvider == null) "PROVIDER" else "SIZE"
+            ) + " bandBytes=" +
                 (timeline.loopFrames * timeline.bytesPerFrame) +
                 " budget=" + (heap / 10L),
         )

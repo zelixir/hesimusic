@@ -16,9 +16,8 @@ import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.analysis.PcmDecoder
 import com.zjr.hesimusic.loop.audio.LoopAudioController
 import com.zjr.hesimusic.loop.audio.source.LoopSourceItemTag
-import com.zjr.hesimusic.loop.audio.source.LoopSourceMainPlayer
-import com.zjr.hesimusic.loop.audio.source.LoopSourceMediaTag
 import com.zjr.hesimusic.loop.audio.source.LoopSourceProjection
+import com.zjr.hesimusic.loop.audio.source.PcmFileFormatProbe
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -226,7 +225,8 @@ class LoopPlaybackCoordinator @Inject constructor(
             audio.fullDurationUs = if (willBeEligible) songDurationUs(songId) else 0L
             runtime.refresh(songId, mode.repeatMode, row, armedSongId) // 1) 纯函数重算（唯一窗口来源）
             val window = runtime.window.value
-            val sourceSong = if (LoopSourceMainPlayer.isMainPlayerActive && window != null) {
+            // SOURCE 路线才需要文件路径；M3′ 路线保持原样（多查一次 DB 没有意义）。
+            val sourceSong = if (MainPlayerRouting.current.coordinatorReplacesItem && window != null) {
                 songRepository.getSongsByIds(listOf(window.songId)).firstOrNull()
             } else {
                 null
@@ -380,6 +380,11 @@ class LoopPlaybackCoordinator @Inject constructor(
         if (audio.window != null) {
             audio.window = null
         }
+        audio.tapWindow = null
+        // 退出 SOURCE 形态：丢掉「原 item」备份与失败登记（下次重建重新判定，不继承旧失败）。
+        sourceOriginalItem = null
+        sourceOriginalIndex = -1
+        LoopSourceFallback.reset()
         runtime.clear()
     }
 
@@ -416,22 +421,11 @@ class LoopPlaybackCoordinator @Inject constructor(
         sourceSong: Song?,
         reason: String,
     ) {
-        // SOURCE：只替换当前 item 为带 tag 的循环数据源，队列/首页/通知栏不变。
-        if (LoopSourceMainPlayer.isMainPlayerActive) {
+        // SOURCE（③ 接线点）：只替换当前 item 为带 tag 的循环数据源，队列/首页/通知栏不变。
+        // 数据源自己负责循环/PTS/seek，所以这条分支**不再**写 M3′ 的 window/ring
+        // （否则 LoopAudioSink 会二次拦截 PCM）；旧的「已换路就跳过」死代码一并删除。
+        if (MainPlayerRouting.current.coordinatorReplacesItem) {
             syncSourceItem(window, player, sourceSong, reason)
-            return
-        }
-        // SOURCE 数据源自己负责循环/PTS/seek；这里不能再写 M3′ 的 window/ring，
-        // 否则 LoopAudioSink 会二次拦截 PCM。A/B 变更由 SOURCE 侧新 source 承接。
-        val currentTag = player.currentMediaItem?.localConfiguration?.tag
-        if (LoopSourceMainPlayer.isMainPlayerActive &&
-            (currentTag === LoopSourceMediaTag || currentTag is LoopSourceItemTag)
-        ) {
-            Log.d(
-                TAG,
-                "source mode: skip M3 shape reason=" + reason +
-                    " window=" + window + " item=" + player.currentMediaItem?.mediaId,
-            )
             return
         }
         val index = player.currentMediaItemIndex
@@ -485,6 +479,16 @@ class LoopPlaybackCoordinator @Inject constructor(
     }
 
 
+    /**
+     * SOURCE 形态的唯一写点（③ 接线点）。
+     *
+     * 进入：只做**一次** `replaceMediaItem(当前 index)` + 一次 seek；落点由
+     * [LoopSourceItemPlan.enter] 给出（A 或 A+entryOffset），队列其它项一根手指都不碰。
+     * 退出：把数据源时间轴 T 映射回媒体时间（`A + floorMod(T,L)`）后恢复原 item。
+     *
+     * 失败回退（④ 的入口）：预检不通过（格式不支持 / 环过大 / 文件缺失）或该窗口已被登记
+     * 不可用时，**不替换** item、不投影，位置继续是媒体时间，并打一条带原因的日志。
+     */
     private fun syncSourceItem(
         window: LoopWindow?,
         player: Player,
@@ -495,54 +499,98 @@ class LoopPlaybackCoordinator @Inject constructor(
         if (index < 0) return
         val current = player.currentMediaItem ?: return
         val tag = current.localConfiguration?.tag
-        if (window == null) {
+        val w = window
+        val unavailable = LoopSourceFallback.isUnavailable(w?.songId, w)
+        // 0) 没有窗口 / 该窗口已登记 SOURCE 不可用 → 退出循环（只恢复当前项）。
+        if (w == null || !MainPlayerRouting.coordinatorReplacesItem(w, unavailable)) {
             audio.tapWindow = null
-            if (tag is LoopSourceItemTag) {
-                restoreSourceItem(player, index, tag)
-            }
+            if (tag is LoopSourceItemTag) restoreSourceItem(player, index, tag, reason)
             return
         }
-        audio.tapWindow = window
+        // 1) 已经是同窗口的循环 item：幂等（无缝播放期间零媒体操作）。
         if (tag is LoopSourceItemTag &&
-            tag.songId == window.songId &&
-            tag.loopStartUs == window.loopStartUs &&
-            tag.loopEndUs == window.loopEndUs
+            tag.songId == w.songId &&
+            tag.loopStartUs == w.loopStartUs &&
+            tag.loopEndUs == w.loopEndUs
         ) {
+            audio.tapWindow = w
             return
         }
-        if (song == null || song.filePath.isBlank()) {
-            Log.w(TAG, "source item skipped: song/file missing id=" + window.songId)
+        // 2) 预检：格式不支持 / 环过大 / 文件缺失 → 本次不进 SOURCE，回退 M3′ 形态并登记。
+        val filePath = song?.filePath
+        val decision = LoopSourceFallback.evaluate(
+            window = w,
+            songId = w.songId,
+            filePath = filePath,
+            probe = filePath?.takeIf { it.isNotBlank() }?.let { path ->
+                { PcmFileFormatProbe.probe(path) }
+            },
+        )
+        val ringBytes = when (val d = decision) {
+            is LoopSourceFallback.Decision.UseM3Prime -> {
+                LoopSourceFallback.reportUnavailable(
+                    songId = w.songId,
+                    window = w,
+                    reason = d.reason,
+                    detail = d.detail,
+                )
+                audio.tapWindow = null
+                if (tag is LoopSourceItemTag) restoreSourceItem(player, index, tag, reason)
+                return
+            }
+            is LoopSourceFallback.Decision.UseSource -> d.ringBytes
+        }
+        val path = filePath
+        if (path.isNullOrBlank()) return
+        // A/B 变更时 item 可能已经是上一个窗口的 source item：此时 player 位置是**数据源时间轴 T**，
+        // 先折回媒体时间，再用它算进入偏移，避免把 T 当媒体时间（位置会漂一整圈）。
+        val positionMs = if (tag is LoopSourceItemTag) {
+            val oldWindow = LoopWindow(tag.songId, tag.loopStartUs, tag.loopEndUs)
+            LoopSourceProjection.displayMs(player.currentPosition, oldWindow)
+        } else {
+            player.currentPosition
+        }
+        val plan = LoopSourceItemPlan.enter(
+            index = index,
+            itemCount = player.mediaItemCount,
+            positionMs = positionMs,
+            window = w,
+            songId = w.songId,
+            filePath = path,
+        )
+        if (plan == null) {
+            Log.w(TAG, "source plan rejected songId=" + w.songId + " window=" + w)
             return
         }
+        audio.tapWindow = w
         if (tag !is LoopSourceItemTag) {
             sourceOriginalItem = current
             sourceOriginalIndex = index
         }
-        val tagged = current.buildUpon()
-            .setTag(
-                LoopSourceItemTag(
-                    songId = window.songId,
-                    loopStartUs = window.loopStartUs,
-                    loopEndUs = window.loopEndUs,
-                    filePath = song.filePath,
-                ),
-            )
-            .build()
-        player.replaceMediaItem(index, tagged)
-        // SOURCE timeline T=0 对应当前 A；进循环从 A 起播。
-        player.seekTo(index, 0L)
+        val tagged = current.buildUpon().setTag(plan.tag).build()
+        player.replaceMediaItem(plan.index, tagged)
+        // 进入落点：A（进循环前在 A 之前）或 A+entryOffset（正在窗口内），不是永远 seek 0。
+        player.seekTo(plan.index, plan.seekTimelineMs)
         Log.i(
             TAG,
-            "source item installed reason=" + reason + " songId=" + window.songId +
-                " window=" + window + " path=" + song.filePath,
+            "source item installed reason=" + reason + " songId=" + w.songId +
+                " window=" + w + " entryTMs=" + plan.seekTimelineMs +
+                " band=" + ringBytes + "B path=" + path,
         )
     }
 
-    private fun restoreSourceItem(player: Player, index: Int, tag: LoopSourceItemTag) {
-        val oldWindow = LoopWindow(tag.songId, tag.loopStartUs, tag.loopEndUs)
-        val displayMs = LoopSourceProjection.displayMs(
+    /**
+     * 退出循环：把数据源时间轴 T 映射回**媒体时间**（`A + floorMod(T,L)`）再恢复原 item。
+     *
+     * 只替换当前 index（[LoopSourceItemPlan.exit] 的 touchedIndices 恒为单个 index），
+     * 队列其它项、首页、通知栏都不变。
+     */
+    private fun restoreSourceItem(player: Player, index: Int, tag: LoopSourceItemTag, reason: String) {
+        val plan = LoopSourceItemPlan.exit(
+            index = index,
+            itemCount = player.mediaItemCount,
             timelineMs = player.currentPosition,
-            window = oldWindow,
+            tag = tag,
         )
         val original = sourceOriginalItem?.takeIf { sourceOriginalIndex == index }
         val restored = original ?: player.currentMediaItem?.buildUpon()?.setTag(null)?.build()
@@ -550,8 +598,14 @@ class LoopPlaybackCoordinator @Inject constructor(
         sourceOriginalIndex = -1
         if (restored == null) return
         player.replaceMediaItem(index, restored)
-        player.seekTo(index, displayMs.coerceAtLeast(0L))
-        Log.i(TAG, "source item restored index=" + index + " displayMs=" + displayMs)
+        if (plan == null) return
+        player.seekTo(plan.index, plan.seekMediaMs)
+        Log.i(
+            TAG,
+            "source item restored reason=" + reason + " index=" + plan.index +
+                " mediaMs=" + plan.seekMediaMs + " window=[" + tag.loopStartUs +
+                "," + tag.loopEndUs + ")",
+        )
     }
 
     /** 引擎原始位置（µs）：旧窗口属于当前项且处于重放期时用 sink 位置，否则用播放器位置。 */

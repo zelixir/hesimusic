@@ -116,6 +116,11 @@ android {
     buildFeatures {
         compose = true
     }
+    // JVM 上的真实 ExoPlayer 集成测试(Robolectric)需要 Android 资源:
+    // 测试只读取 src/test/resources 里的 WAV/元数据,不启动解码器,也不触碰设备。
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +182,12 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.extended)
     testImplementation(libs.junit)
+    // JVM 集成测试:Robolectric + media3 官方测试工具(FakeClock/TestExoPlayerBuilder/
+    // CapturingRenderersFactory),只作用于 unit test,不进 APK。
+    testImplementation("org.robolectric:robolectric:4.16.1")
+    testImplementation("androidx.media3:media3-test-utils:1.8.0")
+    testImplementation("androidx.media3:media3-test-utils-robolectric:1.8.0")
+    testImplementation("androidx.test:core:1.6.1")
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))

@@ -25,4 +25,4 @@ tools/loop-engine-cli/build/
 tools/loop-engine-cli/*.wav
 # 本地协调记录与构建日志(不入库)
 /.issue/
-/build-*.log
+/build-*.logapp/build-jvm/
