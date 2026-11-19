@@ -18,6 +18,13 @@ import java.nio.ByteBuffer
  * tap 必须在 delegate 之前写：DefaultAudioSink 会异步消费，consumed=false 时
  * position 也不一定前移，等 consumed 会漏掉大部分数据。同一个 ByteBuffer 可能被
  * 多次传入，因此用 buffer 身份 + pts + 已写区间去重。
+ *
+ * **不变量（issue 00020 回归）：本类绝不自己调用 [play]。**
+ * 曾经有一版诊断兜底在首个 handleBuffer 之后强制 `super.play()`（当时怀疑“sink 不启动导致
+ * BUFFERING 死锁”），它在 pause() 后会被重新触发：播放器已暂停（UI 进「无缝分析」页会暂停主播放），
+ * AudioTrack 却被重新 start，于是 ExoPlayer 每次 doSomeWork 喂进来的那一小段 PCM 就变成
+ * “~96ms 出声 + ~0.9s 静音”的循环——用户听到的正是“0.x 秒播放 + 0.x 秒停顿”。
+ * 播放/暂停的唯一所有者是 ExoPlayer，sink 只允许被动响应。
  */
 @UnstableApi
 class TapAudioSink(
@@ -34,7 +41,6 @@ class TapAudioSink(
     private var handledBuffers = 0L
     private var lastBufferLogMs = 0L
     private var lastDutyLogMs = 0L
-    private var forcedPlay = false
     private var tapBytesPerFrame = 0
     private var seenFrames = 0L
     private var writtenFrames = 0L
@@ -156,11 +162,6 @@ class TapAudioSink(
                     " calls=" + handledBuffers,
             )
         }
-        if (!forcedPlay) {
-            forcedPlay = true
-            logW("tap force play after first handleBuffer")
-            super.play()
-        }
         return consumed
     }
 
@@ -171,7 +172,6 @@ class TapAudioSink(
 
     override fun pause() {
         logD("tap pause")
-        forcedPlay = false
         super.pause()
     }
 
@@ -182,14 +182,12 @@ class TapAudioSink(
 
     override fun flush() {
         logD("tap flush")
-        forcedPlay = false
         controller.onSinkFlush()
         super.flush()
     }
 
     override fun reset() {
         logD("tap reset")
-        forcedPlay = false
         controller.onSinkReset()
         super.reset()
     }
