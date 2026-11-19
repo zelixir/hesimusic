@@ -1,6 +1,9 @@
 package com.zjr.hesimusic.ui.about
 
 import com.zjr.hesimusic.loop.audio.source.LoopEngineInfo
+import com.zjr.hesimusic.loop.audio.source.LoopSourceMainPlayer
+import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
+import com.zjr.hesimusic.service.LoopSourceFallback
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -160,6 +163,30 @@ class AboutInfoFormatTest {
         assertEquals(10, AboutInfoText.displayWidth(AboutInfoText.padDisplayWidth("构建渠道:", 10)))
         // 已超宽时原样返回,不截断。
         assertEquals("构建渠道:", AboutInfoText.padDisplayWidth("构建渠道:", 4))
+    }
+
+    @Test
+    fun `engine snapshot passes through the real loop path`() {
+        val previousMode = LoopSourceMode.current
+        LoopSourceFallback.reset()
+        try {
+            // SOURCE 生效 → 环带 + source。
+            LoopSourceMode.current = LoopSourceMode.SOURCE
+            LoopSourceMainPlayer.setEnabledForTest(true)
+            val source = LoopEngineInfoSource.current(null)
+            assertEquals(LoopEngineInfo.ENGINE_SOURCE_RING, source.engine)
+            assertEquals("source", source.loopPath)
+            assertEquals(0L, source.bandBytes)
+
+            // 主播放器开关关掉、没有回退原因 → 路径 none(不是把引擎名硬映射成 m3)。
+            LoopSourceMainPlayer.setEnabledForTest(false)
+            val idle = LoopEngineInfoSource.current(null)
+            assertEquals("none", idle.loopPath)
+        } finally {
+            LoopSourceMainPlayer.setEnabledForTest(null)
+            LoopSourceMode.current = previousMode
+            LoopSourceFallback.reset()
+        }
     }
 
     @Test
