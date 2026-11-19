@@ -112,12 +112,15 @@ object LoopSourceFallback {
     private data class Failure(val reason: Reason, val startUs: Long, val endUs: Long)
 
     private val failures = HashMap<Long, Failure>()
+    private var latest: Failure? = null
 
     /** 登记「这个窗口的 SOURCE 不可用」；同一窗口只影响自己，换窗口自动重新判定。 */
     @Synchronized
     fun reportUnavailable(songId: Long, window: LoopWindow?, reason: Reason, detail: String = "") {
         if (songId <= 0L || window == null || !window.isValid()) return
-        failures[songId] = Failure(reason, window.loopStartUs, window.loopEndUs)
+        val failure = Failure(reason, window.loopStartUs, window.loopEndUs)
+        failures[songId] = failure
+        latest = failure
         logW(
             "source unavailable -> fallback M3' reason=" + reason.logName +
                 " songId=" + songId + " window=" + window +
@@ -150,12 +153,18 @@ object LoopSourceFallback {
     @Synchronized
     fun clear(songId: Long) {
         failures.remove(songId)
+        if (latest != null && !failures.containsKey(songId)) latest = failures.values.lastOrNull()
     }
 
     @Synchronized
     fun reset() {
         failures.clear()
+        latest = null
     }
+
+    /** 最近一次回退原因；About/日志用。 */
+    @Synchronized
+    fun latestReason(): Reason? = latest?.reason
 
     @Synchronized
     fun failureCount(): Int = failures.size

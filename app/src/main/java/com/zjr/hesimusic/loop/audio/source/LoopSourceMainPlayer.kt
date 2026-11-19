@@ -18,8 +18,9 @@ object LoopSourceMainPlayer {
     private const val TAG = "LoopSourceMainPlayer"
     private const val SETTING_KEY = "hesi_loop_source_main"
 
+    /** 默认为主播放器开启 SOURCE；显式 m3/关闭仍可回退。 */
     @Volatile
-    var enabled: Boolean = false
+    var enabled: Boolean = true
         private set
 
     @Volatile
@@ -51,6 +52,13 @@ object LoopSourceMainPlayer {
         } catch (t: Throwable) {
             Log.w(TAG, "save main switch failed", t)
         }
+        // 主播放器开关与预览/引擎开关必须一起持久化；否则 /debug/source-mode 后重启
+        // 只恢复 main=true、LoopSourceMode 仍是 M3′，route 变成 false，出现
+        // “数据源未接管、engine=exo” 的半切换。
+        LoopSourceMode.select(
+            context,
+            if (on) LoopSourceMode.SOURCE else LoopSourceMode.M3_PRIME,
+        )
         enabled = on
         debugOverride = on
     }
@@ -69,9 +77,10 @@ object LoopSourceMainPlayer {
     fun refreshFromSettings(context: Context) {
         debugOverride?.let { return }
         saved(context)?.let { enabled = it; return }
-        // 与预览开关一致:成品默认开启,显式写 0 才关闭。
+        // 与预览开关一致:缺省开启,显式写 0 才关闭。
         enabled = try {
-            Settings.Global.getInt(context.contentResolver, SETTING_KEY, 0) != 0
+            val raw = Settings.Global.getString(context.contentResolver, SETTING_KEY)
+            raw == null || raw != "0"
         } catch (t: Throwable) {
             Log.w(TAG, "read $SETTING_KEY failed", t)
             true
@@ -81,6 +90,6 @@ object LoopSourceMainPlayer {
     /** 测试/调试用，进程内覆盖主开关。 */
     fun setEnabledForTest(value: Boolean?) {
         debugOverride = value
-        enabled = value ?: false
+        enabled = value ?: true
     }
 }

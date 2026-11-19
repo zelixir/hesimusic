@@ -31,7 +31,7 @@ enum class LoopSourceMode {
         private const val SETTING_KEY = "hesi_loop_source_mode"
 
         @Volatile
-        var current: LoopSourceMode = M3_PRIME
+        var current: LoopSourceMode = SOURCE
 
         /**
          * 调试/测试用的强制覆盖:非 null 时**优先于**全局 setting。
@@ -43,6 +43,16 @@ enum class LoopSourceMode {
         var debugOverride: LoopSourceMode? = null
 
         fun isSource(): Boolean = current == SOURCE
+
+        /** 缺省引擎（无用户偏好/无 global setting）：环带 SOURCE。 */
+        fun defaultMode(): LoopSourceMode = SOURCE
+
+        /** 纯函数：prefs 原始值 -> 引擎；null/未知均回默认 SOURCE。 */
+        fun fromPreference(raw: String?): LoopSourceMode = when (raw) {
+            "m3" -> M3_PRIME
+            "source" -> SOURCE
+            else -> defaultMode()
+        }
 
         /** 读全局 setting（0/1）；没有设置时保持默认 M3′。 */
         private const val PREFS = "loop_settings"
@@ -56,11 +66,8 @@ enum class LoopSourceMode {
             } catch (t: Throwable) {
                 null
             }
-            return when (raw) {
-                "source" -> SOURCE
-                "m3" -> M3_PRIME
-                else -> null
-            }
+            if (raw == null) return null
+            return fromPreference(raw)
         }
 
         /** 用户在结果页切换引擎:写偏好并立即生效(重新进页生效)。 */
@@ -84,16 +91,21 @@ enum class LoopSourceMode {
                 current = chosen
                 return
             }
-            // 成品默认走新引擎;显式写 0 才回到老引擎(回退路径)。
-            val value = try {
-                Settings.Global.getInt(context.contentResolver, SETTING_KEY, 0)
+            // 缺省/未设置走 SOURCE；显式写 0 才回到老引擎(回退路径)。
+            val raw = try {
+                Settings.Global.getString(context.contentResolver, SETTING_KEY)
             } catch (t: Throwable) {
                 Log.w(TAG, "read $SETTING_KEY failed", t)
+                current = defaultMode()
                 return
             }
-            val next = if (value == 0) M3_PRIME else SOURCE
+            val next = when (raw) {
+                "0" -> M3_PRIME
+                null -> defaultMode()
+                else -> SOURCE
+            }
             if (next != current) {
-                Log.i(TAG, "loop source mode -> $next (global $SETTING_KEY=$value)")
+                Log.i(TAG, "loop source mode -> $next (global $SETTING_KEY=$raw)")
             }
             current = next
         }

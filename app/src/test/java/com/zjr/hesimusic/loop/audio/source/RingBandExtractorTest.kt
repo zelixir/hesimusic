@@ -94,6 +94,76 @@ class RingBandExtractorTest {
     }
 
     @Test
+    fun `normal read emits full 16384-frame sample`() {
+        val tl = LoopingPcmTestSupport.timeline(
+            aUs = 0L,
+            bUs = 2_000_000L,
+            sr = 48_000,
+            ch = 2,
+        )
+        val ring = LoopRing(tl.sampleRate, tl.channels, tl.loopFrames)
+        ring.append(PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(0, 192_000)))
+        val reader = RingBandReader(ring)
+        val renderer = RingBandRenderer(tl, emptyDecoder(), ring)
+        val extractor = RingBandExtractor(tl, ring, reader, renderer)
+        val out = FakeOutput()
+        extractor.init(out)
+        val input = Proxy.newProxyInstance(
+            ExtractorInput::class.java.classLoader,
+            arrayOf(ExtractorInput::class.java),
+        ) { _, method, _ ->
+            when (method.returnType) {
+                java.lang.Boolean.TYPE -> false
+                java.lang.Integer.TYPE -> 0
+                java.lang.Long.TYPE -> 0L
+                else -> null
+            }
+        } as ExtractorInput
+        extractor.read(input, PositionHolder())
+        assertEquals(16_384, out.track.totalBytes / (tl.channels * 2))
+    }
+
+    @Test
+    fun `wall clock throttle bounds emitted ahead of active loading time`() {
+        val tl = LoopingPcmTestSupport.timeline(aUs = 0L, bUs = 10_000_000L, sr = 1_000)
+        val ring = LoopRing(tl.sampleRate, tl.channels, tl.loopFrames)
+        ring.append(PcmTestSupport.bytesOf(PcmTestSupport.pcm16Buffer(0, 10_000)))
+        val reader = RingBandReader(ring)
+        val renderer = RingBandRenderer(tl, emptyDecoder(), ring)
+        var now = 0L
+        val extractor = RingBandExtractor(
+            timeline = tl,
+            ring = ring,
+            reader = reader,
+            renderer = renderer,
+            clock = { now },
+            sleeper = { now += it },
+        )
+        val out = FakeOutput()
+        extractor.init(out)
+        val input = Proxy.newProxyInstance(
+            ExtractorInput::class.java.classLoader,
+            arrayOf(ExtractorInput::class.java),
+        ) { _, method, _ ->
+            when (method.returnType) {
+                java.lang.Boolean.TYPE -> false
+                java.lang.Integer.TYPE -> 0
+                java.lang.Long.TYPE -> 0L
+                else -> null
+            }
+        } as ExtractorInput
+        repeat(1_000) {
+            extractor.read(input, PositionHolder())
+        }
+        val emittedFrames = out.track.totalBytes / (tl.channels * 2)
+        val allowed = 5L * tl.sampleRate + now * tl.sampleRate / 1000L
+        assertTrue(
+            "emitted=$emittedFrames allowed=$allowed now=$now",
+            emittedFrames <= allowed + 2L,
+        )
+    }
+
+    @Test
     fun `two filled blocks are readable and PTS starts at zero`() {
         val tl = LoopingPcmTestSupport.timeline(aUs = 0L, bUs = 5_000_000L, sr = 1_000)
         val ring = LoopRing(tl.sampleRate, tl.channels, tl.loopFrames)

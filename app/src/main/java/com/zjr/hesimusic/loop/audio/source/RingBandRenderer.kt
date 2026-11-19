@@ -95,8 +95,24 @@ class RingBandRenderer(
     }
 
     fun release() {
+        if (releaseRequested) return
         releaseRequested = true
+        RingBandLog.i("RingBand renderer release requested")
+        try {
+            decoder.close()
+        } catch (_: Throwable) {
+        }
         executor.shutdownNow()
+        try {
+            executor.awaitTermination(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        RingBandLog.i(
+            "RingBand renderer release bandBytes=" +
+                (timeline.loopFrames * timeline.bytesPerFrame) +
+                " released=true",
+        )
     }
 
     private companion object {

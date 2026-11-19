@@ -27,15 +27,18 @@ object RingBandSource {
         provider: PcmRangeProvider,
         logger: (String) -> Unit = {},
         onSeamOutputFrames: ((Long) -> Unit)? = null,
+        testDecoder: RingBandStreamDecoder? = null,
     ): MediaSource {
-        val real = provider as? PcmDecoderRangeProvider
-            ?: throw IllegalArgumentException("RingBand requires PcmDecoderRangeProvider")
-        val decoder = MediaCodecRingBandDecoder(
-            path = real.path,
-            sampleRate = timeline.sampleRate,
-            channels = timeline.channels,
-            logger = logger,
-        )
+        val decoder = testDecoder ?: run {
+            val real = provider as? PcmDecoderRangeProvider
+                ?: throw IllegalArgumentException("RingBand requires PcmDecoderRangeProvider")
+            MediaCodecRingBandDecoder(
+                path = real.path,
+                sampleRate = timeline.sampleRate,
+                channels = timeline.channels,
+                logger = logger,
+            )
+        }
         val ring = LoopRing(timeline.sampleRate, timeline.channels, timeline.loopFrames)
         val startOffset = Math.floorMod(
             timeline.frameAtTimeline(0L) - timeline.aFrame,
@@ -57,6 +60,10 @@ object RingBandSource {
             extractors,
         )
         renderer.start()
-        return factory.createMediaSource(item)
+        return RingBandMediaSource(
+            delegate = factory.createMediaSource(item),
+            extractor = extractor,
+            ring = ring,
+        )
     }
 }

@@ -22,7 +22,10 @@ class MediaCodecRingBandDecoder(
     private val logger: (String) -> Unit = {},
 ) : RingBandStreamDecoder {
 
+    @Volatile
     private var codec: MediaCodec? = null
+
+    @Volatile
     private var extractor: MediaExtractor? = null
 
     override fun stream(

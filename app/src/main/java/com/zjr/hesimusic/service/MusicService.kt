@@ -74,6 +74,14 @@ class MusicService : MediaSessionService() {
     
     // Flag to prevent saving state while restoring it
     private var isRestoringState = false
+
+    /**
+     * restore 期间是否有**外部播放请求**（用户播放 / 调试口 /loop/enter 的 play）。
+     *
+     * restore 最后会以『不要自动播放』为由 pause 一次；如果用户/接口在 restore 还没结束时
+     * 已经要求播放，那次 pause 会把请求吞掉（真机 /loop/enter 之后 idle 的成因之一）。
+     */
+    private var externalPlayRequestedDuringRestore = false
     private var lastAudioSessionId: Int? = null
     private var showMediaNotificationEnabled: Boolean = true
 
@@ -208,8 +216,13 @@ class MusicService : MediaSessionService() {
                         Log.d(TAG, "restorePlaybackState: seeking to index=$targetIndex, position=$savedPosition")
                         player.seekTo(targetIndex, savedPosition)
                         
-                        // Do not auto-play
-                        player.pause()
+                        // Do not auto-play —— 但若 restore 期间已有外部播放请求（用户/调试口），
+                        // 这里的 pause 会把那次 play 吞掉，跳过它。
+                        if (externalPlayRequestedDuringRestore) {
+                            Log.i(TAG, "restorePlaybackState: keep playing (external play request)")
+                        } else {
+                            player.pause()
+                        }
                         
                         // Now enable shuffle mode if it was enabled (after seeking to the correct song)
                         if (savedShuffleMode) {
@@ -225,6 +238,12 @@ class MusicService : MediaSessionService() {
                     Log.d(TAG, "restorePlaybackState: no saved queue to restore")
                 }
             } finally {
+                if (externalPlayRequestedDuringRestore && !player.playWhenReady) {
+                    // 外部请求的 play 可能被 restore 自身的状态写入抹掉：最后再补一次。
+                    Log.i(TAG, "restorePlaybackState: re-apply external play request")
+                    player.play()
+                }
+                externalPlayRequestedDuringRestore = false
                 isRestoringState = false  // Allow saving state again
             }
 
@@ -275,6 +294,13 @@ class MusicService : MediaSessionService() {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 Log.d(TAG, "onPlaybackStateChanged: state=$playbackState")
                 saveCurrentState()
+            }
+
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (playWhenReady && isRestoringState) {
+                    externalPlayRequestedDuringRestore = true
+                    Log.i(TAG, "restore in flight: external play requested reason=" + reason)
+                }
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {

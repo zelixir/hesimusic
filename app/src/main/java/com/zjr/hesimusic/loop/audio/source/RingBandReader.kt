@@ -44,6 +44,10 @@ class RingBandReader(
     var lastSeamOutputFrames: Long = -1L
         private set
 
+    /** 下一次 read 的 PTS 下限；seek 后绝不允许回退/重置。 */
+    @Volatile
+    private var nextPtsUs: Long = 0L
+
     val filledFrames: Long get() = ring.renderedFrames
 
     fun read(maxFrames: Int): Read? {
@@ -65,7 +69,8 @@ class RingBandReader(
         } else {
             null
         }
-        val pts = ring.presentationTimeUs(totalReadFrames)
+        val pts = maxOf(nextPtsUs, ring.presentationTimeUs(totalReadFrames))
+        nextPtsUs = pts + available.toLong() * 1_000_000L / ring.sampleRate
         offsetFrames = Math.floorMod(offset + available, bandFrames)
         totalReadFrames += available.toLong()
         reads += 1L
@@ -79,14 +84,17 @@ class RingBandReader(
     }
 
     /** seek 目标为环内帧偏移 [0,L)，只改 offset。 */
-    fun seekToFrame(offset: Long) {
+    fun seekToFrame(offset: Long, targetUs: Long = 0L) {
         offsetFrames = Math.floorMod(offset, bandFrames)
+        // media3 约定：seek 后 PTS 必须 >= seek 目标，且不得回退。
+        nextPtsUs = maxOf(nextPtsUs, targetUs.coerceAtLeast(0L))
     }
 
-    fun seekToOffset(frames: Long) = seekToFrame(frames)
+    fun seekToOffset(frames: Long, targetUs: Long = 0L) = seekToFrame(frames, targetUs)
 
     fun seekToUs(timeUs: Long) {
-        val frames = (timeUs.coerceAtLeast(0L) * ring.sampleRate / 1_000_000L)
-        seekToFrame(frames)
+        val t = timeUs.coerceAtLeast(0L)
+        val frames = (t * ring.sampleRate / 1_000_000L)
+        seekToFrame(frames, t)
     }
 }

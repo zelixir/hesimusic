@@ -165,8 +165,10 @@ object LoopDebugServer {
 
     /**
      * 安装播放层只读桥(debug 源集内完成,main 不反向引用 debug):
-     * - engine:controller.window 命中当前歌 → "loop",否则 "exo";
-     * - window: controller.window 优先,缺失时回退 LoopRuntime.window(唯一窗口来源);
+     * - engine:M3′ 音频窗口**或** SOURCE 接管窗口命中当前歌 → "loop",否则 "exo";
+     *   （SOURCE 路线故意不写 M3′ 的 controller.window,只看它会把正在循环的 SOURCE 误报成 exo）
+     * - loopPath:当前走 m3 / source / none（engine=loop 时区分是哪条通路）;
+     * - window: M3′ 窗口优先,缺失时回退 LoopRuntime.window(唯一窗口来源);
      * - positionUs/seam/degrade/ring 直接读 LoopAudioController 的 volatile 计数。
      */
     private fun installLoopBridge(d: DebugEntryPoint) {
@@ -176,19 +178,24 @@ object LoopDebugServer {
                 val runtime = d.loopRuntime()
                 val controller = d.loopAudioController()
                 val audioWindow = controller.window
-                val window = audioWindow ?: runtime.window.value
+                val sourceWindow = com.zjr.hesimusic.service.LoopSourceRuntime.installedWindow
+                val window = audioWindow ?: sourceWindow ?: runtime.window.value
                 val currentSongId = player?.cachedSongId()
                 // 冷启动时 Player.Listener 缓存可能还没拿到当前歌:此时 window 本身已由
                 // LoopPlaybackCoordinator 按当前歌算出,视为命中;缓存有值时严格比对。
-                val engine = if (audioWindow != null &&
-                    (currentSongId == null || currentSongId == audioWindow.songId)
-                ) {
-                    "loop"
-                } else {
-                    "exo"
-                }
+                val engine = com.zjr.hesimusic.service.LoopSourceRuntime.engineName(
+                    m3Window = audioWindow,
+                    sourceWindow = sourceWindow,
+                    currentSongId = currentSongId,
+                )
+                val loopPath = com.zjr.hesimusic.service.LoopSourceRuntime.loopPath(
+                    m3Window = audioWindow,
+                    sourceWindow = sourceWindow,
+                    currentSongId = currentSongId,
+                )
                 return linkedMapOf(
                     "engine" to engine,
+                    "loopPath" to loopPath,
                     "window" to window?.let {
                         linkedMapOf(
                             "songId" to it.songId,
@@ -289,10 +296,11 @@ object LoopDebugServer {
                 errorJson(e.message ?: "error")
             } catch (e: PlayerUnavailable) {
                 status = 503
-                errorJson(e.message ?: "player connecting")
+                // 不能是空 body:reason 让 PC 端区分 controller 缺失/断连/读超时。
+                playerUnavailableJson(e.message ?: "player connecting", e.reason)
             } catch (e: PlayerTimeout) {
                 status = 503
-                errorJson("player connecting")
+                playerUnavailableJson("player timeout", DebugPlayerLink.REASON_SNAPSHOT_TIMEOUT)
             } catch (e: CancellationException) {
                 status = 500
                 Log.w(TAG, "request cancelled: $method $rawTarget", e)
@@ -390,8 +398,24 @@ object LoopDebugServer {
                 "port" to PORT,
                 "startedAtEpochMs" to startedAtEpochMs,
                 "uptimeMs" to (System.currentTimeMillis() - startedAtEpochMs),
-                // E2E 判断冷启动抢跑:controller 建立时刻到现在;未连接为 null。
+                // E2E 诊断:controllerAgeMs 只看连接时长,不参与有效性判定。
                 "controllerAgeMs" to (player?.controllerAgeMs() ?: null),
+                "connected" to (player?.isConnected() ?: false),
+                "snapshotAgeMs" to (player?.snapshotAgeMs() ?: null),
+            ),
+        )
+    }
+
+    /** 503 响应体(controller 未连接/读取超时):error + reason + 三个链路诊断字段,绝不空 body。 */
+    private fun playerUnavailableJson(message: String, reason: String): String {
+        val p = player
+        return serializeJson(
+            linkedMapOf(
+                "error" to message,
+                "reason" to reason,
+                "connected" to (p?.isConnected() ?: false),
+                "controllerAgeMs" to p?.controllerAgeMs(),
+                "snapshotAgeMs" to p?.snapshotAgeMs(),
             ),
         )
     }
@@ -456,6 +480,10 @@ object LoopDebugServer {
         return LinkedHashMap(snapshotMap(read.snapshot, includeQueue = false)).apply {
             put("connecting", false)
             put("stale", read.stale)
+            put("connected", true)
+            put("controllerAgeMs", p.controllerAgeMs())
+            put("snapshotAgeMs", p.snapshotAgeMs())
+            put("reason", null)
         }
     }
 
@@ -476,6 +504,11 @@ object LoopDebugServer {
         "queue" to emptyList<Any?>(),
         "engine" to "exo",
         "connecting" to (p?.isStartingUp() ?: true),
+        "connected" to (p?.isConnected() ?: false),
+        "controllerAgeMs" to p?.controllerAgeMs(),
+        "snapshotAgeMs" to p?.snapshotAgeMs(),
+        // 为什么拿不到播放态:controller_not_connected / controller_disconnected / snapshot_timeout ...
+        "reason" to (p?.unavailableReason() ?: DebugPlayerLink.REASON_NOT_INITIALIZED),
         "stale" to true,
     )
 
@@ -933,20 +966,32 @@ object LoopDebugServer {
     // ------------------------------------------------------------ 播放控制
 
     private fun handlePlayerState(): Map<String, Any?> {
-        val p = player ?: throw PlayerUnavailable()
-        val read = p.snapshotForRead() ?: throw PlayerUnavailable()
+        val p = player ?: throw PlayerUnavailable(
+            DebugPlayerLink.message(DebugPlayerLink.REASON_NOT_INITIALIZED),
+            DebugPlayerLink.REASON_NOT_INITIALIZED,
+        )
+        // controller 未连接/已断开 → 503 并附 reason;已连接即返回快照(idle/queue=0 也合法)。
+        val read = p.snapshotForRead()
+            ?: throw PlayerUnavailable(p.unavailableMessage(), p.unavailableReason())
         // 确保 loop bridge/entrypoint 已就绪,使 /player 的 engine 与 positionMs 折返
         // 在“先打 /player、后打 /state”的顺序下也生效;player 已连说明 Hilt 早已就绪。
         runCatching { deps() }
         return LinkedHashMap(snapshotMap(read.snapshot)).apply {
             put("connecting", false)
             put("stale", read.stale)
+            put("connected", true)
+            put("controllerAgeMs", p.controllerAgeMs())
+            put("snapshotAgeMs", p.snapshotAgeMs())
+            put("reason", null)
         }
     }
 
     private fun requirePlayer(): DebugPlayerConnection {
-        val p = player ?: throw PlayerUnavailable()
-        if (p.controllerOrNull() == null) throw PlayerUnavailable()
+        val p = player ?: throw PlayerUnavailable(
+            DebugPlayerLink.message(DebugPlayerLink.REASON_NOT_INITIALIZED),
+            DebugPlayerLink.REASON_NOT_INITIALIZED,
+        )
+        p.controllerOrNull() ?: throw PlayerUnavailable(p.unavailableMessage(), p.unavailableReason())
         return p
     }
 
@@ -1200,6 +1245,18 @@ object LoopDebugServer {
         val md = java.security.MessageDigest.getInstance("SHA-256")
         md.update(seg.data)
         val hex = md.digest().joinToString("") { String.format("%02x", it) }
+        // 可选:返回尾部 PCM(base64),供格式矩阵脚本比对跨窗口裁剪后的样本一致性。
+        val tailFrames = obj.optInt("tailFrames", 0).coerceIn(0, 65536)
+        val tailBase64 = if (tailFrames > 0) {
+            val bpf = seg.channels * 2
+            val tailBytes = minOf(seg.data.size, tailFrames * bpf)
+            android.util.Base64.encodeToString(
+                seg.data.copyOfRange(seg.data.size - tailBytes, seg.data.size),
+                android.util.Base64.NO_WRAP,
+            )
+        } else {
+            null
+        }
         return linkedMapOf(
             "path" to path,
             "aMs" to aMs,
@@ -1210,6 +1267,8 @@ object LoopDebugServer {
             "bytes" to seg.data.size,
             "sha256" to hex,
             "elapsedMs" to elapsed,
+            "tailFrames" to tailFrames,
+            "tailPcmBase64" to tailBase64,
         )
     }
 
@@ -1355,12 +1414,17 @@ object LoopDebugServer {
 
     /** POST /debug/reconnect —— 显式丢弃当前 controller 并重建(最多等 2s)。 */
     private fun handleDebugReconnect(): Map<String, Any?> {
-        val p = player ?: throw PlayerUnavailable()
+        val p = player ?: throw PlayerUnavailable(
+            DebugPlayerLink.message(DebugPlayerLink.REASON_NOT_INITIALIZED),
+            DebugPlayerLink.REASON_NOT_INITIALIZED,
+        )
         val reconnected = p.forceReconnectAndAwait(2_000L)
         Log.i(TAG, "explicit reconnect -> $reconnected")
         return linkedMapOf(
             "reconnected" to reconnected,
             "controllerAgeMs" to p.controllerAgeMs(),
+            "connected" to p.isConnected(),
+            "snapshotAgeMs" to p.snapshotAgeMs(),
             "connecting" to p.isStartingUp(),
         )
     }

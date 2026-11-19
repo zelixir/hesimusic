@@ -8,6 +8,7 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
@@ -49,28 +50,33 @@ internal data class PlayerRead(val snapshot: PlayerSnapshot, val stale: Boolean)
 /**
  * debug 协议专用 MediaController 懒连接(不依赖/不修改任何 main 类)。
  *
- * 设计要点(对应上版崩溃/卡顿教训 + 冷启动抢跑):
+ * 设计要点(对应“snapshot 永远 invalid、/player 永远 503”的回归):
+ * - **有效性只看链路**:controller == null 或 controller.isConnected == false 才算 invalid;
+ *   age、queueSize、playbackState、position 都不参与判定,只写日志。空闲时 age 增长不会再触发重建;
+ * - **只在拿不到 controller 或收到断连回调时重建**:MediaController.Listener.onDisconnected
+ *   或读取时发现 isConnected=false 才丢弃旧 controller,并按 2s 退避重新建连;
+ *   POST /debug/reconnect 仍可显式强制重建;
  * - 未就绪时**绝不阻塞等待**:controllerOrNull() 只投递建连请求后立即返回 null,
- *   调用方转 503;3s 内未建连则放弃本次尝试并 2s 后重试;
- * - 冷启动 invalid:controller 已连但 3s 内仍是 idle/queue=0/pos=0(应用侧 restore 还没灌队列),
- *   控制命令快速 503;超过 3s 仍空 → 丢弃并重建 controller,单请求最多等重建 2s;
- * - 已就绪时所有 Player 访问都投递到主线程,读 1.5s / 写 2.5s 超时,
+ *   调用方转 503(带 reason);3s 内未建连则放弃本次尝试并 2s 后重试;
+ * - 已连接时所有 Player 访问都投递到主线程,读 1.5s / 写 2.5s 超时,
  *   超时用最近缓存兜底(只读)或 503(控制),不会把 server 线程拖死;
- * - Player.Listener 持续维护快照缓存,主线程繁忙时 /state 仍能返回。
+ * - Player.Listener 持续维护快照缓存,并输出 "player state updated songId=... pos=... at=..."
+ *   心跳日志(500ms 节流),用于确认 collector 真的在更新。
  */
+@UnstableApi
 internal class DebugPlayerConnection(private val context: Context) {
 
     companion object {
         private const val TAG = "LoopDebug"
         private const val CONNECT_TIMEOUT_MS = 3_000L
         private const val RETRY_DELAY_MS = 2_000L
-        private const val COLD_START_GRACE_MS = 3_000L
         private const val RECONNECT_WAIT_MS = 2_000L
         private const val RECONNECT_POLL_MS = 100L
         private const val MAIN_READ_TIMEOUT_MS = 1_500L
         private const val MAIN_VALIDATE_TIMEOUT_MS = 500L
         private const val MAIN_WRITE_TIMEOUT_MS = 2_500L
         private const val MAX_QUEUE_ITEMS = 200
+        private const val STATE_LOG_MIN_INTERVAL_MS = 500L
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -85,9 +91,23 @@ internal class DebugPlayerConnection(private val context: Context) {
     @Volatile
     private var cache: PlayerSnapshot? = null
 
+    /** 最近一次快照写入时刻(elapsedRealtime);null/0 表示还没有可用快照。 */
+    @Volatile
+    private var cacheUpdatedAt = 0L
+
     /** controller 建立时刻(elapsedRealtime);null/0 表示当前无 controller。 */
     @Volatile
     private var controllerCreatedAt = 0L
+
+    /** 上一次读取不可用的原因(链路正常时才会用于 503 reason 兜底)。 */
+    @Volatile
+    private var lastFailure: String? = null
+
+    @Volatile
+    private var lastStateLogAt = 0L
+
+    @Volatile
+    private var lastStateLogSongId: Long? = null
 
     private var future: ListenableFuture<MediaController>? = null
     private var connectStartedAt = 0L
@@ -96,31 +116,59 @@ internal class DebugPlayerConnection(private val context: Context) {
 
     private val listener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) {
-            cache = runCatching { readSnapshot(player) }.getOrElse { cache }
+            // 旧 controller 的迟到事件不得覆盖新链路的缓存。
+            if (player !== controller) return
+            val snapshot = runCatching { readSnapshot(player) }.getOrNull() ?: return
+            updateCache(snapshot)
+        }
+    }
+
+    /** Session 断连回调:这是“收到断连回调才重建”的唯一自动入口。 */
+    private val disconnectListener = object : MediaController.Listener {
+        override fun onDisconnected(controller: MediaController) {
+            handleDisconnected(controller, "session callback")
         }
     }
 
     fun isConnecting(): Boolean = connecting
 
-    /** 当前 controller 建立时刻到现在;无 controller 时 null。 */
+    /** controller 是否存在且仍与服务端相连——这是唯一的“可用”口径。 */
+    fun isConnected(): Boolean = controller?.isConnected == true
+
+    /** 当前 controller 建立时刻到现在;无 controller 时 null。仅供日志/诊断,不参与有效性判定。 */
     fun controllerAgeMs(): Long? {
-        if (controller == null) return null
+        val current = controller ?: return null
         val created = controllerCreatedAt
-        if (created <= 0L) return null
+        if (created <= 0L || !current.isConnected) return null
         return (SystemClock.elapsedRealtime() - created).coerceAtLeast(0L)
     }
 
-    /**
-     * 是否仍处于“刚连上、restore 还没把队列灌进来”的状态:
-     * controller 存在且快照仍是 idle/queue=0/pos=0,且建立未超过 3s。
-     * 供 /state 的 connecting 字段与 /analyze 的 pause 快速跳过使用。
-     */
-    fun isStartingUp(): Boolean {
-        if (controller == null) return connecting
-        val snapshot = cache ?: return true
-        if (isValidSnapshot(snapshot)) return false
-        return (controllerAgeMs() ?: 0L) < COLD_START_GRACE_MS
+    /** 最近一次快照写入时刻到现在;无快照时 null。 */
+    fun snapshotAgeMs(): Long? {
+        if (cache == null) return null
+        val updated = cacheUpdatedAt
+        if (updated <= 0L) return null
+        return (SystemClock.elapsedRealtime() - updated).coerceAtLeast(0L)
     }
+
+    /** 当前 503 的原因(见 DebugPlayerLink.REASON_*)。 */
+    fun unavailableReason(): String = DebugPlayerLink.reason(
+        hasController = controller != null,
+        connected = isConnected(),
+        fallback = lastFailure,
+    )
+
+    /** 当前 503 的可读 message;PC 脚本仍以 reason 字段为准。 */
+    fun unavailableMessage(): String = DebugPlayerLink.message(unavailableReason())
+
+    /**
+     * 是否仍处于“没连上”的状态(/state.connecting 与 /analyze 的 pause 跳过共用)。
+     * 新口径:只看链路(controller 缺失或已断开),与连接时长、队列内容无关。
+     */
+    fun isStartingUp(): Boolean = DebugPlayerLink.isInvalid(
+        hasController = controller != null,
+        connected = isConnected(),
+    )
 
     /** 最近一次 Player.Listener 事件缓存里的当前歌 id(不阻塞主线程;供 loop bridge 判 engine)。 */
     fun cachedSongId(): Long? = cache?.songId
@@ -128,12 +176,18 @@ internal class DebugPlayerConnection(private val context: Context) {
     /**
      * 非阻塞取 controller:未建连时触发一次后台建连并返回 null。
      * 3s 未完成则放弃该次 future(释放),2s 后允许重试。
+     * 若已建连但 isConnected=false(漏掉了断连回调),在此丢弃并按退避重建。
      */
     fun controllerOrNull(): MediaController? {
-        controller?.let { return it }
+        val current = controller
+        if (current != null) {
+            if (current.isConnected) return current
+            handleDisconnected(current, "controller reported disconnected")
+        }
         val now = SystemClock.elapsedRealtime()
         synchronized(lock) {
-            controller?.let { return it }
+            val latest = controller
+            if (latest != null && latest.isConnected) return latest
             if (connecting && now - connectStartedAt >= CONNECT_TIMEOUT_MS) {
                 Log.w(TAG, "player connect timeout after ${now - connectStartedAt}ms; retry in ${RETRY_DELAY_MS}ms")
                 connecting = false
@@ -148,7 +202,7 @@ internal class DebugPlayerConnection(private val context: Context) {
                 startConnectLocked(now)
             }
         }
-        return controller
+        return controller?.takeIf { it.isConnected }
     }
 
     /** 触发建连(不等待)。 */
@@ -156,7 +210,7 @@ internal class DebugPlayerConnection(private val context: Context) {
         controllerOrNull()
     }
 
-    /** 强制丢弃当前 controller/future 并重新建连(不等待结果)。 */
+    /** 强制丢弃当前 controller/future 并重新建连(不等待结果)。仅供显式调试入口使用。 */
     fun forceReconnect(reason: String = "explicit") {
         var old: MediaController? = null
         var oldFuture: ListenableFuture<MediaController>? = null
@@ -165,11 +219,13 @@ internal class DebugPlayerConnection(private val context: Context) {
             oldFuture = future
             controller = null
             cache = null
+            cacheUpdatedAt = 0L
             future = null
             connecting = false
             connectStartedAt = 0L
             nextRetryAt = 0L
             controllerCreatedAt = 0L
+            lastFailure = null
             connectSeq++
         }
         Log.i(TAG, "player controller force reconnect: $reason")
@@ -181,21 +237,24 @@ internal class DebugPlayerConnection(private val context: Context) {
         ensureConnecting()
     }
 
-    /** 强制重建并最多等待 timeoutMs 直到新 controller 报告有效播放态。 */
+    /** 强制重建并最多等待 timeoutMs 直到新 controller 连接成功(不再要求快照内容有效)。 */
     fun forceReconnectAndAwait(timeoutMs: Long = RECONNECT_WAIT_MS): Boolean {
         forceReconnect("explicit reconnect")
         val deadline = SystemClock.elapsedRealtime() + timeoutMs
         while (SystemClock.elapsedRealtime() < deadline) {
             val candidate = controllerOrNull()
-            if (candidate != null) {
+            if (candidate != null && candidate.isConnected) {
                 val snapshot = readSnapshotCached(candidate)
-                if (snapshot != null && isValidSnapshot(snapshot)) {
-                    Log.i(TAG, "player controller reconnected and valid")
-                    return true
-                }
+                Log.i(
+                    TAG,
+                    "player controller reconnected (songId=${snapshot?.songId}, queue=${snapshot?.queueSize}, " +
+                        "state=${snapshot?.playbackState})",
+                )
+                return true
             }
             sleepQuietly(RECONNECT_POLL_MS)
         }
+        Log.w(TAG, "player controller reconnect timed out after ${timeoutMs}ms")
         return false
     }
 
@@ -206,7 +265,9 @@ internal class DebugPlayerConnection(private val context: Context) {
         mainHandler.post {
             try {
                 val token = SessionToken(context, ComponentName(context, MusicService::class.java))
-                val built = MediaController.Builder(context, token).buildAsync()
+                val built = MediaController.Builder(context, token)
+                    .setListener(disconnectListener)
+                    .buildAsync()
                 synchronized(lock) {
                     if (seq == connectSeq) future = built
                 }
@@ -228,13 +289,15 @@ internal class DebugPlayerConnection(private val context: Context) {
                                 connecting = false
                                 nextRetryAt = 0L
                                 future = null
-                                cache = runCatching { readSnapshot(createdController) }.getOrNull()
+                                lastFailure = null
                                 createdController.addListener(listener)
                                 accepted = true
                             }
                         }
                         if (accepted) {
                             Log.i(TAG, "player controller connected")
+                            val initial = runCatching { readSnapshot(createdController) }.getOrNull()
+                            if (initial != null) updateCache(initial)
                         } else {
                             Log.w(TAG, "stale player connect success; releasing")
                             runCatching { createdController.release() }
@@ -245,6 +308,7 @@ internal class DebugPlayerConnection(private val context: Context) {
                                 connecting = false
                                 future = null
                                 nextRetryAt = SystemClock.elapsedRealtime() + RETRY_DELAY_MS
+                                lastFailure = DebugPlayerLink.REASON_NOT_CONNECTED
                                 Log.w(TAG, "player controller connect failed: ${failure?.message}", failure)
                             } else {
                                 Log.w(TAG, "stale player connect failed: ${failure?.message}")
@@ -258,6 +322,7 @@ internal class DebugPlayerConnection(private val context: Context) {
                     if (seq == connectSeq) {
                         connecting = false
                         nextRetryAt = SystemClock.elapsedRealtime() + RETRY_DELAY_MS
+                        lastFailure = DebugPlayerLink.REASON_NOT_CONNECTED
                     }
                 }
             }
@@ -265,93 +330,103 @@ internal class DebugPlayerConnection(private val context: Context) {
     }
 
     /**
-     * 只读快照:未建连 / 冷启动无效返回 null;主线程超时用缓存兜底(标记 stale)。
-     * 无效超过 3s 时丢弃 controller 并触发重建(不在本调用里等待)。
+     * 只读快照:controller 缺失/已断开返回 null(调用方 503,带 reason);
+     * 主线程超时/异常用缓存兜底(标记 stale)。
+     * **不再**因为快照内容或 age 判定 invalid,更不会在这里重建 controller。
      */
     fun snapshotForRead(): PlayerRead? {
-        val current = controllerOrNull() ?: return null
-        val read = try {
-            PlayerRead(callOnMain(MAIN_READ_TIMEOUT_MS) { readSnapshot(current) }, stale = false)
-        } catch (e: PlayerTimeout) {
-            Log.w(TAG, "player snapshot timed out; fallback to cache")
-            cache?.let { PlayerRead(it, stale = true) }
-        } catch (t: Throwable) {
-            Log.w(TAG, "player snapshot failed", t)
-            cache?.let { PlayerRead(it, stale = true) }
-        } ?: return null
-
-        if (!isValidSnapshot(read.snapshot)) {
-            val age = controllerAgeMs() ?: 0L
-            if (age >= COLD_START_GRACE_MS) {
-                Log.w(TAG, "snapshot invalid (age=${age}ms); rebuilding controller")
-                forceReconnect("invalid snapshot")
-            }
+        val current = controllerOrNull()
+        if (current == null) return null
+        if (!current.isConnected) {
+            handleDisconnected(current, "snapshot read")
             return null
         }
-        cache = read.snapshot
+        val read = try {
+            val snapshot = callOnMain(MAIN_READ_TIMEOUT_MS) { readSnapshot(current) }
+            if (controller === current) updateCache(snapshot)
+            PlayerRead(snapshot, stale = false)
+        } catch (e: PlayerTimeout) {
+            Log.w(TAG, "player snapshot timed out; fallback to cache")
+            val cached = cache
+            if (cached == null) {
+                lastFailure = DebugPlayerLink.REASON_SNAPSHOT_TIMEOUT
+                return null
+            }
+            PlayerRead(cached, stale = true)
+        } catch (t: Throwable) {
+            Log.w(TAG, "player snapshot failed", t)
+            val cached = cache
+            if (cached == null) {
+                lastFailure = DebugPlayerLink.REASON_SNAPSHOT_FAILED
+                return null
+            }
+            PlayerRead(cached, stale = true)
+        }
+        lastFailure = null
         return read
     }
 
     /**
-     * 执行一条主线程 Player 命令。controller 未就绪 / 冷启动无效 → PlayerUnavailable(503);
-     * 无效超过 3s 时先重建(最多 2s),仍无效则 503。
+     * 执行一条主线程 Player 命令。controller 缺失/已断开 → PlayerUnavailable(503,带 reason);
+     * 已连接即执行,不再因为“restore 还没灌队列/age 超过 3s”而重建或拒绝。
      */
     fun <T> command(timeoutMs: Long = MAIN_WRITE_TIMEOUT_MS, block: (MediaController) -> T): T {
-        val ready = readyController() ?: throw PlayerUnavailable()
+        val ready = readyController() ?: throw PlayerUnavailable(unavailableMessage(), unavailableReason())
         return try {
             callOnMain(timeoutMs) {
                 val result = block(ready)
-                cache = runCatching { readSnapshot(ready) }.getOrNull()
+                runCatching { readSnapshot(ready) }.getOrNull()?.let { snapshot ->
+                    if (controller === ready) updateCache(snapshot)
+                }
                 result
             }
         } catch (e: PlayerTimeout) {
-            throw PlayerUnavailable("player timeout")
+            throw PlayerUnavailable("player timeout", DebugPlayerLink.REASON_SNAPSHOT_TIMEOUT)
         }
     }
 
-    /**
-     * 有效性判定 + 必要时重建:
-     * - 有效 → 返回 controller;
-     * - 无效但 age < 3s → null(让调用方快速 503,等 restore);
-     * - 无效且 age >= 3s → 丢弃重建,最多等 2s,有效才返回。
-     */
+    /** 有 controller 且 isConnected 才算就绪;否则返回 null 让调用方快速 503(不阻塞、不重建)。 */
     private fun readyController(): MediaController? {
         val current = controllerOrNull() ?: return null
-        val snapshot = readSnapshotCached(current)
-        if (snapshot != null && isValidSnapshot(snapshot)) return current
-
-        val age = controllerAgeMs() ?: 0L
-        if (age < COLD_START_GRACE_MS) {
-            Log.d(
-                TAG,
-                "player controller restoring (age=${age}ms, queue=${snapshot?.queueSize}, state=${snapshot?.playbackState})",
-            )
+        if (!current.isConnected) {
+            handleDisconnected(current, "player command")
             return null
         }
+        return current
+    }
 
-        Log.w(
-            TAG,
-            "player controller invalid (age=${age}ms, queue=${snapshot?.queueSize}, " +
-                "state=${snapshot?.playbackState}, pos=${snapshot?.positionMs}); rebuilding",
-        )
-        forceReconnect("invalid player")
-        val deadline = SystemClock.elapsedRealtime() + RECONNECT_WAIT_MS
-        while (SystemClock.elapsedRealtime() < deadline) {
-            val candidate = controllerOrNull()
-            if (candidate != null) {
-                val candidateSnapshot = readSnapshotCached(candidate)
-                if (candidateSnapshot != null && isValidSnapshot(candidateSnapshot)) return candidate
+    /**
+     * 丢弃一个已断开的 controller 并安排重建。
+     * 只接受“当前 controller”的断连,避免 forceReconnect/release 的迟到回调误伤新链路。
+     */
+    private fun handleDisconnected(source: MediaController, reason: String) {
+        var current = false
+        synchronized(lock) {
+            if (controller === source) {
+                controller = null
+                controllerCreatedAt = 0L
+                connecting = false
+                future = null
+                nextRetryAt = SystemClock.elapsedRealtime() + RETRY_DELAY_MS
+                cache = null
+                cacheUpdatedAt = 0L
+                lastFailure = DebugPlayerLink.REASON_DISCONNECTED
+                current = true
             }
-            sleepQuietly(RECONNECT_POLL_MS)
         }
-        return null
+        if (!current) return
+        Log.w(TAG, "player controller disconnected ($reason); reconnect after ${RETRY_DELAY_MS}ms")
+        mainHandler.post {
+            runCatching { source.removeListener(listener) }
+            runCatching { source.release() }
+        }
     }
 
     /** 主线程读快照并把结果写入缓存;超时返回旧缓存。 */
     private fun readSnapshotCached(candidate: MediaController): PlayerSnapshot? {
         return try {
             val snapshot = callOnMain(MAIN_VALIDATE_TIMEOUT_MS) { readSnapshot(candidate) }
-            cache = snapshot
+            if (controller === candidate) updateCache(snapshot)
             snapshot
         } catch (t: Throwable) {
             Log.d(TAG, "player validate read failed: ${t.message}")
@@ -359,12 +434,29 @@ internal class DebugPlayerConnection(private val context: Context) {
         }
     }
 
+    /** 写入最近快照(Listener / 读路径 / 命令路径共用),并输出 collector 心跳日志。 */
+    private fun updateCache(snapshot: PlayerSnapshot) {
+        cache = snapshot
+        val now = SystemClock.elapsedRealtime()
+        cacheUpdatedAt = now
+        maybeLogPlayerState(snapshot, now)
+    }
+
     /**
-     * 冷启动无效态:queue=0 && state=idle && position=0。
-     * 任一非默认即视为有效(应用侧 restore 已灌入队列/开始播放/seek)。
+     * "player state updated songId=... pos=... at=..." 心跳:默认 500ms 节流,
+     * 切歌时立即输出,便于确认 collector 是否真的在更新。
      */
-    private fun isValidSnapshot(snapshot: PlayerSnapshot): Boolean =
-        !(snapshot.queueSize == 0 && snapshot.playbackState == "idle" && snapshot.positionMs == 0L)
+    private fun maybeLogPlayerState(snapshot: PlayerSnapshot, nowElapsed: Long) {
+        val songChanged = snapshot.songId != lastStateLogSongId
+        if (!songChanged && nowElapsed - lastStateLogAt < STATE_LOG_MIN_INTERVAL_MS) return
+        lastStateLogAt = nowElapsed
+        lastStateLogSongId = snapshot.songId
+        Log.i(
+            TAG,
+            "player state updated songId=${snapshot.songId} pos=${snapshot.positionMs} " +
+                "at=${System.currentTimeMillis()}",
+        )
+    }
 
     private fun <T> callOnMain(timeoutMs: Long, block: () -> T): T {
         if (Looper.myLooper() == Looper.getMainLooper()) return block()

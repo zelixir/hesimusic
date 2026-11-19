@@ -130,6 +130,19 @@ class RingBandReaderTest {
     }
 
     @Test
+    fun `seek never resets PTS and respects target lower bound`() {
+        val ring = LoopRing(sr, ch, 1_000L)
+        ring.append(pcm(1_000))
+        val reader = RingBandReader(ring)
+        reader.read(100)
+        val before = reader.read(100)!!.ptsUs
+        reader.seekToOffset(900L, targetUs = 2_000_000L)
+        val after = reader.read(50)!!
+        assertTrue("PTS must not reset: before=$before after=${after.ptsUs}", after.ptsUs >= before)
+        assertTrue("PTS must respect seek target", after.ptsUs >= 2_000_000L)
+    }
+
+    @Test
     fun `seek only changes offset`() {
         val ring = LoopRing(sr, ch, frames)
         ring.append(pcm(1_000))

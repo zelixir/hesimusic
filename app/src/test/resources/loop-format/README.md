@@ -1,6 +1,7 @@
 # 格式矩阵样本(loop-format)
 
-5 个**短小真实编码**样本,JVM 单测与真机脚本共用。全部由同一段确定性合成信号编码而来,
+5 个**短小真实编码**样本,JVM 单测与真机脚本共用。demo 变体没有存储权限,脚本会把它们推到
+`/sdcard/Android/data/com.zjr.hesimusic.demo/files/formats/`(应用专属目录,无需运行时权限)。全部由同一段确定性合成信号编码而来,
 因此可以跨容器对比"取 [A,B) 的边界行为",同时体积都在 200KB 以内(<3.2s / 4.0s)。
 
 | 文件 | 容器/编码 | 采样率 | 声道 | 容器总样本 | 编码器前导 | 用户时长 | 大小 |
@@ -49,5 +50,9 @@ f71c9cad26c36f627b6a47892cdeeeb322b22b01887b3f6619665fb143398e17  css-48000-m4a-
 1. **JVM(本仓库单测,无设备)**:`RingBandFormatMatrixTest` —— 只验证容器事实与 [A,B) 帧号算术;
    不伪造 PCM,因为 `PcmDecoder` 依赖真实 `MediaCodec`。
 2. **真机(唯一能给出逐字节/对齐偏差的通道)**:`tools/format-matrix.ps1` ——
-   推送这些文件到 `/sdcard/Music/demo/`,调 `POST /debug/decode-range`,
-   对同一区间解两次比较 SHA-256(确定性),并比较宽窗口裁剪后的帧数与 PCM 尾部。
+   推送这些文件到 demo 包的**应用专属外部目录**
+   `/sdcard/Android/data/com.zjr.hesimusic.demo/files/formats/`(demo 没有存储权限),
+   调 `POST /debug/decode-range`(带 `tailFrames`):
+   - 同一区间解两次比较 SHA-256(解码确定性);
+   - 宽窗口 `[A-1s,B]` 裁剪后帧数必须等于直接 `[A,B)`;
+   - 两端 `tailPcmBase64` 逐样本做 ±32 帧 lag 搜索,输出真实尾部偏差(帧)。

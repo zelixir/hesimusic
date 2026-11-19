@@ -381,7 +381,10 @@ class LoopingPcmMediaPeriod(
                     // 普通任务一次最多补 3 块（当前 + 2 预取）。
                     // 不再按 generation 中断：generation 只在 seek/窗口变化时变化，
                     // 不会因为 continueLoading 把正在解的目标块顶掉。
-                    val limit = if (firstBlock) 4 else 8
+                    // prepare 窗口 = 当前块 + prefetchBlocks；够这一窗就立即 onPrepared。
+                    // 不能多解一块：继续预取可能被 provider 门闩/慢 I/O 挡住，导致首块已 READY
+                    // 却永远不发 onPrepared（Robolectric 的 gatedProvider 正是这个时序）。
+                    val limit = if (firstBlock) minOf(prefetchBlocks + 1, 4) else 8
                     for (i in 0 until limit) {
                         if (isReleased()) break
                         val pumped = core.pumpDecode()

@@ -4,14 +4,16 @@
 
 .DESCRIPTION
   唯一能给出"真实 PCM 逐字节/对齐偏差"的通道。流程:
-    1. 把 app/src/test/resources/loop-format/*. 推到 /sdcard/Music/demo/;
+    1. 把 app/src/test/resources/loop-format/*. 推到 demo 包的**应用专属外部目录**
+       /sdcard/Android/data/com.zjr.hesimusic.demo/files/formats/
+       (demo 变体没有存储权限,不能读 /sdcard/Music;应用专属目录不需要运行时权限);
     2. 同一区间 [A,B) 调两次 POST /debug/decode-range,比较 SHA-256 => 解码确定性;
     3. 解 [A-1s, B],裁剪掉前导帧后与直接 [A,B) 比较帧数 => 宽窗口裁剪偏差;
     4. 短窗 [0,1s)、贴尾窗 [duration-50ms, duration) => 不抛异常且帧数正确;
-    5. 若端点将来返回 PCM(tailPcmBase64 或 pcmBase64),自动做逐样本 lag 比对;
-       当前端点只回 SHA-256,因此 PCM 尾部对齐记为 UNMEASURED(不伪造 0)。
+    5. 请求 tailFrames,端点返回 tailPcmBase64(尾部 PCM16);对直接/宽窗口的尾部逐样本
+       做 +/-32 帧 lag 搜索 => 量出真实"样本对齐偏差(帧)";端点没返回该字段时明确标 UNMEASURED。
 
-  前置:debug 构建已启动 LoopDebugServer(127.0.0.1:8765),并 adb forward tcp:18765 tcp:8765。
+  前置:demo debug 构建已启动 LoopDebugServer(127.0.0.1:8765),并 adb forward tcp:18765 tcp:8765。
   脚本自己会建 forward;不会安装 APK、不会清数据。
 
 .EXAMPLE
@@ -20,7 +22,11 @@
 #>
 param(
     [string]$Base = "http://127.0.0.1:18765",
-    [string]$DeviceDir = "/sdcard/Music/demo",
+    # demo 变体(applicationIdSuffix=.demo)没有存储权限:必须放应用专属外部目录,
+    # 该目录属于 com.zjr.hesimusic.demo,app 自己可读,不需要 MANAGE_EXTERNAL_STORAGE。
+    [string]$DeviceDir = "/sdcard/Android/data/com.zjr.hesimusic.demo/files/formats",
+    # tailFrames>0 时请求 tailPcmBase64,用于真实 PCM 尾部偏差(帧);0 = 关闭该比对。
+    [int]$TailFrames = 8192,
     [int]$AStartMs = 500,
     [int]$WindowMs = 1500,
     [int]$WideLeadMs = 1000,
@@ -31,9 +37,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# 兼容 powershell -File 的两种写法:-Only "*flac*","*m4a*"(数组)或 -Only "*flac*,*m4a*"(单串)。
+$Only = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().Trim('"').Trim("'") } | Where-Object { $_ -ne "" })
 $SampleDir = Join-Path $PSScriptRoot "..\app\src\test\resources\loop-format"
 $LocalPort = 18765
 $RemotePort = 8765
+$script:TailFrames = $TailFrames
 
 # 期望值来自容器头(与 app/src/test/.../AudioContainerProbe.kt 一致)。
 # DurationMs 是"用户时长"(已扣除编码器前导),用于选择窗口与贴尾位置。
@@ -97,7 +106,7 @@ function Invoke-Api {
 
 function Decode-Range {
     param([string]$Path, [long]$AMs, [long]$BMs)
-    $r = Invoke-Api POST "/debug/decode-range" @{ path = $Path; aMs = $AMs; bMs = $BMs }
+    $r = Invoke-Api POST "/debug/decode-range" @{ path = $Path; aMs = $AMs; bMs = $BMs; tailFrames = $script:TailFrames }
     foreach ($field in @("frames", "bytes", "sha256", "sampleRate", "channels")) {
         if ($null -eq $r.$field) { throw ("decode-range response missing '" + $field + "'") }
     }
@@ -230,7 +239,11 @@ foreach ($s in $selected) {
     $a = [long]$AStartMs
     $b = [long][Math]::Min([long]($AStartMs + $WindowMs), [long]($s.DurationMs - 100))
     if ($b -le $a) { $b = [long]$s.DurationMs - 50 }
-    $pcmText = "UNMEASURED(endpoint has no pcm/tailPcm base64)"
+    $pcmText = if ($TailFrames -le 0) {
+        "DISABLED(tailFrames=0)"
+    } else {
+        "UNMEASURED(endpoint returned no tailPcmBase64)"
+    }
     $detText = "n/a"
     $frameText = "n/a"
     $trimText = "n/a"
@@ -288,7 +301,7 @@ foreach ($s in $selected) {
                 $pcmText = ([string]$m.Lag + " frames match=" + [string][Math]::Round($m.Score, 4))
                 Add-Check ($m.Lag -eq 0 -and $m.Score -ge 0.999) ("PCM tail deviation " + $pcmText + " (expected 0 frames)")
             }
-        } else {
+        } elseif ($TailFrames -gt 0) {
             $warnCount++
         }
     } catch {
@@ -316,9 +329,9 @@ Write-Host ""
 Write-Host "说明:"
 Write-Host "  - det=sha-equal 证明同一区间两次解码逐字节相同(解码确定性);"
 Write-Host "  - frames/det 与 wideTrim 是帧号口径的精确性(trimDelta 必须为 0);"
-Write-Host "  - pcmTail=UNMEASURED 表示端点当前只返回 sha256、没有 PCM 字节;"
-Write-Host "    若要让脚本自动量化'尾部样本偏差(帧)',需 /debug/decode-range 额外返回"
-Write-Host "    tailPcmBase64(或 pcmBase64):脚本已内置 lag 比对与 0 帧断言。"
+Write-Host "  - pcmTail=N frames 是直接窗口与宽窗口尾部的逐样本 lag(0 = 完全对齐);"
+Write-Host "    端点需支持 tailFrames -> tailPcmBase64;若显示 UNMEASURED,说明该构建/端点没返回 PCM。"
+Write-Host ("  - 样本目录(设备): " + $DeviceDir + "  tailFrames=" + $TailFrames)
 if ($skipCount -gt 0) { Write-Host ("  注意: " + $skipCount + " 个样本缺失,已跳过(不判 PASS/FAIL)") }
 
 if ($failCount -gt 0) { exit 1 }

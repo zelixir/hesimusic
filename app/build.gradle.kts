@@ -1,3 +1,6 @@
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -8,6 +11,10 @@ plugins {
 
 val releaseVersionCode = providers.gradleProperty("releaseVersionCode").orNull?.toIntOrNull() ?: 1
 val releaseVersionName = providers.gradleProperty("releaseVersionName").orNull ?: "0.1"
+// 构建时间(配置期采样,关于页展示):本地时区 "yyyy-MM-dd HH:mm:ss"。
+// 仅用于「这个包是什么时候构建的」这一诊断口径,不参与任何产物判定。
+val buildTime = LocalDateTime.now()
+    .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
 // 开发/测试构建独立包名:-PdevPackage=.dev → applicationId 追加后缀、应用名加 Dev 后缀,
 // 与日常安装隔离(不影响 release 包名与名称)
 val devPackageSuffix = providers.gradleProperty("devPackage").orNull
@@ -43,6 +50,9 @@ android {
         targetSdk = 36
         versionCode = releaseVersionCode
         versionName = releaseVersionName
+        // 关于页「构建时间」;版本名/版本码直接用 AGP 生成的 VERSION_NAME / VERSION_CODE,
+        // 渠道用 FLAVOR(prod/demo)。
+        buildConfigField("String", "BUILD_TIME", "\"$buildTime\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         
@@ -115,6 +125,8 @@ android {
     }
     buildFeatures {
         compose = true
+        // 关于页读取 VERSION_NAME / VERSION_CODE / FLAVOR / BUILD_TIME。
+        buildConfig = true
     }
     // JVM 上的真实 ExoPlayer 集成测试(Robolectric)需要 Android 资源:
     // 测试只读取 src/test/resources 里的 WAV/元数据,不启动解码器,也不触碰设备。

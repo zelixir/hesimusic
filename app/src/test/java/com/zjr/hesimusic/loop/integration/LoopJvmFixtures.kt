@@ -187,9 +187,17 @@ class WavRingBandStreamDecoder(
     override fun close() = Unit
 }
 
-/** 记录真实 ExoPlayer 写入 AudioSink 的帧/PTS/字节；不创建 AudioTrack。 */
+/**
+ * 记录真实 ExoPlayer 写入 AudioSink 的帧/PTS/字节；不创建 AudioTrack。
+ *
+ * 带背压：最多缓存 [maxBufferedFrames] 帧，测试用 [advanceBy] 模拟声卡按虚拟时间消费。
+ * 没有背压时 ExoPlayer 会在一次 idle 里无限加载/渲染（sink 永远收得下），既拖慢又吃内存。
+ */
 @UnstableApi
-class RecordingAudioSink : AudioSink {
+class RecordingAudioSink(
+    private val sampleRate: Int = 8_000,
+    private val maxBufferedFrames: Int = 8_000,
+) : AudioSink {
 
     data class Feed(
         val frames: Int,
@@ -215,6 +223,42 @@ class RecordingAudioSink : AudioSink {
     @Volatile
     private var ended = false
 
+    private class Pending(val ptsUs: Long, var remaining: Long, var consumed: Long = 0L)
+
+    private val pendingSegments = java.util.ArrayDeque<Pending>()
+    private var pendingFrames: Long = 0L
+
+    private var feedPtsUs: Long = 0L
+    private var feedFrames: Int = 0
+    private val feedChunks = ArrayList<ByteArray>()
+
+    /** 只保留前 400k 帧的逐样本内容（约 25s），防止异常播放把测试堆打满。 */
+    private var recordedFrames = 0L
+    private var acceptedFrames = 0L
+
+    /** 当前"声卡"播放位置（µs），由 [advanceBy] 推进。 */
+    @Volatile
+    private var positionUs: Long = 0L
+
+    /** 模拟声卡消费 [ms] 毫秒的音频（只能在测试线程调用）。 */
+    fun advanceBy(ms: Long) {
+        synchronized(lock) {
+            if (pendingFrames <= 0L) return
+            var left = minOf(pendingFrames, ms * sampleRate / 1_000L)
+            if (left <= 0L) return
+            pendingFrames -= left
+            while (left > 0L && pendingSegments.isNotEmpty()) {
+                val head = pendingSegments.peekFirst()!!
+                val take = minOf(head.remaining, left)
+                head.remaining -= take
+                head.consumed += take
+                left -= take
+                positionUs = head.ptsUs + head.consumed * 1_000_000L / sampleRate
+                if (head.remaining == 0L) pendingSegments.removeFirst()
+            }
+        }
+    }
+
     @Volatile
     private var playbackParameters: PlaybackParameters = PlaybackParameters.DEFAULT
 
@@ -229,7 +273,7 @@ class RecordingAudioSink : AudioSink {
 
     fun feedCount(): Int = synchronized(lock) { feedsInternal.size }
 
-    fun totalFrames(): Long = synchronized(lock) { feedsInternal.sumOf { it.frames.toLong() } }
+    fun totalFrames(): Long = synchronized(lock) { acceptedFrames }
 
     override fun setListener(listener: AudioSink.Listener) = Unit
 
@@ -237,7 +281,7 @@ class RecordingAudioSink : AudioSink {
 
     override fun getFormatSupport(format: Format): Int = AudioSink.SINK_FORMAT_SUPPORTED_DIRECTLY
 
-    override fun getCurrentPositionUs(forceDiscontinuityPosition: Boolean): Long = 0L
+    override fun getCurrentPositionUs(forceDiscontinuityPosition: Boolean): Long = positionUs
 
     override fun configure(format: Format, bufferSize: Int, audioTrackChannelConfig: IntArray?) {
         configureCalls.incrementAndGet()
@@ -268,18 +312,45 @@ class RecordingAudioSink : AudioSink {
     ): Boolean {
         val availableFrames = buffer.remaining() / bytesPerFrame
         if (availableFrames <= 0) return true
-        val start = buffer.position()
-        val length = availableFrames * bytesPerFrame
-        val data = ByteArray(length)
-        val dup = buffer.duplicate()
-        dup.position(start)
-        dup.limit(start + length)
-        dup.get(data)
-        buffer.position(start + length)
         synchronized(lock) {
-            feedsInternal.add(Feed(availableFrames, presentationTimeUs, data, buffer.order()))
+            val space = maxBufferedFrames - pendingFrames
+            if (space <= 0L) return false
+            val frames = minOf(availableFrames.toLong(), space).toInt()
+            val start = buffer.position()
+            val length = frames * bytesPerFrame
+            val data = ByteArray(length)
+            val dup = buffer.duplicate()
+            dup.position(start)
+            dup.limit(start + length)
+            dup.get(data)
+            buffer.position(start + length)
+
+            if (feedFrames == 0) feedPtsUs = presentationTimeUs
+            feedFrames += frames
+            feedChunks.add(data)
+            pendingSegments.addLast(Pending(presentationTimeUs, frames.toLong()))
+            pendingFrames += frames.toLong()
+
+            val fullyConsumed = buffer.position() >= buffer.limit()
+            if (fullyConsumed) {
+                // 一个逻辑 buffer 可能因背压被拆成多次 handleBuffer；只在完整消费后记一条 Feed，
+                // 这样 PTS 是样本起点，后续断言"PTS 增量 == 帧时长"才有意义。
+                val merged = ByteArray(feedFrames * bytesPerFrame)
+                var offset = 0
+                for (chunk in feedChunks) {
+                    System.arraycopy(chunk, 0, merged, offset, chunk.size)
+                    offset += chunk.size
+                }
+                acceptedFrames += feedFrames
+                if (recordedFrames < MAX_RECORDED_FRAMES) {
+                    feedsInternal.add(Feed(feedFrames, feedPtsUs, merged, buffer.order()))
+                    recordedFrames += feedFrames
+                }
+                feedChunks.clear()
+                feedFrames = 0
+            }
+            return fullyConsumed
         }
-        return buffer.position() >= buffer.limit()
     }
 
     override fun playToEndOfStream() {
@@ -289,7 +360,7 @@ class RecordingAudioSink : AudioSink {
 
     override fun isEnded(): Boolean = ended
 
-    override fun hasPendingData(): Boolean = false
+    override fun hasPendingData(): Boolean = synchronized(lock) { pendingFrames > 0L }
 
     override fun setPlaybackParameters(playbackParameters: PlaybackParameters) {
         this.playbackParameters = playbackParameters
@@ -326,15 +397,33 @@ class RecordingAudioSink : AudioSink {
     override fun flush() {
         flushCalls.incrementAndGet()
         ended = false
+        synchronized(lock) {
+            pendingSegments.clear()
+            pendingFrames = 0L
+            feedChunks.clear()
+            feedFrames = 0
+            positionUs = 0L
+        }
     }
 
     override fun reset() {
         resetCalls.incrementAndGet()
         ended = false
+        synchronized(lock) {
+            pendingSegments.clear()
+            pendingFrames = 0L
+            feedChunks.clear()
+            feedFrames = 0
+            positionUs = 0L
+        }
     }
 
     override fun release() {
         releaseCalls.incrementAndGet()
+    }
+
+    private companion object {
+        const val MAX_RECORDED_FRAMES: Long = 400_000L
     }
 }
 
@@ -574,6 +663,27 @@ object RingBandTestSource {
         ).createMediaSource(item)
 }
 
+/** 同步队列 dispatcher：MediaPeriod 级测试里手动 drain，不依赖 Android Handler。 */
+@UnstableApi
+class QueueDispatcher : com.zjr.hesimusic.loop.audio.source.CallbackDispatcher {
+    private val queue = java.util.ArrayDeque<Runnable>()
+
+    override fun post(runnable: Runnable) {
+        synchronized(queue) { queue.addLast(runnable) }
+    }
+
+    override fun postDelayed(runnable: Runnable, delayMs: Long) = Unit
+
+    override fun remove(runnable: Runnable) = Unit
+
+    fun drain() {
+        while (true) {
+            val next = synchronized(queue) { queue.pollFirst() } ?: return
+            next.run()
+        }
+    }
+}
+
 /** 测试时间轴工具：真实 ExoPlayer + FakeClock 的最小泵。 */
 @UnstableApi
 object PlayerPump {
@@ -586,15 +696,21 @@ object PlayerPump {
             .setRenderersFactory(FakeSinkRenderersFactory(context(), sink))
             .build()
 
-    /** 推进虚拟时间 + 让 Robolectric 主 Looper 跑 ExoPlayer 的消息。 */
-    fun tick(clock: FakeClock, stepMs: Long = 20L) {
+    /**
+     * 推进虚拟时间 + 让 Robolectric 主 Looper 跑 ExoPlayer 的消息 + 让假声卡消费 [stepMs] 音频。
+     *
+     * 消费必须发生在两次 idle 之间：先渲染（被背压挡住），再消费，再让播放器继续渲染。
+     */
+    fun tick(clock: FakeClock, sink: RecordingAudioSink? = null, stepMs: Long = 20L) {
         ShadowLooper.idleMainLooper()
+        sink?.advanceBy(stepMs)
         clock.advanceTime(stepMs)
         ShadowLooper.idleMainLooper()
     }
 
     fun pumpUntil(
         clock: FakeClock,
+        sink: RecordingAudioSink? = null,
         timeoutMs: Long = 4_000L,
         stepMs: Long = 20L,
         sleepMs: Long = 1L,
@@ -602,18 +718,18 @@ object PlayerPump {
     ): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (!condition() && System.currentTimeMillis() < deadline) {
-            tick(clock, stepMs)
+            tick(clock, sink, stepMs)
             if (sleepMs > 0L) Thread.sleep(sleepMs)
         }
-        tick(clock, stepMs)
+        tick(clock, sink, stepMs)
         return condition()
     }
 
     /** 真实时间窗内持续泵（用于观察 loader 是否空转）。 */
-    fun pumpFor(clock: FakeClock, durationMs: Long, stepMs: Long = 10L) {
+    fun pumpFor(clock: FakeClock, sink: RecordingAudioSink? = null, durationMs: Long, stepMs: Long = 10L) {
         val deadline = System.currentTimeMillis() + durationMs
         while (System.currentTimeMillis() < deadline) {
-            tick(clock, stepMs)
+            tick(clock, sink, stepMs)
             Thread.sleep(1L)
         }
     }

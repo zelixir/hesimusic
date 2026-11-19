@@ -3,10 +3,12 @@ package com.zjr.hesimusic.service
 import android.util.Log
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import com.zjr.hesimusic.data.dao.SongLoopDao
 import com.zjr.hesimusic.data.mapper.mediaIdToSongId
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
 import com.zjr.hesimusic.data.model.Song
+import com.zjr.hesimusic.data.model.SongLoop
 import com.zjr.hesimusic.data.repository.SongRepository
 import com.zjr.hesimusic.loop.LoopEligibility
 import com.zjr.hesimusic.loop.LoopIntent
@@ -15,6 +17,7 @@ import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.analysis.PcmDecoder
 import com.zjr.hesimusic.loop.audio.LoopAudioController
+import com.zjr.hesimusic.loop.audio.source.LoopEngineInfo
 import com.zjr.hesimusic.loop.audio.source.LoopSourceItemTag
 import com.zjr.hesimusic.loop.audio.source.LoopSourceProjection
 import com.zjr.hesimusic.loop.audio.source.PcmFileFormatProbe
@@ -22,6 +25,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -71,6 +75,13 @@ class LoopPlaybackCoordinator @Inject constructor(
 
     private val mainDispatcher = Dispatchers.Main.immediate
     private val scope = CoroutineScope(SupervisorJob() + mainDispatcher)
+
+    /**
+     * 事件回调用的**非 immediate** 主线程调度器：
+     * `scope` 是 Main.immediate，从主线程 launch 会就地执行；若此刻 refresh 正持有
+     * [refreshMutex]，就地重入会把互斥量锁死。事件/补算一律排队到主线程队列。
+     */
+    private val eventDispatcher = Dispatchers.Main
     private val refreshMutex = Mutex()
 
     /** 当前已应用到播放器/音频层的窗口；值相等即视为形态未变。 */
@@ -83,6 +94,9 @@ class LoopPlaybackCoordinator @Inject constructor(
     private var observeJob: Job? = null
     private var observedSongId: Long? = null
 
+    /** 「意图已武装、但当前 item/窗口还没就绪」时的兜底补算任务（2s 内 10 次，幂等）。 */
+    private var intentSettleJob: Job? = null
+
     @Volatile
     private var playerRef: Player? = null
 
@@ -90,20 +104,37 @@ class LoopPlaybackCoordinator @Inject constructor(
     private var listenedPlayer: Player? = null
 
     /**
-     * 用户改 shuffle 的事件源：MusicService 只转发了 repeat/transition，shuffle 变化必须由
-     * 本层自己监听，否则「用户把随机播放打开」不会退出无缝意图，显示与实际又会错位。
+     * 本层自己监听播放器事件（不依赖 MusicService 的转发顺序）：
      *
-     * 只在有武装意图时触发重算（无意图时 shuffle 与无缝无关，省一次 DB 查询）；
-     * 进入/退出时我们自己写 shuffle 引发的回调由持久化偏好判据过滤（见 LoopIntentDecision）。
+     * - **shuffle**：MusicService 没有转发该事件；不监听的话「用户打开随机」不会退出无缝意图，
+     *   显示与实际错位。只在有武装意图时重算。
+     * - **transition / timeline / state**：`/loop/enter` 是「先 arm 意图、再 setMediaItems」，
+     *   冷启动 restore 也是异步灌队列 —— intent 那一次事件里 `currentMediaItem` 还是 null，
+     *   于是 songId=null → window=null，之后再没有任何事件 → 永远不进循环（真机 40169 复现）。
+     *   这里在「窗口还没落到当前 item 上」时补一次重算（幂等：落到之后这些事件不再触发）。
      */
-    private val shuffleListener = object : Player.Listener {
+    private val playerListener = object : Player.Listener {
+
         override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
             if (loopIntent.armed.value == null) return
             val player = playerRef ?: return
             Log.d(TAG, "refresh reason=shuffle enabled=" + shuffleModeEnabled)
-            scope.launch {
+            scope.launch(eventDispatcher) {
                 refresh(currentSongId(player), player.repeatMode, player, REASON_SHUFFLE)
             }
+        }
+
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            requestIntentRefresh(REASON_PLAYER_TRANSITION)
+        }
+
+        override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+            requestIntentRefresh(REASON_PLAYER_TIMELINE)
+        }
+
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            if (playbackState == Player.STATE_IDLE) return
+            requestIntentRefresh(REASON_PLAYER_STATE)
         }
     }
 
@@ -207,12 +238,13 @@ class LoopPlaybackCoordinator @Inject constructor(
      * @param reason 仅用于日志 + 区分事件类型：transition / repeat / shuffle / row / intent / restore
      */
     suspend fun refresh(songId: Long?, repeatMode: Int, player: Player, reason: String) {
+        val startedAtMs = System.currentTimeMillis()
         refreshMutex.withLock {
             playerRef = player
             // 0) 显式意图：进入时在唯一写点同时应用 repeat=ONE + shuffle=false；退出时恢复 prev。
             //    shuffle 只有本层监听（MusicService 未转发），这里顺带确保监听已注册。
             val shuffleEnabled = withContext(mainDispatcher) {
-                ensureShuffleListener(player)
+                ensurePlayerListener(player)
                 player.shuffleModeEnabled
             }
             val mode = applyIntentMode(songId, repeatMode, shuffleEnabled, player, reason)
@@ -225,6 +257,22 @@ class LoopPlaybackCoordinator @Inject constructor(
             audio.fullDurationUs = if (willBeEligible) songDurationUs(songId) else 0L
             runtime.refresh(songId, mode.repeatMode, row, armedSongId) // 1) 纯函数重算（唯一窗口来源）
             val window = runtime.window.value
+            // 真机排障口径：一次事件的实际输入与输出（songId/armed/repeat/行 A/B/窗口/播放态）。
+            Log.i(
+                TAG_PERF,
+                "refresh reason=" + reason +
+                    " route=" + MainPlayerRouting.current.useSourceForMainPlayer +
+                    " replacesItem=" + MainPlayerRouting.current.coordinatorReplacesItem +
+                    " songId=" + songId + " armed=" + armedSongId +
+                    " repeat=" + mode.repeatMode + " row=" + rowDesc(row) +
+                    " window=" + window +
+                    " state=" + player.playbackState + " pwr=" + player.playWhenReady,
+            )
+            // 意图已武装但窗口还没算出来：常见于「先 arm 再 setMediaItems」的进入顺序
+            // （此时 currentMediaItem 还是 null），等 item 出现后再补算，避免永远 window=null。
+            if (window == null && armedSongId != null) {
+                scheduleIntentSettle(player, reason)
+            }
             // SOURCE 路线才需要文件路径；M3′ 路线保持原样（多查一次 DB 没有意义）。
             val sourceSong = if (MainPlayerRouting.current.coordinatorReplacesItem && window != null) {
                 songRepository.getSongsByIds(listOf(window.songId)).firstOrNull()
@@ -235,6 +283,11 @@ class LoopPlaybackCoordinator @Inject constructor(
                 syncShape(window, player, sourceSong, reason)
             }
             ensureObservation(songId, player)                      // 3) 行变更订阅
+            val costMs = System.currentTimeMillis() - startedAtMs
+            if (costMs >= SLOW_REFRESH_WARN_MS) {
+                // 真机排障：refresh 卡住会把主线程/事件链一起拖死（/state 只能读到旧缓存）。
+                Log.w(TAG_PERF, "refresh slow reason=" + reason + " cost=" + costMs + "ms songId=" + songId)
+            }
         }
     }
 
@@ -359,21 +412,100 @@ class LoopPlaybackCoordinator @Inject constructor(
         }
     }
 
-    /** 注册 shuffle 监听（Player 只在主线程 add/remove；同一实例只注册一次）。 */
-    private fun ensureShuffleListener(player: Player) {
+    /** 注册播放器监听（Player 只在主线程 add/remove；同一实例只注册一次）。 */
+    private fun ensurePlayerListener(player: Player) {
         if (listenedPlayer === player) return
-        listenedPlayer?.removeListener(shuffleListener)
-        player.addListener(shuffleListener)
+        listenedPlayer?.removeListener(playerListener)
+        player.addListener(playerListener)
         listenedPlayer = player
     }
+
+    /** 事件驱动的补算：只在「意图已武装 + 窗口还没落到当前 item」时触发（幂等）。 */
+    private fun requestIntentRefresh(reason: String) {
+        if (loopIntent.armed.value == null) return
+        val player = playerRef ?: return
+        if (windowAppliedForCurrentItem(player)) return
+        scope.launch(eventDispatcher) {
+            try {
+                refresh(currentSongId(player), player.repeatMode, player, reason)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG_PERF, "intent refresh failed reason=" + reason, e)
+            }
+        }
+    }
+
+    /** 当前 item 是否已经拿到属于它的窗口（M3′ 看音频层窗口；SOURCE 看 item tag 与窗口一致）。 */
+    private fun windowAppliedForCurrentItem(player: Player): Boolean {
+        val window = runtime.window.value ?: return false
+        val songId = currentSongId(player) ?: return false
+        if (window.songId != songId) return false
+        if (!MainPlayerRouting.current.coordinatorReplacesItem) {
+            return audio.window == window
+        }
+        val tag = player.currentMediaItem?.localConfiguration?.tag
+        return tag is LoopSourceItemTag &&
+            tag.songId == window.songId &&
+            tag.loopStartUs == window.loopStartUs &&
+            tag.loopEndUs == window.loopEndUs
+    }
+
+    /**
+     * 意图已武装、窗口却还是 null 时的兜底补算。
+     *
+     * 真机 40169 复现：`/loop/enter` 先 arm 意图、再 `setMediaItems`，intent 那一次 refresh
+     * 里 `currentMediaItem` 还是 null（songId=null → 资格不成立 → window=null），而队列/索引
+     * 与当前完全相同，`setMediaItems` 不会触发 transition，于是再没有任何事件。
+     * 这里在 2s 内每 200ms 试一次：当前歌出现/行就绪就把窗口算出来并落到 item 上，
+     * 一旦落到（[windowAppliedForCurrentItem]）立即停。
+     */
+    private fun scheduleIntentSettle(player: Player, reason: String) {
+        // 补算循环内部会再进 refresh(→ 这里)：正在跑就不要 cancel 自己，否则只试一次。
+        if (intentSettleJob?.isActive == true) return
+        intentSettleJob = scope.launch(eventDispatcher) {
+            repeat(INTENT_SETTLE_ATTEMPTS) {
+                delay(INTENT_SETTLE_INTERVAL_MS)
+                if (playerRef !== player) return@launch
+                if (loopIntent.armed.value == null) return@launch
+                if (windowAppliedForCurrentItem(player)) return@launch
+                val songId = currentSongId(player)
+                if (songId == null) return@repeat
+                Log.i(
+                    TAG_PERF,
+                    "intent settle reason=" + reason + " try=" + (it + 1) + " songId=" + songId +
+                        " state=" + player.playbackState + " pwr=" + player.playWhenReady,
+                )
+                try {
+                    refresh(songId, player.repeatMode, player, REASON_INTENT_SETTLE)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG_PERF, "intent settle failed try=" + (it + 1), e)
+                }
+                if (windowAppliedForCurrentItem(player)) return@launch
+            }
+            Log.w(TAG_PERF, "intent settle gave up reason=" + reason + " window=" + runtime.window.value)
+        }
+    }
+
+    /** 行诊断：A/B(ms) 与 confirmed，只用于日志。 */
+    private fun rowDesc(row: SongLoop?): String =
+        if (row == null) {
+            "none"
+        } else {
+            "A" + row.loopStartMs + "ms/B" + row.loopEndMs + "ms confirmed=" + row.confirmed
+        }
 
     /** service 销毁时停止行订阅/监听并清空窗口（不取消 [scope]，服务可能被重建）。 */
     fun release() {
         observeJob?.cancel()
         observeJob = null
         observedSongId = null
+        intentSettleJob?.cancel()
+        intentSettleJob = null
         playerRef = null
-        listenedPlayer?.removeListener(shuffleListener)
+        listenedPlayer?.removeListener(playerListener)
         listenedPlayer = null
         appliedWindow = null
         ringPrefiller.cancel()
@@ -385,6 +517,7 @@ class LoopPlaybackCoordinator @Inject constructor(
         sourceOriginalItem = null
         sourceOriginalIndex = -1
         LoopSourceFallback.reset()
+        LoopSourceRuntime.reset()
         runtime.clear()
     }
 
@@ -424,6 +557,13 @@ class LoopPlaybackCoordinator @Inject constructor(
         // SOURCE（③ 接线点）：只替换当前 item 为带 tag 的循环数据源，队列/首页/通知栏不变。
         // 数据源自己负责循环/PTS/seek，所以这条分支**不再**写 M3′ 的 window/ring
         // （否则 LoopAudioSink 会二次拦截 PCM）；旧的「已换路就跳过」死代码一并删除。
+        Log.i(
+            TAG_PERF,
+            "syncShape route=" + MainPlayerRouting.current.useSourceForMainPlayer +
+                " replacesItem=" + MainPlayerRouting.current.coordinatorReplacesItem +
+                " window=" + window + " reason=" + reason +
+                " songId=" + sourceSong?.id,
+        )
         if (MainPlayerRouting.current.coordinatorReplacesItem) {
             syncSourceItem(window, player, sourceSong, reason)
             return
@@ -496,15 +636,31 @@ class LoopPlaybackCoordinator @Inject constructor(
         reason: String,
     ) {
         val index = player.currentMediaItemIndex
-        if (index < 0) return
+        if (index < 0) {
+            Log.w(TAG_PERF, "syncSourceItem skip=noIndex route=" +
+                MainPlayerRouting.current.useSourceForMainPlayer + " window=" + window)
+            return
+        }
         val current = player.currentMediaItem ?: return
         val tag = current.localConfiguration?.tag
+        Log.i(
+            TAG_PERF,
+            "syncSourceItem index=" + index + " tag=" + tag +
+                " route=" + MainPlayerRouting.current.useSourceForMainPlayer +
+                " replacesItem=" + MainPlayerRouting.current.coordinatorReplacesItem +
+                " window=" + window + " reason=" + reason,
+        )
         val w = window
         val unavailable = LoopSourceFallback.isUnavailable(w?.songId, w)
         // 0) 没有窗口 / 该窗口已登记 SOURCE 不可用 → 退出循环（只恢复当前项）。
         if (w == null || !MainPlayerRouting.coordinatorReplacesItem(w, unavailable)) {
             audio.tapWindow = null
-            if (tag is LoopSourceItemTag) restoreSourceItem(player, index, tag, reason)
+            if (tag is LoopSourceItemTag) {
+                restoreSourceItem(player, index, tag, reason)
+            } else {
+                // 当前项已不是 source item（例如队列被外部重设）：确保接管状态不残留。
+                LoopSourceRuntime.onReleased()
+            }
             return
         }
         // 1) 已经是同窗口的循环 item：幂等（无缝播放期间零媒体操作）。
@@ -540,6 +696,9 @@ class LoopPlaybackCoordinator @Inject constructor(
             }
             is LoopSourceFallback.Decision.UseSource -> d.ringBytes
         }
+        // 新窗口预检通过：清掉该歌旧的失败登记，避免 About/日志停在旧 FALLBACK_REASON。
+        LoopSourceFallback.clear(w.songId)
+        LoopEngineInfo.recordBandBytes(ringBytes)
         val path = filePath
         if (path.isNullOrBlank()) return
         // A/B 变更时 item 可能已经是上一个窗口的 source item：此时 player 位置是**数据源时间轴 T**，
@@ -567,15 +726,35 @@ class LoopPlaybackCoordinator @Inject constructor(
             sourceOriginalItem = current
             sourceOriginalIndex = index
         }
+        val stateBefore = player.playbackState
+        val playWhenReadyBefore = player.playWhenReady
+        val mediaPositionMs = player.currentPosition
         val tagged = current.buildUpon().setTag(plan.tag).build()
         player.replaceMediaItem(plan.index, tagged)
         // 进入落点：A（进循环前在 A 之前）或 A+entryOffset（正在窗口内），不是永远 seek 0。
         player.seekTo(plan.index, plan.seekTimelineMs)
+        // 换源只改播放列表，**不会自己开始加载**：IDLE 上换源必须 prepare；用户要求播放时
+        // 把 play 补上（pwr=false 时绝不偷播）。真机上 `/loop/enter` 出现 idle/pos=0 就是这个坑。
+        val revive = LoopSourceRuntime.revivePlan(stateBefore, playWhenReadyBefore)
+        if (revive.prepare) player.prepare()
+        if (revive.play) player.play()
+        LoopSourceRuntime.onInstalled(w, path)
         Log.i(
             TAG,
             "source item installed reason=" + reason + " songId=" + w.songId +
                 " window=" + w + " entryTMs=" + plan.seekTimelineMs +
-                " band=" + ringBytes + "B path=" + path,
+                " band=" + ringBytes + "B itemCount=" + player.mediaItemCount +
+                " stateBefore=" + stateBefore + " prepare=" + revive.prepare +
+                " play=" + revive.play + " path=" + path,
+        )
+        Log.i(
+            TAG_PERF,
+            "source installed index=" + plan.index + " itemCount=" + player.mediaItemCount +
+                " route=" + MainPlayerRouting.current.useSourceForMainPlayer +
+                " replacesItem=true window=" + w + " fromMediaMs=" + mediaPositionMs +
+                " entryTMs=" + plan.seekTimelineMs + " band=" + ringBytes + "B" +
+                " stateBefore=" + stateBefore + " stateAfter=" + player.playbackState +
+                " pwr=" + player.playWhenReady + " reviving=" + revive.prepare + "/" + revive.play,
         )
     }
 
@@ -598,13 +777,18 @@ class LoopPlaybackCoordinator @Inject constructor(
         sourceOriginalIndex = -1
         if (restored == null) return
         player.replaceMediaItem(index, restored)
+        LoopSourceRuntime.onReleased()
         if (plan == null) return
         player.seekTo(plan.index, plan.seekMediaMs)
+        if (player.playbackState == Player.STATE_IDLE && player.playWhenReady) {
+            player.prepare()
+        }
         Log.i(
             TAG,
             "source item restored reason=" + reason + " index=" + plan.index +
                 " mediaMs=" + plan.seekMediaMs + " window=[" + tag.loopStartUs +
-                "," + tag.loopEndUs + ")",
+                "," + tag.loopEndUs + ")" +
+                " state=" + player.playbackState + " pwr=" + player.playWhenReady,
         )
     }
 
@@ -697,7 +881,7 @@ class LoopPlaybackCoordinator @Inject constructor(
         /** repeat 变化事件（MusicService.onRepeatModeChanged）。 */
         const val REASON_REPEAT = "repeat"
 
-        /** shuffle 变化事件（本类 shuffleListener.onShuffleModeEnabledChanged）。 */
+        /** shuffle 变化事件（本类 playerListener.onShuffleModeEnabledChanged）。 */
         const val REASON_SHUFFLE = "shuffle"
 
         /** song_loop 行变化（ensureObservation）。 */
@@ -705,5 +889,20 @@ class LoopPlaybackCoordinator @Inject constructor(
 
         /** 显式意图变化（observeLoopIntent）。 */
         const val REASON_INTENT = "intent"
+
+        /** 播放器事件补算（本层 playerListener）：切歌 / 时间线变化 / 播放态变化。 */
+        const val REASON_PLAYER_TRANSITION = "player-transition"
+        const val REASON_PLAYER_TIMELINE = "player-timeline"
+        const val REASON_PLAYER_STATE = "player-state"
+
+        /** 意图武装后当前 item/窗口还没就绪时的兜底补算（scheduleIntentSettle）。 */
+        const val REASON_INTENT_SETTLE = "intent-settle"
+
+        /** 兜底补算：最多 10 次 × 200ms（覆盖 setMediaItems/restore 的异步就绪窗口）。 */
+        private const val INTENT_SETTLE_ATTEMPTS = 10
+        private const val INTENT_SETTLE_INTERVAL_MS = 200L
+
+        /** 单次 refresh 超过该耗时打 warn（含主线程探针/DB/换源）。 */
+        private const val SLOW_REFRESH_WARN_MS = 300L
     }
 }

@@ -19,15 +19,20 @@ class LoopRing(
     }
 
     val bytesPerFrame: Int = channels * 2
-    private val data = ByteArray((frames * bytesPerFrame).toInt())
+    private var data = ByteArray((frames * bytesPerFrame).toInt())
     private val monitor = Object()
 
     @Volatile
     var renderedFrames: Long = 0L
         private set
 
+    @Volatile
+    var closed: Boolean = false
+        private set
+
     /** 顺序追加已解码 PCM；返回实际写入帧数（不覆盖已写高水位）。 */
     fun append(src: ByteArray, srcOffsetBytes: Int = 0): Int = synchronized(monitor) {
+        if (closed) return 0
         val available = ((src.size - srcOffsetBytes) / bytesPerFrame).coerceAtLeast(0)
         val writable = (frames - renderedFrames).coerceAtMost(available.toLong()).toInt()
         if (writable <= 0) return 0
@@ -46,6 +51,7 @@ class LoopRing(
     /** 取任意 offset（帧号，可为负/超过 L）开始的 count 帧，按 mod 重复环内容。 */
     fun copyFrames(offsetFrames: Long, count: Int): ByteArray {
         require(count >= 0) { "count must be >= 0" }
+        if (closed) return ByteArray(0)
         val out = ByteArray(count * bytesPerFrame)
         if (count == 0) return out
         var ringFrame = Math.floorMod(offsetFrames, frames)
@@ -69,7 +75,7 @@ class LoopRing(
 
     /** 已渲染范围内的取模读取；未渲染返回 0（与 DataSource 的 stall 语义一致）。 */
     fun readAvailable(offsetFrames: Long, count: Int): ByteArray {
-        if (count <= 0) return ByteArray(0)
+        if (count <= 0 || closed) return ByteArray(0)
         val rendered = renderedFrames
         if (rendered <= 0L) return ByteArray(0)
         val take = minOf(count.toLong(), rendered).toInt()
@@ -81,7 +87,7 @@ class LoopRing(
         synchronized(monitor) {
             if (renderedFrames >= targetFrames) return true
             val deadline = System.currentTimeMillis() + timeoutMs
-            while (renderedFrames < targetFrames) {
+            while (!closed && renderedFrames < targetFrames) {
                 val left = deadline - System.currentTimeMillis()
                 if (left <= 0L) break
                 try {
@@ -95,8 +101,20 @@ class LoopRing(
         }
     }
 
+    /** 释放 ring 持有的 PCM ByteArray；可重复调用。 */
+    fun close() {
+        synchronized(monitor) {
+            if (closed) return
+            closed = true
+            data = ByteArray(0)
+            renderedFrames = 0L
+            monitor.notifyAll()
+        }
+    }
+
     fun clear() {
         synchronized(monitor) {
+            if (closed) return
             data.fill(0)
             renderedFrames = 0L
             monitor.notifyAll()

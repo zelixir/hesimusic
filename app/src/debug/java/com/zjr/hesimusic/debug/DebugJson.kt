@@ -6,8 +6,16 @@ import org.json.JSONObject
 /** 业务错误 → HTTP 状态 + {"error": message}。 */
 internal class HttpError(val status: Int, message: String) : Exception(message)
 
-/** 播放器控制尚未连接(懒建连未就绪)→ 503 player connecting。 */
-internal class PlayerUnavailable(message: String = "player connecting") : Exception(message)
+/**
+ * 播放器控制尚未连接(懒建连未就绪/已断开)→ 503。
+ *
+ * reason 采用 DebugPlayerLink.REASON_* 口径,写进 503 响应体,
+ * 避免"空 body 503"无法区分 controller 缺失、断连还是主线程读超时。
+ */
+internal class PlayerUnavailable(
+    message: String = "player connecting",
+    val reason: String = DebugPlayerLink.REASON_NOT_CONNECTED,
+) : Exception(message)
 
 /** 主线程调用超时(主线程被 UI/解码占住)→ 同样按 503 快速失败。 */
 internal class PlayerTimeout(message: String = "player call timeout") : Exception(message)
