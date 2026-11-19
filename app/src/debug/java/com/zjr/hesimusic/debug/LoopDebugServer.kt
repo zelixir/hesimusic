@@ -173,6 +173,8 @@ object LoopDebugServer {
      */
     private fun installLoopBridge(d: DebugEntryPoint) {
         if (DebugHooks.loopBridge != null) return
+        // 不变量采样器与 bridge 同生命周期：deps 就绪即开始每 500ms 采样（幂等）。
+        player?.let { PlaybackInvariantMonitor.start(d, it) }
         DebugHooks.loopBridge = object : LoopDebugBridge {
             override fun snapshot(): Map<String, Any?> {
                 val runtime = d.loopRuntime()
@@ -366,6 +368,7 @@ object LoopDebugServer {
             method == "POST" && segments == listOf("debug", "seam") -> handleSeamToggle(body)
             method == "POST" && segments == listOf("debug", "source-mode") -> handleSourceModeToggle(body)
             method == "POST" && segments == listOf("debug", "preview-seek") -> handlePreviewSeek(body)
+            method == "POST" && segments == listOf("debug", "invariant") -> handleInvariantFault(body)
             else -> throw HttpError(404, "unknown endpoint: $method ${request.path}")
         }
     }
@@ -391,6 +394,10 @@ object LoopDebugServer {
             "analysis" to analysisSummary(d),
             "playback" to playbackMapForState().withShadowDiagnostics(),
             "loop" to loop,
+            // 运行期不变量（00020/00021 加固）：最近 10 条 {code,message,atMs,count}。
+            "invariants" to PlaybackInvariantMonitor.snapshotMaps(),
+            // 最近一次 500ms 采样的原始事实，便于真机确认“为什么没触发/为什么触发”。
+            "invariantProbe" to PlaybackInvariantMonitor.lastSampleMap(),
             "library" to library,
             "server" to linkedMapOf(
                 "version" to VERSION,
@@ -1422,6 +1429,37 @@ object LoopDebugServer {
             "loopSourceMode" to LoopSourceMode.current.name,
             "note" to "reopen the loop page for it to take effect",
         )
+    }
+
+    /**
+     * POST /debug/invariant {kind} —— 不变量故障注入（仅 debug，不影响真实播放）。
+     *
+     * kind:
+     * - "paused-write"：每 500ms 采样注入一次「暂停但仍写 96ms 帧」→ paused-but-sink-wrote；
+     * - "silent"：注入「播放但零帧」→ playing-but-sink-silent（约 1s 后触发）；
+     * - "source-plain"：注入「循环投影但 item 无 tag / 工厂选普通源」→ projection=loop but source=plain；
+     * - "source-loop"：注入「非循环投影但 item 带 tag」→ projection=plain but source=loop；
+     * - "off"：关闭注入（判定器状态复位）；
+     * - "clear"：清空 /state.invariants 历史并关闭注入。
+     */
+    private fun handleInvariantFault(body: JSONObject?): Map<String, Any?> {
+        // 确保 Hilt 依赖已解析 + 采样器已启动；顺手拉起 player controller（注入生效需要它在跑）。
+        deps()
+        player?.ensureConnecting()
+        val kind = body?.optString("kind", "")?.trim()?.lowercase().orEmpty()
+        if (kind.isEmpty()) throw HttpError(400, "kind required")
+        val allowed = setOf(
+            "off",
+            "clear",
+            PlaybackInvariantMonitor.FAULT_PAUSED_WRITE,
+            PlaybackInvariantMonitor.FAULT_SILENT,
+            PlaybackInvariantMonitor.FAULT_SOURCE_PLAIN,
+            PlaybackInvariantMonitor.FAULT_SOURCE_LOOP,
+        )
+        if (kind !in allowed) throw HttpError(400, "unknown kind: " + kind + " (allowed=" + allowed + ")")
+        PlaybackInvariantMonitor.setFaultInjection(kind)
+        Log.i(TAG, "debug/invariant kind=" + kind)
+        return linkedMapOf("injected" to kind)
     }
 
     /** POST /debug/reconnect —— 显式丢弃当前 controller 并重建(最多等 2s)。 */

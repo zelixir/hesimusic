@@ -2,6 +2,7 @@ package com.zjr.hesimusic.loop.audio.source
 
 import android.content.Context
 import android.util.Log
+import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
@@ -9,6 +10,7 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.audio.ForwardingAudioSink
+import com.zjr.hesimusic.core.invariants.AudioOutputFrames
 import com.zjr.hesimusic.loop.audio.LoopAudioController
 import java.nio.ByteBuffer
 
@@ -46,6 +48,10 @@ class TapAudioSink(
     private var writtenFrames = 0L
     private var tapWasActive = false
 
+    /** 输出侧不变量（00020）：真正交给 delegate 的帧数，按 controller 分桶累计（始终开启）。 */
+    private val outputFrames = AudioOutputFrames.counterFor(controller)
+    private var sinkBytesPerFrame = 0
+
     /** 只保留最近 16 个 buffer 身份，防止同一块反复回调时重复写。 */
     private val writtenRanges = object : LinkedHashMap<Int, WrittenRange>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, WrittenRange>?): Boolean =
@@ -59,6 +65,7 @@ class TapAudioSink(
     ) {
         controller.tapEngineSeamsEnabled = false
         tapBytesPerFrame = (inputFormat.channelCount * 2).coerceAtLeast(0)
+        sinkBytesPerFrame = bytesPerFrameOf(inputFormat)
         if (MimeTypes.AUDIO_RAW == inputFormat.sampleMimeType &&
             inputFormat.channelCount > 0 &&
             inputFormat.sampleRate > 0
@@ -144,6 +151,18 @@ class TapAudioSink(
         }
 
         val consumed = super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
+        // 输出侧不变量（00020）：统计真正交给 delegate 的帧数。consumed=true 表示整段被接收
+        // （media3 契约：buffer.position 已推进到 limit）；否则按实际推进量计。
+        if (sinkBytesPerFrame > 0) {
+            val consumedBytes = if (consumed) {
+                (end - start).coerceAtLeast(0)
+            } else {
+                (buffer.position() - start).coerceAtLeast(0)
+            }
+            if (consumedBytes > 0) {
+                outputFrames.addAndGet((consumedBytes / sinkBytesPerFrame).toLong())
+            }
+        }
         val now = System.currentTimeMillis()
         if (handledBuffers == 1L || now - lastBufferLogMs >= 1_000L) {
             lastBufferLogMs = now
@@ -195,6 +214,18 @@ class TapAudioSink(
     override fun release() {
         controller.onSinkRelease()
         super.release()
+    }
+
+    /** 与 LoopAudioSink 同口径：按 pcmEncoding + 声道数算每帧字节（仅用于帧数换算）。 */
+    private fun bytesPerFrameOf(format: Format): Int {
+        val bitsPerSample = when (format.pcmEncoding) {
+            C.ENCODING_PCM_8BIT -> 8
+            C.ENCODING_PCM_16BIT -> 16
+            C.ENCODING_PCM_32BIT, C.ENCODING_PCM_FLOAT -> 32
+            else -> 16
+        }
+        val channels = if (format.channelCount > 0) format.channelCount else 2
+        return maxOf(1, bitsPerSample / 8 * channels)
     }
 
     private fun logD(message: String) {
