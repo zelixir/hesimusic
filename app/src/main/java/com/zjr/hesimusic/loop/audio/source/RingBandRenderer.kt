@@ -32,6 +32,7 @@ class RingBandRenderer(
         if (!started.compareAndSet(false, true)) return
         try {
             executor.execute {
+                var firstChunkLogged = false
                 var stopReason = "DONE"
                 var stopBlock = -1
                 var lastLoggedBlock = -1
@@ -50,6 +51,13 @@ class RingBandRenderer(
                         if (releaseRequested) return@stream
                         val frames = size / timeline.bytesPerFrame
                         if (frames <= 0) return@stream
+                        if (!firstChunkLogged) {
+                            firstChunkLogged = true
+                            RingBandLog.i(
+                                "RingBand render firstChunk frames=" + frames +
+                                    " firstSamples=[" + firstSamples(data, timeline.bytesPerFrame) + "]",
+                            )
+                        }
                         val appended = ring.append(data, 0)
                         if (appended < frames) {
                             error = "ring append short wrote=" + appended + " want=" + frames
@@ -113,6 +121,19 @@ class RingBandRenderer(
                 (timeline.loopFrames * timeline.bytesPerFrame) +
                 " released=true",
         )
+    }
+
+    /** 前 8 个交错 int16（L,R,L,R...），供离线脚本与源 PCM A 点逐样本比对。 */
+    private fun firstSamples(pcm: ByteArray, bytesPerFrame: Int, count: Int = 8): String {
+        if (bytesPerFrame <= 0 || pcm.isEmpty()) return "-"
+        val bb = java.nio.ByteBuffer.wrap(pcm).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val n = minOf(count, pcm.size / 2)
+        val sb = StringBuilder()
+        for (i in 0 until n) {
+            if (i > 0) sb.append(',')
+            sb.append(bb.getShort(i * 2).toInt())
+        }
+        return sb.toString()
     }
 
     private companion object {

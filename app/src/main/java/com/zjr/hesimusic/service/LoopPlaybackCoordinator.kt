@@ -17,8 +17,10 @@ import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.analysis.PcmDecoder
 import com.zjr.hesimusic.loop.audio.LoopAudioController
+import com.zjr.hesimusic.loop.audio.source.LoopAwareMediaSourceFactory
 import com.zjr.hesimusic.loop.audio.source.LoopEngineInfo
 import com.zjr.hesimusic.loop.audio.source.LoopSourceItemTag
+import com.zjr.hesimusic.loop.audio.source.LoopSourceMediaItem
 import com.zjr.hesimusic.loop.audio.source.LoopSourceProjection
 import com.zjr.hesimusic.loop.audio.source.PcmFileFormatProbe
 import kotlinx.coroutines.CancellationException
@@ -729,10 +731,45 @@ class LoopPlaybackCoordinator @Inject constructor(
         val stateBefore = player.playbackState
         val playWhenReadyBefore = player.playWhenReady
         val mediaPositionMs = player.currentPosition
-        val tagged = current.buildUpon().setTag(plan.tag).build()
+        // 关键（00021）：media3 的 replaceMediaItem 对同 uri 只做"原地更新 item"，
+        // ProgressiveMediaSource.canUpdateMediaItem 不看 tag，于是旧普通源继续出声。
+        // 这里给循环 item 写一个不同的 customCacheKey，强制 ExoPlayer createMediaSources
+        // 重建源；否则 tag 永远到不了 LoopAwareMediaSourceFactory（真机进度 A / 声音 0 的根因）。
+        val tagged = LoopSourceMediaItem.tagged(current, plan.tag)
+        val loopCountBefore = LoopAwareMediaSourceFactory.loopSourcesCreated()
+        Log.i(TAG_PERF, "source replace before index=" + plan.index +
+            " " + describeItem(current) + " -> " + describeItem(tagged))
         player.replaceMediaItem(plan.index, tagged)
+        var loopCountAfter = LoopAwareMediaSourceFactory.loopSourcesCreated()
+        Log.i(TAG_PERF, "source replace after item=" + describeItem(player.currentMediaItem) +
+            " loopSources=" + loopCountAfter + " delta=" + (loopCountAfter - loopCountBefore))
+        // 兜底（00021）：如果 media3 仍然走 updateMediaSourcesWithMediaItems 捷径，
+        // tag 只会挂在 timeline item 上，工厂不会被调用（loopSources 不增）。
+        // 这时用一次性整表 setMediaItems 强制 createMediaSources 重建全部源（同 list/同 index/
+        // 显式起始位置），保证带 tag 的 item 一定经过 LoopAwareMediaSourceFactory。
+        var forcedFullRebuild = false
+        if (loopCountAfter == loopCountBefore) {
+            forcedFullRebuild = true
+            Log.w(TAG_PERF, "source replace shortcut detected: forcing full setMediaItems rebuild")
+            val items = ArrayList<MediaItem>(player.mediaItemCount)
+            for (i in 0 until player.mediaItemCount) {
+                items.add(if (i == plan.index) tagged else player.getMediaItemAt(i))
+            }
+            player.setMediaItems(items, plan.index, plan.seekTimelineMs)
+            // prepare() 在非 IDLE 时是 no-op；IDLE/刚重建时保证新源开始加载。
+            player.prepare()
+            loopCountAfter = LoopAwareMediaSourceFactory.loopSourcesCreated()
+            Log.i(TAG_PERF, "source replace fallback done loopSources=" + loopCountAfter +
+                " item=" + describeItem(player.currentMediaItem))
+        }
         // 进入落点：A（进循环前在 A 之前）或 A+entryOffset（正在窗口内），不是永远 seek 0。
-        player.seekTo(plan.index, plan.seekTimelineMs)
+        // replaceMediaItem 会保留替换前的位置；只有替换前不在 0 时才需要补一次 seek，
+        // 避免"进循环固定两次 flush"（00020 的 flush 风暴里有一次就是这个空 seek）。
+        // 源替换后 ExoPlayer 通常已经把位置复位到 0（或保留了旧位置）；
+        // 只有实际位置与目标 T 相差超过 50ms 才补 seek，避免一次空 seek 带来的额外 flush。
+        val seeked = !forcedFullRebuild &&
+            kotlin.math.abs(player.currentPosition - plan.seekTimelineMs) > 50L
+        if (seeked) player.seekTo(plan.index, plan.seekTimelineMs)
         // 换源只改播放列表，**不会自己开始加载**：IDLE 上换源必须 prepare；用户要求播放时
         // 把 play 补上（pwr=false 时绝不偷播）。真机上 `/loop/enter` 出现 idle/pos=0 就是这个坑。
         val revive = LoopSourceRuntime.revivePlan(stateBefore, playWhenReadyBefore)
@@ -752,10 +789,22 @@ class LoopPlaybackCoordinator @Inject constructor(
             "source installed index=" + plan.index + " itemCount=" + player.mediaItemCount +
                 " route=" + MainPlayerRouting.current.useSourceForMainPlayer +
                 " replacesItem=true window=" + w + " fromMediaMs=" + mediaPositionMs +
-                " entryTMs=" + plan.seekTimelineMs + " band=" + ringBytes + "B" +
+                " entryTMs=" + plan.seekTimelineMs + " seekAfterReplace=" + seeked +
+                " cacheKey=" + LoopSourceMediaItem.sourceCacheKey(plan.tag) +
+                " band=" + ringBytes + "B" +
                 " stateBefore=" + stateBefore + " stateAfter=" + player.playbackState +
                 " pwr=" + player.playWhenReady + " reviving=" + revive.prepare + "/" + revive.play,
         )
+    }
+
+    /** 00021 取证：item 的实际字段（mediaId/uri/cacheKey/tag），用于确认 tag 真的挂上。 */
+    private fun describeItem(item: MediaItem?): String {
+        if (item == null) return "null"
+        val cfg = item.localConfiguration
+        return "mediaId=" + item.mediaId +
+            " uri=" + cfg?.uri +
+            " key=" + cfg?.customCacheKey +
+            " tag=" + (cfg?.tag?.let { it.javaClass.simpleName } ?: "none")
     }
 
     /**
@@ -772,7 +821,8 @@ class LoopPlaybackCoordinator @Inject constructor(
             tag = tag,
         )
         val original = sourceOriginalItem?.takeIf { sourceOriginalIndex == index }
-        val restored = original ?: player.currentMediaItem?.buildUpon()?.setTag(null)?.build()
+        // 退出同样要重建源：清 tag + 清强制重建键，媒体源会回到普通文件源。
+        val restored = original ?: player.currentMediaItem?.let { LoopSourceMediaItem.restored(it) }
         sourceOriginalItem = null
         sourceOriginalIndex = -1
         if (restored == null) return

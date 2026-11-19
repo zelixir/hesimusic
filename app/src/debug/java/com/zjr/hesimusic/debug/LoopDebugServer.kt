@@ -1089,17 +1089,25 @@ object LoopDebugServer {
         val songId = obj.requireLong("songId")
         if (songId <= 0L) throw HttpError(400, "songId required")
         val play = obj.optBooleanOrNull("play") ?: true
+        // restart=true（默认）= 与旧行为一致：setMediaItems 重建队列并从头播。
+        // restart=false = 模拟"正在播放这首歌时开启无缝循环"：不重建媒体源、不重置位置，
+        // 只 arm 意图（00020 的 flush 风暴 / 00021 的声音起点都用这个口径验证）。
+        val restart = obj.optBooleanOrNull("restart") ?: true
 
         d.songRepository().getSongsByIds(listOf(songId)).firstOrNull()
             ?: throw HttpError(404, "song not found: $songId")
-        val queue = if (play) {
+        val p = requirePlayer()
+        // MediaController 只能在 main 线程读;这里必须走 command 通道,否则会抛
+        // "MediaController method is called from a wrong thread"。
+        val currentMediaId = p.command { controller -> controller.currentMediaItem?.mediaId }
+        val sameSongPlaying = !restart && play && currentMediaId != null &&
+            com.zjr.hesimusic.data.mapper.mediaIdToSongId(currentMediaId) == songId
+        val queue = if (play && !sameSongPlaying) {
             libraryQueueFor(d, songId)
                 ?: throw HttpError(409, "song not in library queue: $songId")
         } else {
             null
         }
-
-        val p = requirePlayer()
         val prefs = d.playbackPreferences()
         val loopIntent = d.loopIntent()
         val result = p.command { controller ->
@@ -1114,8 +1122,12 @@ object LoopDebugServer {
                 controller.setMediaItems(queue.first, queue.second, 0L)
                 controller.prepare()
                 controller.play()
+            } else if (sameSongPlaying) {
+                // 同一首歌：不重建源/不 seek，仅保证在播（暂停态则继续）。
+                if (controller.playbackState == Player.STATE_IDLE) controller.prepare()
+                controller.play()
             }
-            previousRepeat to (queue != null && controller.playWhenReady)
+            previousRepeat to ((queue != null || sameSongPlaying) && controller.playWhenReady)
         }
         return linkedMapOf(
             "entered" to true,

@@ -382,7 +382,8 @@ class MainActivity : ComponentActivity() {
                                     // 在唯一写点(LoopPlaybackCoordinator)统一应用,这里不再散落写。
                                     val state = sharedMusicViewModel.uiState.value
                                     loopIntent.arm(song.id, state.repeatMode, state.shuffleModeEnabled)
-                                    sharedMusicViewModel.play(song)
+                                    // 同一首已在播时保持位置:不要重建队列(否则 flush + 静音)。
+                                    sharedMusicViewModel.playKeepPosition(song)
                                     navController.popBackStack()
                                 },
                             )
@@ -468,7 +469,8 @@ private fun rememberLoopMenuActions(
                 // 才能让播放页/底部条显示「单曲循环」而不是「随机播放」。
                 val state = musicViewModel.uiState.value
                 loopIntent.arm(song.id, state.repeatMode, state.shuffleModeEnabled)
-                musicViewModel.play(song)
+                // 同一首已在播时保持位置:不重建播放队列,避免一次 flush + 0.x 秒静音。
+                musicViewModel.playKeepPosition(song)
             },
             onSeamlessAnalysis = { song -> navController.navigate("loop/${song.id}") },
         )

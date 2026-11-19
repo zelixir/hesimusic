@@ -39,6 +39,8 @@ class MediaCodecRingBandDecoder(
         val targetEndFrame = Pcm16Frames.frameAtOrAfterUs(endUs, sampleRate)
         val targetFrames = (targetEndFrame - targetStartFrame).coerceAtLeast(1L)
         var emittedFrames = 0L
+        var firstOutputLogged = false
+        var firstInputLogs = 0
         val ex = MediaExtractor()
         extractor = ex
         try {
@@ -60,6 +62,12 @@ class MediaCodecRingBandDecoder(
             val mime = fmt.getString(MediaFormat.KEY_MIME) ?: error("missing mime")
             val seekUs = (startUs - prerollUs).coerceAtLeast(0L)
             ex.seekTo(seekUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+            // 00021 取证：seek 之后 extractor 自己认为落在哪（PTS 口径）。
+            RingBandLog.i(
+                "RingBand decoder seek seekUs=" + seekUs +
+                    " sampleTimeAfterSeek=" + ex.sampleTime +
+                    " targetStartUs=" + startUs + " targetStartFrame=" + targetStartFrame,
+            )
             val c = MediaCodec.createDecoderByType(mime)
             codec = c
             c.configure(fmt, null, null, 0)
@@ -96,6 +104,13 @@ class MediaCodecRingBandDecoder(
                                 inputDone = true
                             } else {
                                 val pts = ex.sampleTime
+                                if (firstInputLogs < 3) {
+                                    RingBandLog.i(
+                                        "RingBand decoder input[" + firstInputLogs +
+                                            "] size=" + size + " sampleTimeUs=" + pts,
+                                    )
+                                    firstInputLogs += 1
+                                }
                                 c.queueInputBuffer(inIdx, 0, size, pts, 0)
                                 ex.advance()
                             }
@@ -146,6 +161,22 @@ class MediaCodecRingBandDecoder(
                                     if (takeFrames > 0L) {
                                         val from = (skipFrames * outputBpf).toInt()
                                         val bytes = (takeFrames * outputBpf).toInt()
+                                        if (!firstOutputLogged) {
+                                            firstOutputLogged = true
+                                            // firstSamples 是**跳过 A 之前样本后**真正写入环带的首批样本，
+                                            // 应与 song40169.pcm 的 A 帧逐样本一致（00021 验收口径）。
+                                            RingBandLog.i(
+                                                "RingBand decode firstPtsUs=" + info.presentationTimeUs +
+                                                    " targetStartUs=" + startUs +
+                                                    " bufferStartFrame=" + bufferStartFrame +
+                                                    " targetStartFrame=" + targetStartFrame +
+                                                    " skipFrames=" + skipFrames +
+                                                    " framesInBuffer=" + framesInBuffer +
+                                                    " takeFrames=" + takeFrames +
+                                                    " firstSamples=[" +
+                                                    firstSamples(pcm, from, outputBpf) + "]",
+                                            )
+                                        }
                                         onPcm(pcm.copyOfRange(from, from + bytes), bytes)
                                         emittedFrames += takeFrames
                                     } else if (bufferStartFrame > targetStartFrame + emittedFrames + sampleRate) {
@@ -188,6 +219,26 @@ class MediaCodecRingBandDecoder(
             extractor = null
             logger("RingBand decode session close emittedFrames=" + emittedFrames)
         }
+    }
+
+    /** 前 8 个交错 int16（L,R,L,R...），给离线脚本与源 PCM 逐样本比对。 */
+    private fun firstSamples(
+        pcm: ByteArray,
+        fromBytes: Int,
+        bytesPerFrame: Int,
+        count: Int = 8,
+    ): String {
+        if (bytesPerFrame <= 0 || fromBytes < 0 || fromBytes >= pcm.size) return "-"
+        val end = minOf(pcm.size, fromBytes + count * 2)
+        val bb = ByteBuffer.wrap(pcm).order(ByteOrder.LITTLE_ENDIAN)
+        val sb = StringBuilder()
+        var i = fromBytes
+        while (i + 1 < end) {
+            if (sb.isNotEmpty()) sb.append(',')
+            sb.append(bb.getShort(i).toInt())
+            i += 2
+        }
+        return sb.toString()
     }
 
     private fun floatToPcm16(src: ByteBuffer, ch: Int): ByteArray {

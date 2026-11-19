@@ -437,6 +437,42 @@ class MusicViewModel @Inject constructor(
             controller.play()
         }
     }
+
+    /**
+     * 播放 [song],但**当它已经是当前 item 时保持时间轴不动**。
+     *
+     * 无缝循环入口(菜单「无缝循环」/ 结果页「保存并播放」)专用:对正在播放的同一首歌
+     * 再走一遍 [play] 会 setMediaItem + prepare 重建队列、位置归零,并让播放器 flush,
+     * 用户能听到 0.x 秒的断音。此时只需要 play()(IDLE 时补一次 prepare)。
+     *
+     * 判定见 [shouldKeepCurrentItem];不满足时退回 [play] 的原有行为。
+     */
+    fun playKeepPosition(song: Song) {
+        val controller = mediaController ?: return
+        val currentMediaId = controller.currentMediaItem?.mediaId
+        val sameQueueHead = currentMediaId != null &&
+            _playQueue.value.firstOrNull()?.mediaId == currentMediaId
+        val keepCurrent = shouldKeepCurrentItem(
+            currentMediaId = currentMediaId,
+            songId = song.id,
+            sameQueueHead = sameQueueHead,
+        )
+        val positionMs = controller.currentPosition.coerceAtLeast(0L)
+        Log.d(
+            TAG,
+            "keep-position play songId=${song.id} sameItem=$keepCurrent posMs=$positionMs"
+        )
+        if (!keepCurrent) {
+            play(song)
+            return
+        }
+        when (controller.playbackState) {
+            Player.STATE_IDLE -> controller.prepare()
+            // A finished item has no meaningful position to keep; restart it in place.
+            Player.STATE_ENDED -> controller.seekToDefaultPosition()
+        }
+        controller.play()
+    }
     
     fun playList(songs: List<Song>, startIndex: Int = 0, context: PlaylistContext? = null) {
         mediaController?.let { controller ->
@@ -664,6 +700,25 @@ class MusicViewModel @Inject constructor(
         }
         sleepTimer?.cancel()
     }
+}
+
+/**
+ * [MusicViewModel.playKeepPosition] 是否可以直接沿用当前时间轴(不再 setMediaItem)。
+ *
+ * 同曲判定基于 mediaId 本身:普通 id 与队列副本 id("queue:<seq>:<songId>")都能解析出
+ * songId —— 队列副本同样算「同一首」,**不能**再用「当前 item 是否还是队列头」来收紧
+ * (队列头在 transition 时就会被 consume,正在播的副本正常就不是 head 了)。
+ * [sameQueueHead] 只作为未知 mediaId 格式的兜底身份信号。
+ */
+internal fun shouldKeepCurrentItem(
+    currentMediaId: String?,
+    songId: Long,
+    sameQueueHead: Boolean,
+): Boolean {
+    if (currentMediaId == null) return false
+    val currentSongId = mediaIdToSongId(currentMediaId)
+    if (currentSongId != null) return currentSongId == songId
+    return sameQueueHead
 }
 
 internal fun shouldForceQueueTransition(reason: Int, currentSongId: Long?, queuedSongId: Long): Boolean {
