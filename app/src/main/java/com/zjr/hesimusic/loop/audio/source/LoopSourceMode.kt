@@ -72,6 +72,7 @@ enum class LoopSourceMode {
 
         /** 用户在结果页切换引擎:写偏好并立即生效(重新进页生效)。 */
         fun select(context: Context, mode: LoopSourceMode) {
+            LoopEngineDefaultsMigration.migrate(context)
             try {
                 context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                     .edit().putString(PREF_KEY, if (mode == SOURCE) "source" else "m3").apply()
@@ -83,6 +84,7 @@ enum class LoopSourceMode {
         }
 
         fun refreshFromSettings(context: Context) {
+            LoopEngineDefaultsMigration.migrate(context)
             debugOverride?.let { forced ->
                 current = forced
                 return

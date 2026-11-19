@@ -2,6 +2,7 @@ package com.zjr.hesimusic.loop.audio.source
 
 import android.content.Context
 import com.zjr.hesimusic.service.LoopSourceFallback
+import com.zjr.hesimusic.service.LoopSourceRuntime
 
 /**
  * 运行时引擎标识，供 About 页面/日志显示。
@@ -36,7 +37,7 @@ data class LoopEngineInfo(
         private var lastBandBytes: Long = 0L
 
         fun recordBandBytes(bytes: Long) {
-            if (bytes > 0L) lastBandBytes = bytes
+            lastBandBytes = bytes.coerceAtLeast(0L)
         }
 
         /** About/日志可直接用的单行文本。 */
@@ -47,10 +48,13 @@ data class LoopEngineInfo(
                 LoopSourceMode.refreshFromSettings(context)
                 LoopSourceMainPlayer.refreshFromSettings(context)
             }
+            // 只有当前确实有 SOURCE 接管窗口时才显示 band；否则保留上次值会污染
+            // About（例如切到主开关关闭/普通播放但仍显示 3.4MB）。
+            val installed = LoopSourceRuntime.installedWindow != null
             return of(
                 sourceMode = LoopSourceMode.isSource(),
                 mainEnabled = LoopSourceMainPlayer.enabled,
-                bandBytes = lastBandBytes,
+                bandBytes = if (installed) lastBandBytes else 0L,
                 fallbackReason = LoopSourceFallback.latestReason()?.logName,
             )
         }

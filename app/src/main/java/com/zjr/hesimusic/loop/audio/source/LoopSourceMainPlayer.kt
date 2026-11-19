@@ -75,6 +75,7 @@ object LoopSourceMainPlayer {
 
     /** 读取 global setting（0/1），默认 false；debugOverride / 持久化选择优先。 */
     fun refreshFromSettings(context: Context) {
+        LoopEngineDefaultsMigration.migrate(context)
         debugOverride?.let { return }
         saved(context)?.let { enabled = it; return }
         // 与预览开关一致:缺省开启,显式写 0 才关闭。
