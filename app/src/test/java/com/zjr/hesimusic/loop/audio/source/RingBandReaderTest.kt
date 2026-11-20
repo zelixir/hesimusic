@@ -129,17 +129,38 @@ class RingBandReaderTest {
         assertTrue(reader.lastSeamOutputFrames > 0L)
     }
 
+    /**
+     * issue 00023 裁决 a:seek 时 **PTS 基准重置为 seek 目标**(允许回退)。
+     *
+     * 旧实现"PTS 只增不减"是区内回退/区外自由 seek 落点错的根因:seek 回退被 max() 留在读前位置。
+     * 新语义:段内严格单调;跨 seek 允许回退;参与节流的 totalReadFrames 仍只增不减。
+     */
     @Test
-    fun `seek never resets PTS and respects target lower bound`() {
+    fun `seek resets PTS base to the requested target`() {
         val ring = LoopRing(sr, ch, 1_000L)
         ring.append(pcm(1_000))
         val reader = RingBandReader(ring)
         reader.read(100)
         val before = reader.read(100)!!.ptsUs
+        val totalBefore = reader.totalReadFrames
         reader.seekToOffset(900L, targetUs = 2_000_000L)
         val after = reader.read(50)!!
-        assertTrue("PTS must not reset: before=$before after=${after.ptsUs}", after.ptsUs >= before)
-        assertTrue("PTS must respect seek target", after.ptsUs >= 2_000_000L)
+        assertEquals("seek 后首个样本 PTS = seek 目标", 2_000_000L, after.ptsUs)
+        assertEquals("段基准同步", 2_000_000L, reader.segmentBasePtsUs)
+
+        // 段内严格单调。
+        val next = reader.read(50)!!
+        assertTrue("段内单调: " + after.ptsUs + " -> " + next.ptsUs, next.ptsUs > after.ptsUs)
+        // 回退 seek 允许 PTS 变小(媒体时间回退),但 totalReadFrames 不能被回退。
+        // before = 第 2 次 read 的 PTS(100 帧 @1kHz = 100_000us),回退目标取 50_000us。
+        reader.seekToOffset(0L, targetUs = 50_000L)
+        val rewind = reader.read(10)!!
+        assertEquals(50_000L, rewind.ptsUs)
+        assertTrue(
+            "允许回退到 seek 前更小的 PTS: before=" + before + " rewind=" + rewind.ptsUs,
+            rewind.ptsUs < before,
+        )
+        assertTrue("totalReadFrames 必须继续单调", reader.totalReadFrames > totalBefore)
     }
 
     @Test

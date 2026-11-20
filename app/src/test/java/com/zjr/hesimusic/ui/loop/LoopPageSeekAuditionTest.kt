@@ -195,6 +195,43 @@ class LoopPageSeekAuditionTest {
     }
 
     @Test
+    fun switchModeThenImmediateOutsideSeekKeepsTarget() {
+        // 场景套件 #18 的时序:点「仅循环段」后**立刻**区外 seek(Redstar Rising:A=17496 B=50167)。
+        val beforeSwitch = ready(
+            aMs = 17_496L,
+            bMs = 50_167L,
+            durationMs = 90_828L,
+            mode = LoopPageMode.FULL,
+            positionMs = 0L,
+            auditionOutside = false,
+        )
+        val (afterSwitch, switchEffects) = LoopPageReducer.reduce(
+            beforeSwitch,
+            LoopPageEvent.SwitchMode(LoopPageMode.LOOP_ONLY),
+        )
+        assertEquals(
+            "切模式:回到模式起点并从那里起播",
+            listOf(
+                LoopPageEffect.SeekTo(17_196L),
+                LoopPageEffect.Play(LoopPageMode.LOOP_ONLY, 17_196L),
+            ),
+            switchEffects,
+        )
+
+        val (afterSeek, seekEffects) = LoopPageReducer.reduce(afterSwitch, LoopPageEvent.Seek(1_458L))
+        val ready = afterSeek as LoopPageState.Ready
+        assertEquals("区外 seek 必须落到请求值,不得折回 A/窗口起点", 1_458L, ready.positionMs)
+        assertTrue("区外 seek 进入自由试听", ready.auditionOutside)
+        assertEquals(
+            "只发 SeekTo:不得再发 Play/ApplyWindow(否则会把播放头拽回窗口起点)",
+            listOf(LoopPageEffect.SeekTo(1_458L)),
+            seekEffects,
+        )
+        assertEquals("自由试听不显示环缓冲等待", PrefillState.NotStarted, ready.prefill)
+        assertEquals("暂停/播放意图不变", PlaybackState.Playing, ready.playback)
+    }
+
+    @Test
     fun seekInsideNewWindowAfterAbChangeRestoresLoop() {
         // 自由试听中把 A 从 30s 拖到 34s,再 seek 到 40s:必须按**新**窗口判定为"回到区间"。
         val outsideWithNewWindow = ready(

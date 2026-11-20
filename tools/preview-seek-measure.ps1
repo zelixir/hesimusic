@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     分析页(无缝循环结果页)seek 响应与"循环区外 seek"语义的真机量测脚本(issue 00023)。
 
@@ -7,7 +7,8 @@
 
       A. 区外 seek(循环区外自由试听)
          - 判定"落点正确":displayAfterMs 与请求值差 <= -PositionToleranceMs,且 outsideLoop=true,
-           且 sourceWindow == [0, duration](整曲源);
+           且 sourceKind == "native"(原生 media3 源:没有环带 PTS 投影,playerPosition 也必须对得上,
+           见 issue 00023 回归:整曲窗口的环带源 seek 回退时 PTS 会被 max() 留在读前位置);
          - 判定"有声音":framesDelta > 0(TapAudioSink 真正交给 AudioTrack 的帧数增量);
          - 判定"不回弹":+800ms 再读一次,display 必须继续向前(不小于落点,且 <= 目标+2s)。
 
@@ -68,7 +69,9 @@ param(
     [string]$Device = "b1e84dad",
     [int]$Port = 18765,
     [long]$SongId = 40169,
-    [long[]]$OutsideSeeks = @(30000, 200000),
+    # 缺省按 A/B 自动取两个区外点:A 之前(A/2)、B 之后((B+duration)/2);显式传入则覆盖。
+    [long[]]$OutsideSeeks = @(),
+    [switch]$InsideBackwardCheck,
     [long[]]$InsideSeeks = @(),
     [int]$AdvanceBudgetMs = 100,
     [int]$PositionToleranceMs = 400,
@@ -194,17 +197,63 @@ if ($null -eq $probe) {
     throw ("/debug/preview 无响应:先确认 adb forward tcp:" + $Port + " tcp:8765 与 debug 包")
 }
 
-Invoke-Json "POST" "/navigate" @{ route = ("loop/" + $SongId) } | Out-Null
-Start-Sleep -Seconds 4
-$probe = Get-Preview
-if ($null -eq $probe -or -not $probe.snapshot.prepared) {
-    Write-Log "  [setup] 结果页未 prepare,点『仅循环段』起播"
-    Tap-Text "仅循环段" | Out-Null
-    Start-Sleep -Seconds 4
-    $probe = Get-Preview
+# debug 服务/App 可能刚重启:/navigate 失败不能静默,轮询到路由真的落在结果页再继续。
+$serverUp = $false
+for ($attempt = 0; $attempt -lt 40; $attempt++) {
+    if ($null -ne (Invoke-Json "GET" "/state" $null)) { $serverUp = $true; break }
+    Start-Sleep -Milliseconds 300
 }
+if (-not $serverUp) { throw "/debug 服务未就绪(adb forward / 进程重启?)" }
+$route = "loop/" + $SongId
+# 已经在结果页就不要重复 navigate:同一路由再推一次会创建第二个 LoopViewModel/PreviewPlayer,
+# 探针会挂到新实例上(旧实例还在播),量测就串台了。
+$already = Invoke-Json "GET" "/state" $null
+if ($null -ne $already -and $already.screen -eq $route) {
+    Write-Log "  [setup] 已在结果页,跳过 navigate(避免重复实例)"
+    $state = $already
+} else {
+# 冷启动(尤其刚 install)时 MainActivity 的导航钩子注册得晚:/navigate 会 no-op,
+# 这里给足 ~110s 窗口并逐次重试(实测 install 后首次可导航要 60~90s:进程冷启动+媒体库加载)。
+for ($attempt = 0; $attempt -lt 120; $attempt++) {
+    Invoke-Json "POST" "/navigate" @{ route = $route } | Out-Null
+    Start-Sleep -Milliseconds 900
+    $state = Invoke-Json "GET" "/state" $null
+    if ($null -ne $state -and $state.screen -eq $route) { break }
+    if ($attempt -eq 0 -or $attempt % 10 -eq 9) {
+        Write-Log ("  [setup] 等导航生效… attempt=" + ($attempt + 1) + " screen=" + $(if ($null -ne $state) { $state.screen } else { "?" }))
+    }
+}
+$state = Invoke-Json "GET" "/state" $null
+}
+if ($null -eq $state -or $state.screen -ne $route) {
+    throw ("导航到 " + $route + " 失败(当前 screen=" + $state.screen + ")")
+}
+Start-Sleep -Seconds 2
+$probe = Get-Preview
 if ($null -eq $probe -or -not $probe.snapshot.isPlaying) {
-    throw "预览没有在播:先手动起播(点『仅循环段』)再跑本脚本"
+    Write-Log "  [setup] 结果页未在播放,点『仅循环段』起播"
+    # 结果页可能还在骨架/解码波形的阶段:文本出现需要一会儿,重试点击。
+    $tapped = $false
+    for ($attempt = 0; $attempt -lt 20 -and -not $tapped; $attempt++) {
+        foreach ($label in @("仅循环段", "接缝检查", "完整循环")) {
+            $xml = Get-UiDump
+            if ($xml -match [regex]::Escape($label)) {
+                Tap-Text $label | Out-Null
+                $tapped = $true
+                break
+            }
+        }
+        if (-not $tapped) { Start-Sleep -Milliseconds 500 }
+    }
+    if (-not $tapped) { throw "结果页没有出现试听模式按钮(页面未就绪?)" }
+    # 等试听真正起来(SOURCE 首块/播放器创建)。
+    $playing = $false
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        $probe = Get-Preview
+        if ($null -ne $probe -and $probe.snapshot.isPlaying) { $playing = $true; break }
+        Start-Sleep -Milliseconds 250
+    }
+    if (-not $playing) { throw "预览没有在播:先手动起播(点『仅循环段』)再跑本脚本" }
 }
 if ($probe.snapshot.engine -ne "SOURCE") {
     Write-Log ("  [warn] engine=" + $probe.snapshot.engine + "(本脚本的区外语义按 SOURCE 口径判定)")
@@ -216,6 +265,11 @@ $bMs = [long]$probe.snapshot.bMs
 $loopWindowMs = $bMs - $aMs
 Write-Log ("  [setup] duration=" + $durationMs + " A=" + $aMs + " B=" + $bMs + " mode=" + $probe.snapshot.mode)
 
+if ($OutsideSeeks.Count -eq 0) {
+    $before = [long]($aMs / 2)
+    $after = [long](($bMs + $durationMs) / 2)
+    $OutsideSeeks = @([math]::Max(0L, $before), [math]::Min($durationMs - 1L, $after))
+}
 if ($InsideSeeks.Count -eq 0) {
     $step = [long](($bMs - $aMs) / 6)
     $InsideSeeks = @(
@@ -237,8 +291,9 @@ $allOk = $true
 
 Write-Log ""
 Write-Log "== A. 循环区外 seek(自由试听:按文件时间,不折返) =="
+# 第一次进区外会释放环带源(换成原生媒体源):先等环带填完,避开 release UAF。
+Wait-BandFillFor $loopWindowMs "首次区外 seek 前"
 foreach ($target in $OutsideSeeks) {
-    Wait-BandFillFor $loopWindowMs ("区外 seek " + $target + "ms 前")
     $m = Measure-Seek $target
     if ($null -eq $m) { Write-Log "  [FAIL] /debug/preview-seek 无响应"; $allOk = $false; continue }
     Start-Sleep -Milliseconds 800
@@ -247,15 +302,22 @@ foreach ($target in $OutsideSeeks) {
     $outside = [bool]$after.snapshot.outsideLoop
     $srcA = $after.snapshot.sourceWindowA_ms
     $srcB = $after.snapshot.sourceWindowB_ms
+    $kind = $after.snapshot.sourceKind
 
-    $positionOk = ([math]::Abs([long]$m.displayAfterMs - $target) -le $PositionToleranceMs) -and $outside
+    $landingD = if ($null -ne $m.landingDisplayAfterMs) { [long]$m.landingDisplayAfterMs } else { [long]$m.displayAfterMs }
+    $positionOk = ([math]::Abs($landingD - $target) -le $PositionToleranceMs) -and
+        ($m.outsideLoopAfter -eq $true) -and $outside
     $soundOk = ([long]$m.framesDelta -gt 0) -and ($null -ne $m.advanceMs)
     $noBounce = ($display -ge $target -and $display -le ($target + 2000))
-    $allOk = (Assert $positionOk ("区外 " + $target + "ms 落点正确(display=" + $m.displayAfterMs + ")")) -and $allOk
+    # 区外必须落点正确且 playerPosition 也对得上(只 display 对不算修好:环带 PTS 投影 bug 会两边一起错)。
+    $playerPosOk = ([math]::Abs([long]$m.playerPositionAfterMs - $target) -le $PositionToleranceMs)
+    $allOk = (Assert $positionOk ("区外 " + $target + "ms 落点正确(landing=" + $landingD + ")")) -and $allOk
+    $allOk = (Assert $playerPosOk ("区外 " + $target + "ms 播放器位置正确(playerPos=" + $m.playerPositionAfterMs + ")")) -and $allOk
     $allOk = (Assert $soundOk ("区外 " + $target + "ms 有音频输出(framesDelta=" + $m.framesDelta + " advanceMs=" + $m.advanceMs + ")")) -and $allOk
     $allOk = (Assert $noBounce ("区外 " + $target + "ms 进度不回弹(+800ms display=" + $display + ")")) -and $allOk
-    $allOk = (Assert ($srcA -eq 0 -and $srcB -eq $durationMs) ("区外数据源=整曲 [" + $srcA + "," + $srcB + ")")) -and $allOk
-    Add-Row "outside" $target $m ($positionOk -and $noBounce) $soundOk ("src=" + $srcA + ".." + $srcB + " display800ms=" + $display)
+    $allOk = (Assert ($m.sourceKindAfter -eq "native") ("区外数据源=原生 media3 源(sourceKind=" + $m.sourceKindAfter + ", srcWindow=" + $srcA + ".." + $srcB + ")")) -and $allOk
+    $allOk = (Assert ($kind -eq "native") ("区外快照 sourceKind 仍为 native(实际=" + $kind + ")")) -and $allOk
+    Add-Row "outside" $target $m ($positionOk -and $noBounce -and $playerPosOk) $soundOk ("sourceKind=" + $m.sourceKindAfter + " display800ms=" + $display)
 }
 
 # ---------------------------------------------------------------- B. 拖回区间
@@ -263,7 +325,7 @@ foreach ($target in $OutsideSeeks) {
 Write-Log ""
 Write-Log "== B. 拖回 [A,B)(恢复循环) =="
 $restoreTarget = [long](($aMs + $bMs) / 2)
-Wait-BandFillFor $durationMs ("拖回区间前(整曲环带)")
+# 自由试听是原生源、没有环带要等;恢复循环时才新建环带源(新建不会撞释放 UAF)。
 $m = Measure-Seek $restoreTarget
 Start-Sleep -Milliseconds 800
 $after = Get-Preview
@@ -287,7 +349,11 @@ foreach ($target in $InsideSeeks) {
     if ($null -eq $m) { Write-Log "  [FAIL] /debug/preview-seek 无响应"; $allOk = $false; continue }
     $fast = ($null -ne $m.advanceMs) -and ([long]$m.advanceMs -le $AdvanceBudgetMs)
     $noSwap = (-not [bool]$m.outsideLoopAfter) -and
-        ($m.sourceWindowAfterA_ms -eq $aMs) -and ($m.sourceWindowAfterB_ms -eq $bMs)
+        ($m.sourceWindowAfterA_ms -eq $aMs) -and ($m.sourceWindowAfterB_ms -eq $bMs) -and
+        ($m.sourceKindAfter -eq "band")
+    if ($m.isPlayingAfter -ne $true) {
+        Write-Log ("  [warn] 区内 seek 后未在播放: isPlaying=" + $m.isPlayingAfter + " state=" + $m.playbackStateAfter + "(advance 无法测量)")
+    }
     $allOk = (Assert $fast ("区内 " + $target + "ms 出声音 <= " + $AdvanceBudgetMs + "ms(advance=" + $m.advanceMs + " apply=" + $m.applyMs + ")")) -and $allOk
     $allOk = (Assert $noSwap ("区内 " + $target + "ms 未换源(src=" + $m.sourceWindowAfterA_ms + ".." + $m.sourceWindowAfterB_ms + ")")) -and $allOk
     Add-Row "inside" $target $m $noSwap $fast ""
@@ -299,6 +365,58 @@ $installed = ([regex]::Matches($logLines, 'source installed')).Count
 $seekApplied = ([regex]::Matches($logLines, 'source seek display=')).Count
 $allOk = (Assert ($installed -eq 0) ("区内 5 次期间 source installed 次数=" + $installed + "(必须 0)")) -and $allOk
 $allOk = (Assert ($seekApplied -ge $InsideSeeks.Count) ("区内 5 次期间 source seek 次数=" + $seekApplied + "(应 >= " + $InsideSeeks.Count + ")")) -and $allOk
+
+# ---------------------------------------------------------------- C2. 区内 forward/backward
+
+if ($InsideBackwardCheck) {
+    Write-Log ""
+    Write-Log "== C2. 区内 forward / backward 各 3 点(落点必须 = 请求值) =="
+    $loopLen = $bMs - $aMs
+    $forwardTargets = @(
+        [long]($aMs + $loopLen * 0.50),
+        [long]($aMs + $loopLen * 0.80),
+        [long]($aMs + $loopLen * 0.95)
+    )
+    $backwardTargets = @(
+        [long]($aMs + $loopLen * 0.60),
+        [long]($aMs + $loopLen * 0.30),
+        [long]($aMs + $loopLen * 0.05)
+    )
+    $rows2 = @()
+    foreach ($pair in @(@("forward", $forwardTargets), @("backward", $backwardTargets))) {
+        $phase = $pair[0]
+        foreach ($target in $pair[1]) {
+            $m = Measure-Seek $target
+            Start-Sleep -Milliseconds 300
+            $d = if ($null -ne $m.landingDisplayAfterMs) { [long]$m.landingDisplayAfterMs } else { [long]$m.displayAfterMs }
+            # 环内 seek 的**精确落点** = A + floorMod(T, L)；T 是播放器真正 seek 到的时间轴值，
+            # 用它可以判断"投影是否正确"，不受探针采样延迟影响(display 会带 target+30ms 左右的前进)。
+            $landing = -1
+            if ($null -ne $m.appliedPlayerTargetMs) {
+                $landing = $aMs + ((([long]$m.appliedPlayerTargetMs % $loopLen) + $loopLen) % $loopLen)
+            }
+            $ok = ([math]::Abs($d - $target) -le 100) -and
+                ($landing -ge 0) -and ([math]::Abs($landing - $target) -le 2) -and
+                ([long]$m.framesDelta -gt 0) -and
+                ($m.outsideLoopAfter -eq $false) -and
+                ($m.isPlayingAfter -eq $true)
+            $round = if ($null -ne $m.appliedPlayerTargetMs) {
+                [math]::Floor([long]$m.appliedPlayerTargetMs / ($loopLen)) 
+            } else { -1 }
+            $rows2 += [pscustomobject]@{
+                dir = $phase; target = $target; landing = $landing; display = $d
+                playerT = $m.appliedPlayerTargetMs; round = $round
+                apply = $m.applyMs; advance = $m.advanceMs; frames = $m.framesDelta; ok = $ok
+            }
+            $allOk = (Assert $ok ("区内 " + $phase + " target=" + $target + " landing=" + $landing +
+                " display=" + $d + " playerT=" + $m.appliedPlayerTargetMs + " advance=" + $m.advanceMs)) -and $allOk
+            Add-Row ("inside-" + $phase) $target $m $ok ([long]$m.framesDelta -gt 0) ("round=" + $round)
+            Start-Sleep -Milliseconds 300
+        }
+    }
+    Write-Log "  (forward/backward 明细)"
+    $rows2 | Format-Table -AutoSize | Out-String -Width 200 | ForEach-Object { Write-Log $_ }
+}
 
 # ---------------------------------------------------------------- D. A/B 不变
 

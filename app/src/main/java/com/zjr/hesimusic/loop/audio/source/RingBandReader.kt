@@ -7,7 +7,9 @@ package com.zjr.hesimusic.loop.audio.source
  * - 可读性由环的**帧级覆盖位图**决定：只返回 [offset, offset+count) 中连续已填充的部分，
  *   未填充区返回 null（Extractor -> CONTINUE），因此 seek 到未填充区不必等解码从 A 追上来；
  * - seek 只改 offset，不重解码；
- * - PTS 单调且不低于 seek 目标。
+ * - **PTS 的基准由 seek 决定**（issue 00023 裁决 a）：段内严格单调，段与段之间允许回退
+ *   （media3 在 seek 后会丢弃旧样本队列，PTS 比 seek 前小是合法的）；
+ * - 参与节流预算/覆盖率统计的 [totalReadFrames] 仍然只增不减。
  */
 class RingBandReader(
     private val ring: LoopRing,
@@ -45,7 +47,17 @@ class RingBandReader(
     var lastSeamOutputFrames: Long = -1L
         private set
 
-    /** 下一次 read 的 PTS 下限；seek 后绝不允许回退/重置。 */
+    /**
+     * 本段 PTS 基准（µs）= 最近一次 seek 的目标；播放起点为 0。
+     *
+     * 旧实现把 PTS 固定成"本 source 已读总帧数"，seek 回退时被 max() 留在读前位置
+     * （真机：区内回退到 25s 却停在 46s；区外 seek 1458 落到 13606/24161）。
+     */
+    @Volatile
+    var segmentBasePtsUs: Long = 0L
+        private set
+
+    /** 下一帧的 PTS（µs）：段内严格单调，seek 时重置为 [segmentBasePtsUs]。 */
     @Volatile
     private var nextPtsUs: Long = 0L
 
@@ -68,7 +80,9 @@ class RingBandReader(
         } else {
             null
         }
-        val pts = maxOf(nextPtsUs, ring.presentationTimeUs(totalReadFrames))
+        // PTS = 本段基准 + 本段已读帧（不再与 totalReadFrames 取 max：那是"全局只增"，
+        // 会让 seek 回退失效）。段内单调由 nextPtsUs 的累加保证。
+        val pts = nextPtsUs
         nextPtsUs = pts + frames.toLong() * 1_000_000L / ring.sampleRate
         offsetFrames = Math.floorMod(offset + frames, bandFrames)
         totalReadFrames += frames.toLong()
@@ -86,11 +100,17 @@ class RingBandReader(
         underruns += 1L
     }
 
-    /** seek 目标为环内帧偏移 [0,L)，只改 offset（跳填由 Extractor 通知 renderer）。 */
+    /**
+     * seek 目标为环内帧偏移 [0,L)，只改 offset（跳填由 Extractor 通知 renderer）。
+     *
+     * **PTS 基准重置为 seek 目标**（允许回退）：media3 的 SeekPoint 是 (p,p)，
+     * 首个样本 PTS 取 target 正好落在 seek 位置上；段内仍严格单调。
+     */
     fun seekToFrame(offset: Long, targetUs: Long = 0L) {
         offsetFrames = Math.floorMod(offset, bandFrames)
-        // media3 约定：seek 后 PTS 必须 >= seek 目标，且不得回退。
-        nextPtsUs = maxOf(nextPtsUs, targetUs.coerceAtLeast(0L))
+        val base = targetUs.coerceAtLeast(0L)
+        segmentBasePtsUs = base
+        nextPtsUs = base
     }
 
     fun seekToOffset(frames: Long, targetUs: Long = 0L) = seekToFrame(frames, targetUs)

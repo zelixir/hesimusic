@@ -1553,6 +1553,7 @@ object LoopDebugServer {
         var applyMs: Long? = null
         var advanceMs: Long? = null
         var appliedTarget: Long? = null
+        var landingDisplay: Long? = null
         var framesAtApply: Long? = null
         var advanceSatisfiedAtMs = 0L
         val deadline = t0 + 2_500L
@@ -1568,6 +1569,8 @@ object LoopDebugServer {
             if (applyMs == null && seq > seqBefore) {
                 applyMs = now - t0
                 appliedTarget = (s["lastSeekPlayerTargetMs"] as? Number)?.toLong()
+                // seek 刚落地时的实时展示位置 = 真正的落点(不受"位置开始前进"采样延迟影响)。
+                landingDisplay = ((s["liveDisplayMs"] ?: s["displayMs"]) as? Number)?.toLong()
                 framesAtApply = (s["outputFrames"] as? Number)?.toLong()
                 if (!wasPlaying) break
             }
@@ -1575,7 +1578,7 @@ object LoopDebugServer {
             if (advanceMs == null && target != null) {
                 val pos = (s["playerPositionMs"] as? Number)?.toLong() ?: 0L
                 val state = s["playbackStateName"] as? String
-                if (pos >= target + 30L && state == "READY") {
+                if (pos >= target + 10L && state == "READY") {
                     advanceMs = now - t0
                     advanceSatisfiedAtMs = now
                 }
@@ -1611,7 +1614,12 @@ object LoopDebugServer {
             "framesAtApply" to framesAtApply,
             "framesEnd" to framesEnd,
             "framesDelta" to (framesEnd - framesBefore),
-            "displayAfterMs" to (last["displayMs"] as? Number)?.toLong(),
+            // 落点用实时口径(liveDisplayMs):UI ticker 有最多 100ms 滞后,会把 ±100ms 判据挤爆。
+            // 落点:seek 落地那一刻的实时展示位置(精确落点判据)。
+            "landingDisplayAfterMs" to landingDisplay,
+            // 观测口径:播放头开始前进时的位置(带 target+10~130ms 的采样偏移,只作参考)。
+            "displayAfterMs" to ((last["liveDisplayMs"] ?: last["displayMs"]) as? Number)?.toLong(),
+            "tickedDisplayAfterMs" to (last["displayMs"] as? Number)?.toLong(),
             "playerPositionAfterMs" to (last["playerPositionMs"] as? Number)?.toLong(),
             "playbackStateAfter" to last["playbackStateName"],
             "isPlayingAfter" to last["isPlaying"],
@@ -1622,6 +1630,7 @@ object LoopDebugServer {
             "outsideLoopAfter" to last["outsideLoop"],
             "sourceWindowAfterA_ms" to last["sourceWindowA_ms"],
             "sourceWindowAfterB_ms" to last["sourceWindowB_ms"],
+            "sourceKindAfter" to last["sourceKind"],
             "mode" to last["mode"],
             "outputFrames" to framesEnd,
             // 00023 后续：逐段耗时（请求→落地→extractor.seek→首 PCM→sink.play→READY→出声）。
