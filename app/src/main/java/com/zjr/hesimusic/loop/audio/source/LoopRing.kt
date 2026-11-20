@@ -40,6 +40,21 @@ class LoopRing(
     var coveredFrames: Long = 0L
         private set
 
+    /**
+     * 以**静音**补齐（窗口尾部实际短于预期）的帧数；[coveredFrames] 已包含这些帧。
+     *
+     * 00024：窗口 B = 文件尾时，最后一个编码样本之后的帧物理上不存在，只能补静音；
+     * 这里把这段单独记账，让上层能区分"真实音频"与"补齐静音"（见 [audioCoveredFrames]）。
+     */
+    @Volatile
+    var tailTrimmedFrames: Long = 0L
+        private set
+
+    /** 第一段静音补齐的环内偏移；-1 = 没有。 */
+    @Volatile
+    var tailTrimmedFromOffset: Long = -1L
+        private set
+
     @Volatile
     var closed: Boolean = false
         private set
@@ -50,6 +65,14 @@ class LoopRing(
     /** 整环是否都已填充（回绕到任意位置都能读）。 */
     val isFullyCovered: Boolean
         get() = coveredFrames >= frames
+
+    /** 真正有音频数据的帧数（= [coveredFrames] - [tailTrimmedFrames]）。 */
+    val audioCoveredFrames: Long
+        get() = (coveredFrames - tailTrimmedFrames).coerceAtLeast(0L)
+
+    /** 是否用过静音补齐（"尾部短于预期"），供诊断/上层判读。 */
+    val hasTailTrim: Boolean
+        get() = tailTrimmedFrames > 0L
 
     /** 顺序追加已解码 PCM；返回实际写入帧数（不覆盖已写高水位）。 */
     fun append(src: ByteArray, srcOffsetBytes: Int = 0): Int = synchronized(monitor) {
@@ -98,6 +121,50 @@ class LoopRing(
         renderedFrames = (renderedFrames + run).coerceAtMost(frames)
         monitor.notifyAll()
         run
+    }
+
+    /**
+     * 从环内帧偏移 [offsetFrames] 起，把 [countFrames] 中**尚未覆盖**的帧写成静音并标记覆盖。
+     *
+     * 00024：窗口 B 落在文件尾时，最后一段帧永远解不出来（源已结束）；这里用静音把覆盖位图补到
+     * 窗口末尾，读取端不会卡在缺口上、播放可以正常走完/回绕，同时用 [tailTrimmedFrames] /
+     * [audioCoveredFrames] 记录"尾部实际短于预期"。已覆盖的真实音频绝不会被覆盖。
+     *
+     * 不跨环尾（与 [writeFramesAt] 一致），跨环由调用方循环。
+     *
+     * @return 本次新标记为静音的帧数；0 = 已全部覆盖或环已释放。
+     */
+    fun fillSilenceAt(offsetFrames: Long, countFrames: Long): Int = synchronized(monitor) {
+        if (closed) return 0
+        if (countFrames <= 0L) return 0
+        val offset = Math.floorMod(offsetFrames, frames)
+        var frame = offset
+        var left = minOf(countFrames, frames - offset)
+        var silent = 0L
+        while (left > 0L) {
+            // 跳过已覆盖的真实音频（同线程重入 monitor 安全）：补齐绝不能改写已有 PCM。
+            val filledAhead = contiguousFilledFrames(frame, left)
+            if (filledAhead > 0L) {
+                frame += filledAhead
+                left -= filledAhead
+                continue
+            }
+            // filledAhead == 0 说明起点未覆盖：只补到下一个已填帧为止（不越过真实音频）。
+            val run = minOf(distanceToFilledFrame(frame), left)
+            val startByte = (frame * bytesPerFrame).toInt()
+            java.util.Arrays.fill(data, startByte, startByte + (run * bytesPerFrame).toInt(), 0.toByte())
+            markLocked(frame, run)
+            renderedFrames = (renderedFrames + run).coerceAtMost(frames)
+            silent += run
+            frame += run
+            left -= run
+        }
+        if (silent > 0L) {
+            tailTrimmedFrames += silent
+            if (tailTrimmedFromOffset < 0L) tailTrimmedFromOffset = offset
+            monitor.notifyAll()
+        }
+        silent.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
     }
 
     /** [offsetFrames] 起连续已填充的帧数（可跨环回绕），最多 [maxFrames]。 */
@@ -253,6 +320,8 @@ class LoopRing(
             data = ByteArray(0)
             renderedFrames = 0L
             coveredFrames = 0L
+            tailTrimmedFrames = 0L
+            tailTrimmedFromOffset = -1L
             appendCursor = 0L
             java.util.Arrays.fill(coverage, 0L)
             monitor.notifyAll()
@@ -265,6 +334,8 @@ class LoopRing(
             data.fill(0)
             renderedFrames = 0L
             coveredFrames = 0L
+            tailTrimmedFrames = 0L
+            tailTrimmedFromOffset = -1L
             appendCursor = 0L
             java.util.Arrays.fill(coverage, 0L)
             monitor.notifyAll()

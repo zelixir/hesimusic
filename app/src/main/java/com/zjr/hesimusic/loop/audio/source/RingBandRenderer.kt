@@ -14,6 +14,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - 跳填只填缺口（[LoopRing.distanceToFilledFrame]），已填区域不会被破坏；
  * - 跳填完成后继续把剩余缺口补齐（从上次写游标续填 / 扫描第一个缺口），
  *   这样 B→A 回绕时前缀始终有效。
+ *
+ * 00024（整曲窗口/自由试听）：窗口 B 落在文件尾时，最后一个编码样本之后**没有可输出帧**，
+ * 解码器会返回 0 帧。此时缺口按静音补齐并标记 tailTrimmed（[LoopRing.tailTrimmedFrames]），
+ * 播放继续；只有"远离文件尾的持续 0 帧"才判 DECODE_EXCEPTION。
  */
 class RingBandRenderer(
     private val timeline: LoopingPcmTimeline,
@@ -50,6 +54,21 @@ class RingBandRenderer(
     @Volatile
     var lastJumpOffsetFrames: Long = -1L
         private set
+
+    /** 最近一次解码会话是否到达源尾（诊断/单测）。 */
+    @Volatile
+    var lastFillReachedEndOfStream: Boolean = false
+        private set
+
+    /** 用静音补齐（窗口尾部短于预期）的帧数；正常循环窗口恒为 0。 */
+    val tailTrimmedFrames: Long get() = ring.tailTrimmedFrames
+
+    /** 一个解码粒度（帧）：AAC 1024 / MP3 1152，取 2048 帧并保证不少于 20ms。 */
+    private val decodeGranularityFrames: Long =
+        maxOf(MIN_DECODE_GRANULARITY_FRAMES, timeline.sampleRate.toLong() * DECODE_GRANULARITY_MS / 1000L)
+
+    /** 远离源尾的连续 0 帧会话数；达到 [MAX_EMPTY_FILL_ATTEMPTS] 才判致命。 */
+    private var emptyFillAttempts: Int = 0
 
     private var pendingOffsetFrames: Long = -1L
 
@@ -170,6 +189,8 @@ class RingBandRenderer(
                 " sessions=" + sessions +
                 " covered=" + ring.coveredFrames +
                 " filledFrames=" + ring.renderedFrames +
+                " tailTrimmed=" + ring.tailTrimmedFrames +
+                " audioCovered=" + ring.audioCoveredFrames +
                 " jumps=" + jumpCount +
                 " err=" + (error ?: "-")
             if (stopReason == "DONE") RingBandLog.i(message) else RingBandLog.w(message)
@@ -253,18 +274,96 @@ class RingBandRenderer(
                 }
             }
         }
+        // 00024：会话结束后再判断缺口——"产出 0 帧"本身不是错误，得看源是否已到尾部。
+        val reachedSourceEnd = decoder.lastStreamReachedEndOfStream()
+        lastFillReachedEndOfStream = reachedSourceEnd
+        val missing = frames - written
+        val silenceBefore = ring.tailTrimmedFrames
+        if (missing > 0L && !releaseRequested && generation == myGeneration) {
+            val subGranularity = frames < decodeGranularityFrames ||
+                missing < decodeGranularityFrames
+            when {
+                // (a) 已到源尾：B 超出文件实际音频内容（整曲窗口最常见），剩余帧物理上不存在。
+                reachedSourceEnd -> {
+                    writeOffset = fillSilenceTail(writeOffset, missing, "source-end")
+                    emptyFillAttempts = 0
+                }
+                // (b) 缺口小于一个解码粒度：seek 落点无法保证覆盖这几帧，静音补齐后继续播放。
+                subGranularity -> {
+                    writeOffset = fillSilenceTail(writeOffset, missing, "sub-granularity")
+                    emptyFillAttempts = 0
+                }
+                // (c) 远离源尾的"持续 0 帧"才是真解码故障（00024）。
+                written == 0L -> {
+                    emptyFillAttempts += 1
+                    if (emptyFillAttempts >= MAX_EMPTY_FILL_ATTEMPTS) {
+                        error = "decoder produced no frames offset=" + startOffset +
+                            " frames=" + frames +
+                            " attempts=" + emptyFillAttempts +
+                            " eos=" + reachedSourceEnd +
+                            " covered=" + ring.coveredFrames
+                    }
+                }
+                else -> emptyFillAttempts = 0
+            }
+        } else if (missing <= 0L) {
+            emptyFillAttempts = 0
+        }
         RingBandLog.i(
             "RingBand fill end offset=" + writeOffset + " written=" + written +
-                " generation=" + myGeneration + " covered=" + ring.coveredFrames,
+                " missing=" + (missing.coerceAtLeast(0L)) +
+                " silence=" + (ring.tailTrimmedFrames - silenceBefore) +
+                " eos=" + reachedSourceEnd +
+                " generation=" + myGeneration + " covered=" + ring.coveredFrames +
+                " trimmed=" + ring.tailTrimmedFrames,
         )
-        if (written <= 0L && !releaseRequested && generation == myGeneration) {
-            error = "decoder produced no frames offset=" + startOffset + " frames=" + frames
+    }
+
+    /**
+     * 把不足的 [count] 帧按静音补进环带（尾部短于预期）。
+     *
+     * 覆盖位图照常推进到窗口末尾：读取端不会卡在缺口上，播放能正常结束/回绕；
+     * 但 [LoopRing.tailTrimmedFrames] / [LoopRing.audioCoveredFrames] 会如实记录这段是
+     * 补齐的静音，而不是真实音频。
+     *
+     * @return 补齐后的环内写游标。
+     */
+    private fun fillSilenceTail(writeCursor: Long, count: Long, reason: String): Long {
+        var offset = writeCursor
+        var left = count
+        var filled = 0L
+        while (left > 0L && !releaseRequested) {
+            val wrote = ring.fillSilenceAt(offset, left)
+            if (wrote <= 0) break
+            offset = Math.floorMod(offset + wrote, timeline.loopFrames)
+            left -= wrote.toLong()
+            filled += wrote.toLong()
+            writeOffsetFrames = offset
         }
+        if (filled > 0L) {
+            RingBandLog.w(
+                "RingBand fill silence offset=" + writeCursor + " frames=" + filled +
+                    " reason=" + reason +
+                    " covered=" + ring.coveredFrames +
+                    " trimmed=" + ring.tailTrimmedFrames +
+                    " audioCovered=" + ring.audioCoveredFrames,
+            )
+        }
+        return offset
     }
 
     private companion object {
         const val PREROLL_US = 300_000L
         const val IDLE_WAIT_MS = 500L
         const val RELEASE_WAIT_MS = 500L
+
+        /** 一个解码粒度（帧）：AAC 1024 / MP3 1152，取 2048 帧兜住。 */
+        const val MIN_DECODE_GRANULARITY_FRAMES = 2_048L
+
+        /** 解码粒度的时长下限（毫秒），避免低采样率下把可解码的缺口当静音。 */
+        const val DECODE_GRANULARITY_MS = 20L
+
+        /** 远离源尾时允许的连续 0 帧会话数；超过才判 DECODE_EXCEPTION。 */
+        const val MAX_EMPTY_FILL_ATTEMPTS = 3
     }
 }

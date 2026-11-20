@@ -36,6 +36,15 @@ class MediaCodecRingBandDecoder(
     @Volatile
     private var closeRequested = false
 
+    /**
+     * 最近一次 [stream] 是否解到源尾（抽取器无更多样本 / 解码器输出 EOS）。
+     *
+     * 00024：窗口 B = 文件尾时，seek 落点之后可能压根没有样本（真机 sampleTime=-1），
+     * 会话会 0 帧结束；这不是解码故障。渲染器据此把剩余帧按静音补齐。
+     */
+    @Volatile
+    private var lastStreamReachedEos = false
+
     /** stream 生命周期锁：保证 native 调用（readSampleData/getInputBuffer）与 release 互斥。 */
     private val sessionLock = Any()
     private var sessionActive = false
@@ -43,6 +52,8 @@ class MediaCodecRingBandDecoder(
     override fun cancel() {
         cancelled = true
     }
+
+    override fun lastStreamReachedEndOfStream(): Boolean = lastStreamReachedEos
 
     override fun stream(
         startUs: Long,
@@ -55,6 +66,7 @@ class MediaCodecRingBandDecoder(
             sessionActive = true
         }
         cancelled = false
+        lastStreamReachedEos = false
         val bpf = channels * 2
         val targetStartFrame = Pcm16Frames.frameAtOrAfterUs(startUs, sampleRate)
         val targetEndFrame = Pcm16Frames.frameAtOrAfterUs(endUs, sampleRate)
@@ -221,6 +233,8 @@ class MediaCodecRingBandDecoder(
                     }
                 }
             }
+            // 到源尾 = 抽取器已无样本 或 解码器输出了 EOS：此后目标区间不可能再出帧。
+            lastStreamReachedEos = inputDone || outputDone
             if (cancelled) {
                 logger(
                     "RingBand decode cancelled emitted=" + emittedFrames +
@@ -229,7 +243,10 @@ class MediaCodecRingBandDecoder(
             } else if (emittedFrames < targetFrames) {
                 logger(
                     "RingBand decode short emitted=" + emittedFrames +
-                        " target=" + targetFrames,
+                        " target=" + targetFrames +
+                        " eos=" + lastStreamReachedEos +
+                        " inputDone=" + inputDone +
+                        " outputDone=" + outputDone,
                 )
             }
         } finally {
