@@ -135,6 +135,29 @@ internal class DebugPlayerConnection(private val context: Context) {
     /** controller 是否存在且仍与服务端相连——这是唯一的“可用”口径。 */
     fun isConnected(): Boolean = controller?.isConnected == true
 
+    /**
+     * 主线程读取 controller.availableCommands（A-NEW-11 不变量采样）。
+     *
+     * 未连接/读失败返回 null；命令以 media3 的 int 常量返回，由 debug 采样侧映射成可读名字。
+     */
+    fun availableCommandIds(): Set<Int>? {
+        val current = controllerOrNull() ?: return null
+        if (!current.isConnected) return null
+        return try {
+            callOnMain(MAIN_READ_TIMEOUT_MS) {
+                val commands = current.availableCommands
+                val ids = HashSet<Int>(commands.size())
+                for (i in 0 until commands.size()) {
+                    ids.add(commands.get(i))
+                }
+                ids
+            }
+        } catch (t: Throwable) {
+            Log.d(TAG, "availableCommands read failed: " + t.message)
+            null
+        }
+    }
+
     /** 当前 controller 建立时刻到现在;无 controller 时 null。仅供日志/诊断,不参与有效性判定。 */
     fun controllerAgeMs(): Long? {
         val current = controller ?: return null

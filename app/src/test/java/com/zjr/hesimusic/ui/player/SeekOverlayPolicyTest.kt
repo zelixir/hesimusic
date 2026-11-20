@@ -43,6 +43,18 @@ class SeekOverlayPolicyTest {
     }
 
     @Test
+    fun `A067 seek 后 controller 已乐观 mask 成请求值 立即释放`() {
+        // MediaController.seekTo 在 controller 侧立即 mask 成新位置(A-067),旧值不会出现;
+        // 因此 UI 读到"实际位置 == 请求值"时直接收敛,不需要等一次"旧→新"的变化。
+        assertTrue("乐观值即最终值:elapsed=0 也应释放", SeekOverlayPolicy.shouldRelease(30_000L, 30_000L, 0L))
+        // 真正需要等的是 session 侧 clamp/调整后的最终值;在它到达前继续显示目标。
+        assertFalse(
+            "实际位置仍是旧值 5000ms 时不能释放(不能假设它已经是旧快照)",
+            SeekOverlayPolicy.shouldRelease(5_000L, 30_000L, 0L),
+        )
+    }
+
+    @Test
     fun `覆盖层取值优先级 拖动 高于 待生效目标 高于 服务端位置`() {
         assertEquals("拖动中优先本地值", 1L, SeekOverlayPolicy.shownPositionMs(1L, 2L, 3L))
         assertEquals("松手后显示待生效目标", 2L, SeekOverlayPolicy.shownPositionMs(null, 2L, 3L))

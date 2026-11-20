@@ -17,9 +17,11 @@ import java.nio.ByteBuffer
 /**
  * 只做 PCM 取证的 AudioSink：委托给 [DefaultAudioSink]，不改 PTS、不做环回。
  *
- * tap 必须在 delegate 之前写：DefaultAudioSink 会异步消费，consumed=false 时
- * position 也不一定前移，等 consumed 会漏掉大部分数据。同一个 ByteBuffer 可能被
- * 多次传入，因此用 buffer 身份 + pts + 已写区间去重。
+ * tap 必须在 delegate 之前写：DefaultAudioSink 的**写入路径按实际写入量推进 position**
+ * （audioTrack.write(buffer, size, WRITE_NON_BLOCKING)），但**早期返回路径不推进**
+ * （未初始化 / mayHandleBuffer 拒绝 / drain 未完成）；而且 delegate 可能先把数据吃进
+ * processor 后仍返回 false。所以 consumed=false 不能证明"没消费"，等 consumed 会漏数据。
+ * 同一个 ByteBuffer 可能被多次传入，因此用 buffer 身份 + pts + 已写区间去重。
  *
  * **不变量（issue 00020 回归）：本类绝不自己调用 [play]。**
  * 曾经有一版诊断兜底在首个 handleBuffer 之后强制 `super.play()`（当时怀疑“sink 不启动导致
@@ -151,8 +153,9 @@ class TapAudioSink(
         }
 
         val consumed = super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
-        // 输出侧不变量（00020）：统计真正交给 delegate 的帧数。consumed=true 表示整段被接收
-        // （media3 契约：buffer.position 已推进到 limit）；否则按实际推进量计。
+        // 输出侧不变量（00020）：统计真正交给 delegate 的帧数。
+        // consumed=true 表示整段被接收（media3 契约：buffer.position 已推进到 limit）；
+        // consumed=false 时按**实际推进量**计 —— 写入路径会推进，早期返回路径不推进。
         if (sinkBytesPerFrame > 0) {
             val consumedBytes = if (consumed) {
                 (end - start).coerceAtLeast(0)

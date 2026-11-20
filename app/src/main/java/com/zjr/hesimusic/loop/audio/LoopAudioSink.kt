@@ -6,6 +6,7 @@ import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.audio.AudioSink
+import com.zjr.hesimusic.core.invariants.LoopInvariantProbes
 import com.zjr.hesimusic.loop.LoopWindow
 import androidx.media3.exoplayer.audio.ForwardingAudioSink
 import java.nio.ByteBuffer
@@ -87,8 +88,22 @@ class LoopAudioSink(
     /** 最近一次成功交给 delegate 的起始媒体 PTS（含 offset 域）；用于拒绝倒退重放。 */
     private var lastDelegatePtsUs: Long = Long.MIN_VALUE
 
+    /** 同一次写入的**媒体域** PTS；A-055 比较 configure 前后连续性时不受 offset 变化影响。 */
+    private var lastDelegateMediaPtsUs: Long = Long.MIN_VALUE
+
     /** 最近一次输入 buffer 的媒体 PTS；用于自动识别 seek 大跳变。 */
     private var lastInputPtsUs: Long = Long.MIN_VALUE
+
+    /** A-049：renderer 是否处于 play 态（空 buffer 只在重放/暂停态合法）。 */
+    @Volatile
+    private var sinkPlaying: Boolean = false
+
+    /** A-055：configure 后首帧 PTS 与 configure 前最后一段的连续性。 */
+    private var flushSeq: Long = 0L
+    private var configureFlushSeq: Long = 0L
+    private var preConfigureLastMediaPtsUs: Long = Long.MIN_VALUE
+    private var configureSongId: Long? = null
+    private var firstPtsAfterConfigure: Boolean = false
 
     /** 上一次同步给引擎的窗口；窗口变化时丢弃旧窗口的 pending 重放 chunk。 */
     private var observedWindow: LoopWindow? = null
@@ -149,11 +164,19 @@ class LoopAudioSink(
         // 注意：不要在这里重置 outputStreamOffsetUs。
         // ExoPlayer 会在 configure 之前先调 setOutputStreamOffsetUs（探针实测 1e12），
         // 重置会把 sink 时间轴打回媒体时间，导致 PTS 与 A/B 不同域、捕获永不命中。
+        // A-055 / A-NEW-09：先记录 configure 前的事实，再清 pending（顺序不能反）。
+        preConfigureLastMediaPtsUs = lastDelegateMediaPtsUs
+        configureSongId = controller.window?.songId
+        configureFlushSeq = flushSeq
+        firstPtsAfterConfigure = false
+        LoopInvariantProbes.onSinkConfigure(hadPendingReplay = pendingReplay != null)
+
         pendingInput = null
         pendingReplay = null
         stuckReplayAttempts = 0
         stuckReplaySinceNanos = 0L
         lastDelegatePtsUs = Long.MIN_VALUE
+        lastDelegateMediaPtsUs = Long.MIN_VALUE
         lastInputPtsUs = Long.MIN_VALUE
 
         controller.onFormatConfigured(sampleRate, channelCount, bpf, pcmIsFloat)
@@ -207,6 +230,11 @@ class LoopAudioSink(
 
         val frames = buffer.remaining() / bytesPerFrame
         if (frames <= 0) {
+            // A-049：正常播放态出现的空 buffer 是异常（源侧短读/丢帧），不能静默吞掉。
+            LoopInvariantProbes.onSinkEmptyBuffer(
+                replaying = engine.state == LoopPcmEngine.State.REPLAYING,
+                playing = sinkPlaying,
+            )
             // 空 buffer 在重放态也要消费掉，避免 renderer 因 false 反复重试空 buffer。
             if (engine.state == LoopPcmEngine.State.REPLAYING) {
                 pump()
@@ -218,6 +246,18 @@ class LoopAudioSink(
 
         // 引擎只看媒体时间（0 起）；delegate 仍看“媒体时间 + 当前 output offset”。
         val mediaPts = presentationTimeUs - outputStreamOffsetUs
+        if (!firstPtsAfterConfigure) {
+            firstPtsAfterConfigure = true
+            // 跨 flush/seek 不比较（A-054）；只有 configure 未伴随 flush 时才要求 PTS 连续。
+            if (flushSeq == configureFlushSeq &&
+                preConfigureLastMediaPtsUs != Long.MIN_VALUE &&
+                controller.window?.songId == configureSongId
+            ) {
+                LoopInvariantProbes.onSinkFirstPtsAfterConfigure(
+                    kotlin.math.abs(mediaPts - preConfigureLastMediaPtsUs),
+                )
+            }
+        }
         val stateBefore = engine.state
         val prevInputPts = lastInputPtsUs
         lastInputPtsUs = mediaPts
@@ -313,6 +353,7 @@ class LoopAudioSink(
         val after = buffer.position()
         if (after > before) {
             lastDelegatePtsUs = mediaPts + outputStreamOffsetUs
+            lastDelegateMediaPtsUs = mediaPts
             controller.tapPcm(buffer, before, after - before)
         }
 
@@ -528,6 +569,7 @@ class LoopAudioSink(
         } catch (_: Throwable) {
         }
         lastDelegatePtsUs = Long.MIN_VALUE
+        lastDelegateMediaPtsUs = Long.MIN_VALUE
         lastInputPtsUs = Long.MIN_VALUE
         seamDiscontinuityCount += 1L
         seamLog("discontinuity reason=" + reason + " count=" + seamDiscontinuityCount)
@@ -582,6 +624,7 @@ class LoopAudioSink(
         if (consumed > 0) {
             controller.tapPcm(slice, before, consumed)
             lastDelegatePtsUs = pts + outputStreamOffsetUs + seamPtsBiasUs
+            lastDelegateMediaPtsUs = pts
             seamBuffer?.noteOutput(
                 usToFrameFloor(pts),
                 (consumed / bytesPerFrame).toLong(),
@@ -661,6 +704,7 @@ class LoopAudioSink(
             } catch (_: Throwable) {
             }
             lastDelegatePtsUs = Long.MIN_VALUE
+            lastDelegateMediaPtsUs = Long.MIN_VALUE
             lastInputPtsUs = Long.MIN_VALUE
             seamLog(
                 "source write attempt=2 pts=" + mediaPtsUs + " bias=" + seamPtsBiasUs +
@@ -693,6 +737,7 @@ class LoopAudioSink(
         val after = buffer.position()
         if (after > before) {
             lastDelegatePtsUs = mediaPtsUs + outputStreamOffsetUs + seamPtsBiasUs
+            lastDelegateMediaPtsUs = mediaPtsUs
             controller.tapPcm(buffer, before, after - before)
             seamBuffer?.noteOutput(
                 usToFrameFloor(mediaPtsUs),
@@ -713,6 +758,16 @@ class LoopAudioSink(
     private fun usToFrameFloor(us: Long): Long {
         val sr = sampleRate.toLong()
         return (us * sr) / 1_000_000L
+    }
+
+    override fun play() {
+        sinkPlaying = true
+        super.play()
+    }
+
+    override fun pause() {
+        sinkPlaying = false
+        super.pause()
     }
 
     override fun playToEndOfStream() {
@@ -794,6 +849,12 @@ class LoopAudioSink(
                 if (enginePos >= 0L) controller.updatePositionUs(enginePos)
             }
         }
+        LoopInvariantProbes.onSinkPosition(
+            offsetUs = outputStreamOffsetUs,
+            lastDelegatePtsUs = lastDelegatePtsUs,
+            rawPositionUs = raw,
+            returnedPositionUs = result,
+        )
         return result
     }
 
@@ -814,6 +875,7 @@ class LoopAudioSink(
     override fun handleDiscontinuity() {
         // delegate 已被告知时间戳不连续：允许后续重放从更早的位置重新开始。
         lastDelegatePtsUs = Long.MIN_VALUE
+        lastDelegateMediaPtsUs = Long.MIN_VALUE
         lastInputPtsUs = Long.MIN_VALUE
         engine.onInputDiscontinuity()
         super.handleDiscontinuity()
@@ -825,6 +887,7 @@ class LoopAudioSink(
     }
 
     override fun flush() {
+        flushSeq += 1L
         pendingInput = null
         pendingReplay = null
         pendingSeam = null
@@ -848,6 +911,7 @@ class LoopAudioSink(
         stuckReplayAttempts = 0
         stuckReplaySinceNanos = 0L
         lastDelegatePtsUs = Long.MIN_VALUE
+        lastDelegateMediaPtsUs = Long.MIN_VALUE
         lastInputPtsUs = Long.MIN_VALUE
         preallocRetries = 0
         engine.onFlush()
@@ -856,6 +920,7 @@ class LoopAudioSink(
     }
 
     override fun reset() {
+        sinkPlaying = false
         pendingInput = null
         pendingReplay = null
         pendingSeam = null
@@ -869,6 +934,7 @@ class LoopAudioSink(
         stuckReplayAttempts = 0
         stuckReplaySinceNanos = 0L
         lastDelegatePtsUs = Long.MIN_VALUE
+        lastDelegateMediaPtsUs = Long.MIN_VALUE
         lastInputPtsUs = Long.MIN_VALUE
         preallocRetries = 0
         engine.onReset()
@@ -877,6 +943,7 @@ class LoopAudioSink(
     }
 
     override fun release() {
+        sinkPlaying = false
         released = true
         disabled = true
         pendingInput = null
@@ -892,6 +959,7 @@ class LoopAudioSink(
         stuckReplayAttempts = 0
         stuckReplaySinceNanos = 0L
         lastDelegatePtsUs = Long.MIN_VALUE
+        lastDelegateMediaPtsUs = Long.MIN_VALUE
         lastInputPtsUs = Long.MIN_VALUE
         preallocRetries = 0
         engine.onRelease()

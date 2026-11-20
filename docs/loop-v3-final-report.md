@@ -36,9 +36,9 @@ PTS 按 B+(k-1)L+offset 单调递增。全程没有 period/窗口/EOS/seek 边�
 
 | # | 现象 | 根因 | 修法 |
 |---|---|---|---|
-| 1 | 环回点永远不命中,到 B 就降级 | `ClippingMediaSource` 让 sink 侧媒体时间整体偏移 `1e12`,而 A/B 是媒体时间 | 用 `AudioSink.setOutputStreamOffsetUs` 做域归一化;并**彻底放弃裁剪**(不裁剪同样能环回,还省掉 `replaceMediaItem` 重建路径) |
+| 1 | 环回点永远不命中,到 B 就降级 | `1e12` 是 media3 给首个 period 的**初始 renderer offset**(MediaPeriodQueue.INITIAL_RENDERER_POSITION_OFFSET_US),不是 clip 特有;clip 只改 window 的 `positionInFirstPeriodUs`/时长并把位置钳在 `[0,end−start]`。旧结论把"初始 offset"与"clip"混为一谈 | 用 `AudioSink.setOutputStreamOffsetUs` 做域归一化;环回不需要 source 在 B 处 EOS,因此**不额外加循环裁剪**(CUE 分轨 clip 保留,只决定分轨窗口) |
 | 2 | 进入重放约 12s 后冻结 | 重放态无条件吞输入 → 解码器以 17x 实时跑完整首歌 → 提前 EOS → 泵停 | 重放态按 delegate 背压节流:**写不进 delegate 就不消费输入**(自时钟泵) |
-| 3 | 重放开始 display 冲出 B(最大 +2.7s) | MediaSession 的 PlaybackState 约 1s 刷新一次,MediaController 在间隙按 speed=1 外推 | 折返下沉到消费侧(UI + 协议端)幂等再折一次;服务层在重放期回退到同步写入的 `audio.window` 作为投影口径 |
+| 3 | 重放开始 display 冲出 B(最大 +2.7s) | MediaSession 的周期位置事件默认 **3s** 一次,MediaController 在间隙按**当前 speed** 外推 | 折返下沉到消费侧(UI + 协议端)幂等再折一次;服务层在重放期回退到同步写入的 `audio.window` 作为投影口径 |
 | 4 | 重放中 seek 落回 A | 展示目标被映射到跨轮次的源位置,越界触发 flush 后环游标从 0 开始 | 进入重放时按输入 PTS 的折返相位初始化环内游标 |
 | 5 | 冷启后 debug 连接绑到空 player | MediaController 抢跑 | debug 侧加有效性判定 + `/debug/reconnect` |
 
@@ -90,7 +90,7 @@ PTS 按 B+(k-1)L+offset 单调递增。全程没有 period/窗口/EOS/seek 边�
 
 1. **冷启动 ring 为空**:捕获式方案的固有代价。生产路径无感(从 0 播放会自然填满;恢复/区内起播有一次预卷 seek)。
    预览页「接缝检查(B−5s)」在全新会话的首轮会提示先试听一轮。**建议后续**:进页后台预解码 `[A,B)` 预填充 ring。
-2. **MediaSession 的 PlaybackState 刷新间隔约 1s(实测偶发 4s)**:直接读 PlaybackState 的消费者会看到最多一个间隔的滞后;
+2. **MediaSession 的周期位置事件默认 3s(实测偶发更久)**:直接读 PlaybackState 的消费者会看到最多一个间隔的滞后;
    应用内 UI 与协议端已做折返,用户可见进度正常。彻底解决需在接缝处强制刷新 session(Media3 无公开 API)。
 3. **`/library/songs?playlist=` 不解析智能歌单**(协议缺口,产品侧「无缝循环」歌单本身正常)。
 4. **排序切换/扫描触发** 无协议入口,L4 未自动化(UI-only)。

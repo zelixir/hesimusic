@@ -158,10 +158,11 @@ fun PlayerScreen(
                 // 因此拖动中只更新这里、绝不 seek;松手才下发一次 seek。
                 var draggingMs by remember { mutableStateOf<Long?>(null) }
                 // 松手后**待生效**的 seek 目标(issue 00001 第 2 条:松手后不再闪回旧位置)。
-                // seek 要经过 MediaController → MediaSession → LoopSessionPlayer → 引擎才生效,
-                // 而 UI 读到的位置来自 MediaController 的 PlaybackState 快照(约 1s 才刷新一次);
-                // 松手就把滑块交还给服务端位置,会先跳回旧位置、下一拍才跳到目标(中间闪一下)。
-                // 所以继续显示目标位置,直到位置真的收敛或超时,见 [SeekOverlayPolicy]。
+                // A-067: MediaController.seekTo 在 controller 侧**立即乐观 mask** 成新位置/新状态;
+                // UI 读到的已经是新值,不是"旧快照"。真正要等的是 session 侧 clamp/调整后的
+                // **最终值**(以及它对应的 PlaybackState 到达 UI)。MediaSession 的周期位置事件
+                // 默认 3s 一次,所以覆盖层不能用"约 1s"作假设,只以收敛或超时释放,
+                // 见 [SeekOverlayPolicy]。
                 var pendingSeekMs by remember { mutableStateOf<Long?>(null) }
                 val sliderInteractionSource = remember { MutableInteractionSource() }
 
@@ -187,8 +188,9 @@ fun PlayerScreen(
                 }
 
                 // 待生效目标的生命周期:位置收敛(±1200ms)或超时(1500ms)后释放覆盖层。
-                // 期望落点必须用**折返后的展示位置**(有循环窗口时引擎会把目标折回 [A,B)),
-                // 否则在无缝态下会永远等不到"收敛"。
+                // 判据是"实际展示位置 == 最终期望值(容差内)或超时",不是"等旧值变成新值"
+                // (A-067:controller 已乐观 mask,旧值根本不会出现)。期望落点必须用
+                // **折返后的展示位置**(有循环窗口时引擎会把目标折回 [A,B)),否则无缝态永远等不到收敛。
                 LaunchedEffect(pendingSeekMs) {
                     val target = pendingSeekMs ?: return@LaunchedEffect
                     val expected = SeekOverlayPolicy.expectedDisplayMs(target, loopWindowState.value)
@@ -539,11 +541,11 @@ fun EqualizerDialog(
 /**
  * 松手 seek 的「待生效目标」覆盖层策略(纯函数,无 Compose/Android 依赖,便于单测)。
  *
- * 背景(issue 00001 第 2 条):seek 下发后要经过
- * `MediaController → MediaSession → LoopSessionPlayer → 引擎` 才真正生效,而 UI 读到的位置
- * 来自 MediaController 的 PlaybackState 快照(约 1s 才刷新一次,实测偶发更久,见
- * docs/loop-v3-final-report.md)。松手瞬间就把滑块交还给服务端位置,会先跳回旧位置、下一拍
- * 才跳到目标(中间闪一下)。因此松手后继续显示目标位置,直到位置收敛或超时。
+ * 背景(issue 00001 第 2 条 + A-067):`MediaController.seekTo` 先在 controller 侧乐观
+ * mask 成新位置/新状态,之后才经过 `MediaSession → LoopSessionPlayer → 引擎` 到达最终值。
+ * 所以覆盖层等待的是「实际展示位置 == session 侧最终期望值」,**不是**「旧位置变成新位置」;
+ * 等不到就按 [MAX_HOLD_MS] 超时释放。MediaSession 的周期位置事件默认 3s(A-066),
+ * 因此这里不假设"约 1s 一刷"。
  */
 internal object SeekOverlayPolicy {
 

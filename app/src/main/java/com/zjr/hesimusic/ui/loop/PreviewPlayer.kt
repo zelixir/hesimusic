@@ -68,11 +68,12 @@ enum class PreviewMode(val label: String) {
  * 因此"预览听到的接缝 == 正式播放的接缝",不存在两套播放实现漂移。
  *
  * 形态:
- * - 循环模式:FULL/LOOP_ONLY/SEAM 用带 `ClippingConfiguration(0, B)` 的 MediaItem ——
- *   源端在 B 处 EOS,音频 sink 在 B 精确切到 PCM 重放(越过 B 后的位置由 sink 侧
- *   `LoopAudioController.positionUs` 报告,ExoPlayer 对外的 currentPosition 会被 clip 钳住,
- *   这是 P0 实测结论);
- * - FREE:无剪裁、窗口置空,整曲直通。
+ * - 循环模式:FULL/LOOP_ONLY/SEAM 与 FREE 共用 `song.toMediaItem()`,**不额外添加**
+ *   循环剪裁。B 处的环回完全由音频层窗口/ring 完成;越过 B 后的位置由 sink 侧
+ *   `LoopAudioController.positionUs` 报告,不靠 source 在 B 处 EOS。
+ *   (CUE 曲目自带的 clip 是分轨语义:window 时长 = end−start、默认位置 = clip 起点、
+ *   位置钳在 [0, clipLen],与环回无关。)
+ * - FREE:窗口置空,整曲直通。
  *
  * 线程:ExoPlayer 的创建/访问全部在主线程(VM 调用方与内部 ticker 都在主线程)。
  */
@@ -609,8 +610,9 @@ class PreviewPlayer @Inject constructor(
             .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true)
             .setHandleAudioBecomingNoisy(true)
         if (kind == EngineKind.SOURCE) {
-            // 源模式 1 秒块：默认 2.5s bufferForPlayback 会要求 3 块才起播。
-            // 放宽为 1s 起播，min 3s/max 8s 继续预取，兼顾首声延迟与稳态。
+            // 源模式 1 秒块：media3 默认 bufferForPlayback=1s/afterRebuffer=2s。
+            // 这里用 1.5s/2.5s + min 4s/max 12s，配合 Extractor 的 2 块起播门槛，
+            // 兼顾首声延迟与稳态预取。
             builder.setLoadControl(
                 DefaultLoadControl.Builder()
                     .setBufferDurationsMs(4_000, 12_000, 1_500, 2_500)
@@ -865,14 +867,18 @@ class PreviewPlayer @Inject constructor(
     /**
      * 建 MediaItem。
      *
-     * **不使用 MediaItem.ClippingConfiguration**:实测 media3 1.8 的 clipped source 会把
-     * ExoPlayer 传给 AudioSink 的 `outputStreamOffsetUs` 变成 -1e12,于是 sink 侧媒体 PTS
-     * = 1e12 + 真实位置 → 引擎永远命中不了 [A,B) → 到 B 直接降级为直通(真机 logcat 实证:
-     * `enginePosUs=1000008363999`、`degrade requested targetRawUs=A-250ms`)。
+     * **不额外添加循环剪裁**:media3 1.8 给首个 period 的 renderer offset 恒为
+     * `INITIAL_RENDERER_POSITION_OFFSET_US = 1e12`(MediaPeriodQueue),它不是 clip 造成的;
+     * 真机 logcat 的 `enginePosUs=1000008363999` = 1e12 + 8.364s 的真实位置。
+     * clip 的真实效果是改 window:`positionInFirstPeriodUs += startUs`、
+     * `durationUs = end − start`,同时 period 的 `positionInWindowUs -= startUs`
+     * (两项相加仍是原 window 位置,所以 renderer offset 仍是 1e12),并把位置钳在
+     * [0, end−start](ClippingMediaSource)。
      *
      * 环回本来就不需要 source 在 B 处 EOS:LoopAudioSink 会在 PCM 层把越过 B 的输入裁掉
      * 并原地重放 ring(越 B 之后的源样本被丢弃),没有 period/EOS/flush 边界,这也正是
-     * M3' 的设计前提。所以循环/自由模式共用同一个不裁剪的 MediaItem。
+     * M3' 的设计前提。所以循环/自由模式共用同一个 **不额外裁剪** 的 MediaItem;
+     * CUE 曲目由 SongMapper 生成的 clip 只决定分轨窗口,不是环回边界。
      */
     private fun buildMediaItem(song: Song): MediaItem = song.toMediaItem()
 
@@ -967,7 +973,8 @@ class PreviewPlayer @Inject constructor(
      * 展示口径位置:
      * - 重放期读 sink 报告的引擎原始位置(B + (k−1)L + 环内偏移),再经 [LoopPosition.displayUs]
      *   折返到 [A, B);
-     * - 其余时候读 ExoPlayer 位置(被 clip 钳在 [0, B],前奏/区间内原样)。
+     * - 其余时候读 ExoPlayer 位置(无环回裁剪;CUE clip 下是轨内位置,
+     *   已由 ClippingMediaSource 钳在 [0, clipLen],默认位置 0 = clip 起点)。
      */
     private fun updatePositionOnce() {
         val p = player ?: return

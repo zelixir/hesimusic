@@ -81,6 +81,41 @@ class TapAudioSinkOutputFramesTest {
     }
 
     @Test
+    fun notConsumedButFullyAdvancedCountsEveryWrittenByte() {
+        // A-048 的修复前会失败场景:delegate 返回 false,但写入路径把 position 推进到 limit
+        // (DefaultAudioSink 的写入路径按写入量推进),统计必须按 100 帧而不是 0 帧计。
+        var movedToLimit = true
+        val delegate = Proxy.newProxyInstance(
+            AudioSink::class.java.classLoader,
+            arrayOf(AudioSink::class.java),
+        ) { _, method, args ->
+            when (method.name) {
+                "handleBuffer" -> {
+                    val buffer = args?.getOrNull(0) as? ByteBuffer
+                    if (buffer != null && movedToLimit) buffer.position(buffer.limit())
+                    false
+                }
+                "supportsFormat" -> true
+                else -> when (method.returnType) {
+                    java.lang.Boolean.TYPE -> false
+                    java.lang.Integer.TYPE -> 0
+                    java.lang.Long.TYPE -> 0L
+                    else -> null
+                }
+            }
+        } as AudioSink
+        val controller = LoopAudioController()
+        val sink = TapAudioSink(delegate, controller)
+        configure(sink)
+        sink.handleBuffer(PcmTestSupport.pcm16Buffer(0, 100), 0L, 1)
+        assertEquals("position 前进了 100 帧:统计 100", 100L, AudioOutputFrames.totalFrames(controller))
+
+        movedToLimit = false
+        sink.handleBuffer(PcmTestSupport.pcm16Buffer(100, 100), 1_000L, 1)
+        assertEquals("早期返回且 position 未动:不新增统计", 100L, AudioOutputFrames.totalFrames(controller))
+    }
+
+    @Test
     fun notConsumedBufferStillCountsTheAdvancedPart() {
         var consumeFirst = true
         val delegate = Proxy.newProxyInstance(

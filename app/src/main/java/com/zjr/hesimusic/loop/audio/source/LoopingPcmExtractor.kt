@@ -12,6 +12,7 @@ import androidx.media3.extractor.PositionHolder
 import androidx.media3.extractor.SeekMap
 import androidx.media3.extractor.SeekPoint
 import androidx.media3.extractor.TrackOutput
+import com.zjr.hesimusic.core.invariants.LoopInvariantProbes
 
 /**
  * 把 [LoopingPcmSourceCore] 包装成"虚拟无限长 PCM 容器"的 [Extractor]。
@@ -55,15 +56,23 @@ class LoopingPcmExtractor(
         }
     }
 
+    /**
+     * 保险:单候选 extractor 时 media3 直接采用(BundledExtractorsAdapter 不调 sniff),
+     * 这里返回 true 只覆盖被显式 sniff 的路径,不代表"sniff=true 才会被采用"。
+     */
     override fun sniff(input: ExtractorInput): Boolean = true
 
     override fun init(output: ExtractorOutput) {
+        LoopInvariantProbes.onExtractorInit()
         val track = output.track(0, C.TRACK_TYPE_AUDIO)
+        LoopInvariantProbes.onExtractorTrackCreated()
         trackOutput = track
         track.format(format)
         formatSent = true
         output.seekMap(seekMap)
+        LoopInvariantProbes.onExtractorSeekMap()
         output.endTracks()
+        LoopInvariantProbes.onExtractorEndTracks()
         logger("extractor init format=" + format.sampleMimeType + "/" + format.pcmEncoding + " " + timeline.sampleRate + "Hz/" + timeline.channels + "ch")
     }
 

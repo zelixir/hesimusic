@@ -580,10 +580,13 @@ requestDecode firstBlock=false gen=419 ...（每 10ms 一条，gen 一路涨）
 真机第三轮：`first block ready -> onPrepared` 已出现，但 `playerPos=0 state=BUFFERING`。
 根因不是解码，而是加载控制门槛：
 
-- media3 `DefaultLoadControl` 默认 `bufferForPlaybackMs=2500`；
-- 首块 1s ready 后，如果 `continueLoading` 没有继续把 k+1/k+2 解出来，
-  缓冲只有 1s，达不到 2.5s 门槛；
-- `getNextLoadPositionUs()` 旧实现返回 `bufferedEndUs()`，边界情况下容易让
+- media3 1.8.0 `DefaultLoadControl` 默认 `bufferForPlaybackMs=1000`、
+  `bufferForPlaybackAfterRebufferMs=2000`（不是旧文档写的 2500，见
+  `DefaultLoadControl.java:61-67`）；SOURCE 另用专用 LoadControl：
+  `minBuffer=4000, maxBuffer=12000, bufferForPlayback=1500, bufferForPlaybackAfterRebuffer=2500`
+  （`MediaModule.kt:104` / `PreviewPlayer.kt:617`）；
+- 首块 1s ready 本身低于 1.5s 起播门槛，由 Extractor 的"至少 2 块(2s)就绪"覆盖；
+- 更关键的是 `getNextLoadPositionUs()` 旧实现返回 `bufferedEndUs()`，边界情况下容易让
   loader 误判没有下一段可加载；`getBufferedPositionUs()` 必须返回**连续 READY 块末尾**。
 
 修复：
@@ -592,10 +595,11 @@ requestDecode firstBlock=false gen=419 ...（每 10ms 一条，gen 一路涨）
   返回该块起点；预取窗口全部 READY 时返回 null（period 映射为 `C.TIME_END_OF_SOURCE`）；
 - `getBufferedPositionUs()` 保持 `core.bufferedEndUs()`（连续 READY 的 PTS 末尾）；
 - `continueLoading()` 继续调度 1s 块，首块任务最多 4 块、普通任务最多 3 块，
-  覆盖默认 3s minBuffer；
-- SOURCE 的 `ExoPlayer.Builder` 加专用 `DefaultLoadControl`：
-  `minBuffer=3000, maxBuffer=8000, bufferForPlayback=1000, bufferForPlaybackAfterRebuffer=1500`，
-  首块 1s 即可放行，继续后台预取；
+  覆盖 SOURCE 专用的 4s minBuffer；
+- SOURCE 的 `ExoPlayer.Builder` 加专用 `DefaultLoadControl`
+  （`MediaModule.kt:104` / `PreviewPlayer.kt:617`）：
+  `minBuffer=4000, maxBuffer=12000, bufferForPlayback=1500, bufferForPlaybackAfterRebuffer=2500`，
+  起播门槛 1.5s 由 Extractor 的"至少 2 块(2s)就绪"覆盖，之后继续后台预取；
 - 新增 1s 一条的 `load pos=... buffered=... nextLoad=... loading=... readyBlocks=...` 日志。
 
 新增测试 `buffered end covers continuous ready blocks ...`：
@@ -616,8 +620,9 @@ requestDecode firstBlock=false gen=419 ...（每 10ms 一条，gen 一路涨）
 - `LoopingPcmSampleStream.readData()` 打印 format 发送与每秒一次
   `readData sample=... bytes=... ptsUs=...`；
 - `Format` 补 `maxInputSize=64KB`、`id=loop-pcm`，确保 AudioSink/selector 识别为原始 PCM；
-- `onPrepared` 后主动 `callback.onContinueLoadingRequested(this)` 踢一次 loader，
-  避免某些路径 onPrepared 后等待下一次回调。
+- ~~`onPrepared` 后主动 `callback.onContinueLoadingRequested(this)` 踢一次 loader~~
+  （已删）：media3 在 `handleLoadingPeriodPrepared` 末尾会自己调
+  `maybeContinueLoading`（`ExoPlayerImplInternal.java:2989-3016`），主动踢是冗余的。
 
 新增 `LoopingPcmMediaPeriodTrackTest`：用 2 槽 renderer 数组 + 只在 index=1 放
 `ExoTrackSelection`，验证 `selectTracks` 把唯一 stream 挂到 audio 槽，随后

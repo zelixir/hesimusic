@@ -220,6 +220,9 @@ class RecordingAudioSink(
     val playToEndCalls = AtomicInteger()
     val discontinuityCalls = AtomicInteger()
 
+    /** renderer 传给 AudioSink 的 outputStreamOffsetUs(A-062:1e12 + period 位置)。 */
+    val outputStreamOffsets = CopyOnWriteArrayList<Long>()
+
     @Volatile
     private var ended = false
 
@@ -276,6 +279,10 @@ class RecordingAudioSink(
     fun totalFrames(): Long = synchronized(lock) { acceptedFrames }
 
     override fun setListener(listener: AudioSink.Listener) = Unit
+
+    override fun setOutputStreamOffsetUs(offsetUs: Long) {
+        outputStreamOffsets += offsetUs
+    }
 
     override fun supportsFormat(format: Format): Boolean = true
 

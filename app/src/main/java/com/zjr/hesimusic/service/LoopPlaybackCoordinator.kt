@@ -106,14 +106,22 @@ class LoopPlaybackCoordinator @Inject constructor(
     private var listenedPlayer: Player? = null
 
     /**
+     * 上一次 transition 时 currentMediaItem 是否存在（A-016 的 PLAYLIST_CHANGED 判据）。
+     * 只用于区分「PLAYLIST_CHANGED 真的把 item 从空变非空」与「setMediaItems 重设同队列」。
+     */
+    private var previousItemPresent: Boolean = false
+
+    /**
      * 本层自己监听播放器事件（不依赖 MusicService 的转发顺序）：
      *
      * - **shuffle**：MusicService 没有转发该事件；不监听的话「用户打开随机」不会退出无缝意图，
      *   显示与实际错位。只在有武装意图时重算。
      * - **transition / timeline / state**：`/loop/enter` 是「先 arm 意图、再 setMediaItems」，
      *   冷启动 restore 也是异步灌队列 —— intent 那一次事件里 `currentMediaItem` 还是 null，
-     *   于是 songId=null → window=null，之后再没有任何事件 → 永远不进循环（真机 40169 复现）。
-     *   这里在「窗口还没落到当前 item 上」时补一次重算（幂等：落到之后这些事件不再触发）。
+     *   于是 songId=null → window=null（真机 40169 复现）。
+     *   注意：`setMediaItems` 每次都会触发 `onMediaItemTransition(PLAYLIST_CHANGED)`（A-016），
+     *   不能把"重设队列不触发 transition"当前提；这里按 reason 过滤，PLAYLIST_CHANGED 只在
+     *   currentMediaItem **由空变非空**时才补算。窗口没落到当前 item 上时按幂等补一次重算。
      */
     private val playerListener = object : Player.Listener {
 
@@ -127,6 +135,20 @@ class LoopPlaybackCoordinator @Inject constructor(
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            val previous = previousItemPresent
+            previousItemPresent = mediaItem != null
+            // A-016: setMediaItems 每次都会派发 PLAYLIST_CHANGED;它不是"换歌信号"。
+            // 只有 AUTO / REPEAT / SEEK,或 PLAYLIST_CHANGED 让 currentMediaItem 由空变非空,
+            // 才值得补算窗口。其余 reason(含同队列重设)直接忽略。
+            if (!LoopIntentRefreshPolicy.shouldRefreshOnTransition(
+                    reason = reason,
+                    previousItemPresent = previous,
+                    currentItemPresent = mediaItem != null,
+                )
+            ) {
+                Log.d(TAG, "transition ignored reason=" + reason + " mediaId=" + mediaItem?.mediaId)
+                return
+            }
             requestIntentRefresh(REASON_PLAYER_TRANSITION)
         }
 
@@ -135,6 +157,9 @@ class LoopPlaybackCoordinator @Inject constructor(
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
+            // A-077: ExoPlayer 创建时不会派发初始 IDLE;IDLE 事件只在 stop()/错误重置后出现。
+            // 保留这个分支(stop 后确实需要),但初始化不能依赖它 —— 初始态由 refresh 主动读
+            // player.playbackState(见 refresh 的日志)。
             if (playbackState == Player.STATE_IDLE) return
             requestIntentRefresh(REASON_PLAYER_STATE)
         }
@@ -270,9 +295,12 @@ class LoopPlaybackCoordinator @Inject constructor(
                     " window=" + window +
                     " state=" + player.playbackState + " pwr=" + player.playWhenReady,
             )
-            // 意图已武装但窗口还没算出来：常见于「先 arm 再 setMediaItems」的进入顺序
-            // （此时 currentMediaItem 还是 null），等 item 出现后再补算，避免永远 window=null。
-            if (window == null && armedSongId != null) {
+            // 意图已武装但窗口还没算出来：只在「currentMediaItem 还是 null」时启动兜底补算
+            // （先 arm 再 setMediaItems / 冷启动 restore）。A-016:setMediaItems 本身会派发
+            // PLAYLIST_CHANGED,所以 settle 的前提是"item 由空变非空",不是"队列没变所以没事件"。
+            if (window == null && armedSongId != null &&
+                LoopIntentRefreshPolicy.shouldStartSettle(player.currentMediaItem == null)
+            ) {
                 scheduleIntentSettle(player, reason)
             }
             // SOURCE 路线才需要文件路径；M3′ 路线保持原样（多查一次 DB 没有意义）。
@@ -420,6 +448,8 @@ class LoopPlaybackCoordinator @Inject constructor(
         listenedPlayer?.removeListener(playerListener)
         player.addListener(playerListener)
         listenedPlayer = player
+        // 注册时的 item 存在性作为第一次 transition 的基线(A-016)。
+        previousItemPresent = player.currentMediaItem != null
     }
 
     /** 事件驱动的补算：只在「意图已武装 + 窗口还没落到当前 item」时触发（幂等）。 */
@@ -457,10 +487,11 @@ class LoopPlaybackCoordinator @Inject constructor(
      * 意图已武装、窗口却还是 null 时的兜底补算。
      *
      * 真机 40169 复现：`/loop/enter` 先 arm 意图、再 `setMediaItems`，intent 那一次 refresh
-     * 里 `currentMediaItem` 还是 null（songId=null → 资格不成立 → window=null），而队列/索引
-     * 与当前完全相同，`setMediaItems` 不会触发 transition，于是再没有任何事件。
-     * 这里在 2s 内每 200ms 试一次：当前歌出现/行就绪就把窗口算出来并落到 item 上，
-     * 一旦落到（[windowAppliedForCurrentItem]）立即停。
+     * 里 `currentMediaItem` 还是 null（songId=null → 资格不成立 → window=null）。
+     * **A-016 纠正**：`setMediaItems` 每次都会派发 `PLAYLIST_CHANGED`，不是"不会触发
+     * transition"；但 PLAYLIST_CHANGED 本身不是换歌信号，所以 settle 的真实前提是
+     * **currentMediaItem 由空变非空**。这里在 2s 内每 200ms 试一次：item 出现 / 行就绪就把
+     * 窗口算出来并落到 item 上，一旦落到（[windowAppliedForCurrentItem]）立即停。
      */
     private fun scheduleIntentSettle(player: Player, reason: String) {
         // 补算循环内部会再进 refresh(→ 这里)：正在跑就不要 cancel 自己，否则只试一次。
@@ -471,6 +502,10 @@ class LoopPlaybackCoordinator @Inject constructor(
                 if (playerRef !== player) return@launch
                 if (loopIntent.armed.value == null) return@launch
                 if (windowAppliedForCurrentItem(player)) return@launch
+                // settle 前提:currentMediaItem 已由空变非空;还没出现就继续等。
+                if (!LoopIntentRefreshPolicy.shouldAttemptSettle(player.currentMediaItem != null)) {
+                    return@repeat
+                }
                 val songId = currentSongId(player)
                 if (songId == null) return@repeat
                 Log.i(

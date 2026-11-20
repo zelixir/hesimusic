@@ -15,6 +15,7 @@ import androidx.media3.exoplayer.source.MediaPeriod
 import androidx.media3.exoplayer.source.SampleStream
 import androidx.media3.exoplayer.source.TrackGroupArray
 import androidx.media3.exoplayer.trackselection.ExoTrackSelection
+import com.zjr.hesimusic.core.invariants.LoopInvariantProbes
 import java.io.IOException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -121,6 +122,7 @@ class LoopingPcmMediaPeriod(
     private var decodeWatchdog: Runnable? = null
 
     init {
+        LoopInvariantProbes.onPeriodCreated()
         core.seekToTimelineUs(startPositionUs)
         logD("period created startPositionUs=" + startPositionUs + " " + core.debugStateString())
     }
@@ -133,6 +135,7 @@ class LoopingPcmMediaPeriod(
                 logD("prepare already ready; notify")
                 callbackHandler.post {
                     callback.onPrepared(this)
+                    LoopInvariantProbes.onPeriodManualKick()
                     callback.onContinueLoadingRequested(this)
                 }
                 return
@@ -274,6 +277,7 @@ class LoopingPcmMediaPeriod(
 
     override fun continueLoading(loadingInfo: LoadingInfo): Boolean {
         if (isReleased()) return false
+        LoopInvariantProbes.onPeriodContinueLoading()
         if (LoopSourcePauseGate.paused) return false
         maybeLogLoad(
             loadingInfo.playbackPositionUs,
@@ -407,6 +411,7 @@ class LoopingPcmMediaPeriod(
                             }
                             if (ready && prepareError == null) {
                                 prepared = true
+                                LoopInvariantProbes.onPeriodPrepared()
                                 clearPrepareTimeout()
                             }
                         }
@@ -415,9 +420,10 @@ class LoopingPcmMediaPeriod(
                             logD("first block ready -> onPrepared")
                             callbackHandler.post {
                                 cb.onPrepared(this)
-                                // 有的路径 onPrepared 后 loader 要等下一次回调才继续；
-                                // 主动踢一次，避免 prepared 后不再 continueLoading。
-                                cb.onContinueLoadingRequested(this)
+                                // §12.3 / A-025: media3 在 handleLoadingPeriodPrepared 末尾
+                                // 自己会调 maybeContinueLoading(ExoPlayerImplInternal),这里不再
+                                // 主动踢 loader;旧注释"有的路径要等下一次回调"已被源码否定。
+                                logD("onPrepared returned; loader kick is owned by media3")
                             }
                         }
                     }

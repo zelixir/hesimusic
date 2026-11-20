@@ -12,6 +12,7 @@ import androidx.media3.extractor.PositionHolder
 import androidx.media3.extractor.SeekMap
 import androidx.media3.extractor.SeekPoint
 import androidx.media3.extractor.TrackOutput
+import com.zjr.hesimusic.core.invariants.LoopInvariantProbes
 import java.io.IOException
 
 /** 环带播放的 Extractor：read 从 RingBandReader 取模；seek 只改 offset。 */
@@ -63,12 +64,20 @@ class RingBandExtractor(
         }
     }
 
+    /**
+     * 保险:单候选 extractor 时 media3 直接采用(BundledExtractorsAdapter 不调 sniff),
+     * 这里返回 true 只覆盖被显式 sniff 的路径,不代表"sniff=true 才会被采用"。
+     */
     override fun sniff(input: ExtractorInput): Boolean = true
 
     override fun init(output: ExtractorOutput) {
+        LoopInvariantProbes.onExtractorInit()
         trackOutput = output.track(0, C.TRACK_TYPE_AUDIO).also { it.format(format) }
+        LoopInvariantProbes.onExtractorTrackCreated()
         output.seekMap(seekMap)
+        LoopInvariantProbes.onExtractorSeekMap()
         output.endTracks()
+        LoopInvariantProbes.onExtractorEndTracks()
         logger("RingBand extractor init")
     }
 

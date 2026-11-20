@@ -227,6 +227,10 @@
 
 ### 12.2 需要加运行时断言的 UNDEFINED(可复用 /debug/invariant 机制)
 
+> 已接线：12 条全部有 code / 纯判定器 / JVM 单测 / POST /debug/invariant 注入。
+> 逐条触发条件、注入命令与用户可见后果见 `docs/runtime-invariants-undefined.md`。
+> code 与判定器在 `app/src/main/java/com/zjr/hesimusic/core/invariants/AssumptionInvariants.kt`。
+
 | ID | 断言内容 | 触发点 | 失败含义 |
 |---|---|---|---|
 | UNDEFINED A-025 | prepared 之后 continueLoading 是否**已经**被 media3 调过(我们在 handlePeriodPrepared 之后 1 帧内计数) | MediaPeriod.onPrepared 回调后 | 若从未被调,说明"主动踢"是必要的;若已调,可删掉我们的踢 |

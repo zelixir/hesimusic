@@ -25,6 +25,7 @@ import com.zjr.hesimusic.data.scanner.TagLibHelper
 import com.zjr.hesimusic.loop.LoopIntent
 import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.LoopWindow
+import com.zjr.hesimusic.service.MusicNavigationPolicy
 import com.zjr.hesimusic.service.MusicService
 import com.zjr.hesimusic.ui.player.state.PlayerPageShadow
 import com.zjr.hesimusic.ui.player.state.PlayerPageShadowDiagnostics
@@ -65,8 +66,14 @@ class MusicViewModel @Inject constructor(
         private const val TAG = "MusicViewModel"
         private const val TAG_SHADOW = "PlayerPageShadow"
 
-        /** seek 后强制刷新位置的时长:足够覆盖 MediaController 返回新 PlaybackState 的延迟。 */
-        private const val POSITION_REFRESH_WINDOW_MS = 2_000L
+        /**
+         * seek 后的强制刷新窗口。
+         *
+         * MediaSession 的周期位置事件默认 3s 一次(A-066),所以窗口必须 >3s;窗口内
+         * controller 已乐观 mask 成新位置(A-067),刷新只是为了让暂停态拖动也能在一次
+         * tick 内看到 session 侧 clamp/调整后的最终值。
+         */
+        private const val POSITION_REFRESH_WINDOW_MS = PlaybackPositionContract.REFRESH_WINDOW_MS
     }
 
     private var mediaControllerFuture: ListenableFuture<MediaController>? = null
@@ -219,6 +226,7 @@ class MusicViewModel @Inject constructor(
                     updateState()
                 }
             })
+            // A-077: controller 创建/连接期不会补发初始 IDLE 回调,初始状态必须主动读一次。
             updateState()
             updateCurrentSongFavoriteStatus()
             loadArtworkForCurrentSong()
@@ -269,16 +277,20 @@ class MusicViewModel @Inject constructor(
     private fun startProgressUpdateLoop() {
         viewModelScope.launch {
             while (isActive) {
-                // 播放中每秒刷新;暂停态只在「刚 seek 过」的 2s 窗口内刷新。
-                // 为什么需要暂停态刷新:MediaController 的位置更新不会触发任何播放状态回调,
-                // 且下方 updateState() 在 seekTo 之后立刻调用时拿到的还是旧快照 —— 若不补刷新,
-                // 暂停时拖动进度条会一直显示旧位置(看起来像"拖动无效/回弹")。
-                if (mediaController?.isPlaying == true ||
-                    SystemClock.elapsedRealtime() < positionRefreshUntilMs
+                // 播放中每秒刷新;暂停态只在「刚 seek 过」的窗口内刷新。
+                // 机制(A-066):MediaSession 的周期位置事件默认 **3s** 一次(只在播放/加载中),
+                // 两次事件之间 controller 按**当前 speed** 本地外推。暂停态没有这个周期事件,
+                // 若不补刷新,拖动后要等下一次事件才更新(看起来像"拖动无效/回弹")。
+                // 所以窗口由 [PlaybackPositionContract] 保证 >3s;tick 仍是 1s,只决定读的时机。
+                if (PlaybackPositionContract.shouldRefresh(
+                        isPlaying = mediaController?.isPlaying == true,
+                        nowElapsedMs = SystemClock.elapsedRealtime(),
+                        refreshUntilMs = positionRefreshUntilMs,
+                    )
                 ) {
                     updateState()
                 }
-                delay(1000) // Update every second
+                delay(1000) // 读位置的节奏,不是 MediaSession 的事件周期
             }
         }
     }
@@ -298,9 +310,10 @@ class MusicViewModel @Inject constructor(
             // For non-CUE tracks, clippingConfiguration is not set so we default to 0L
             val currentStartPosition = controller.currentMediaItem?.clippingConfiguration?.startPositionMs ?: 0L
             // 无缝循环期间把**展示位置**折返回 [A, B):
-            // MediaSession 的 PlaybackState 约 1s 才刷新一次,MediaController 在两次刷新之间按
-            // speed=1 本地外推,跨过 B 的瞬间会看到位置冲出区间(≤1s 后回落)。折返是幂等的:
-            // 服务层已折返过的位置再折一次不变;窗口不属于当前歌时原样透传。duration/seek 不变。
+            // MediaSession 的周期位置事件默认 3s 一次(A-066),两次事件之间 MediaController 按
+            // **当前 speed** 本地外推,所以跨过 B 的瞬间会看到位置冲出区间(下一次事件后回落)。
+            // 折返是幂等的:服务层已折返过的位置再折一次不变;窗口不属于当前歌时原样透传。
+            // duration/seek 不变。
             val safePosition = foldDisplayPositionMs(
                 rawPositionMs = controller.currentPosition.coerceAtLeast(0L),
                 window = loopRuntime.window.value,
@@ -521,19 +534,25 @@ class MusicViewModel @Inject constructor(
     fun skipToNext() {
         mediaController?.let { controller ->
             val wasPlaying = controller.isPlaying
-            if (controller.hasNextMediaItem()) {
+            val hasNext = controller.hasNextMediaItem()
+            if (hasNext) {
                 controller.seekToNext()
                 // Auto-play if was paused
                 if (!wasPlaying) {
                     controller.play()
                 }
-            } else {
-                if (controller.mediaItemCount > 0) {
-                    controller.seekToDefaultPosition(0)
-                    // Auto-play if was paused
-                    if (!wasPlaying) {
-                        controller.play()
-                    }
+            } else if (MusicNavigationPolicy.shouldWrapToStart(
+                    hasNext = hasNext,
+                    repeatMode = controller.repeatMode,
+                    mediaItemCount = controller.mediaItemCount,
+                )
+            ) {
+                // A-085: repeat=ALL 时 hasNextMediaItem() 恒 true(播放器自己绕回),
+                // 手写绕回只对 repeat != ALL 的最后一项生效。
+                controller.seekToDefaultPosition(0)
+                // Auto-play if was paused
+                if (!wasPlaying) {
+                    controller.play()
                 }
             }
         }
@@ -545,12 +564,13 @@ class MusicViewModel @Inject constructor(
 
     fun seekTo(position: Long) {
         mediaController?.seekTo(position)
-        // 影子只观测：记录 seek 请求，2s 内抑制对比（MediaController 快照收敛窗口）。
+        // 影子只观测：记录 seek 请求（debug 双跑仍按 PlayerPageShadow 自己的窗口抑制对比）。
         playerPageShadow?.onSeekRequested(position.coerceAtLeast(0L), SystemClock.elapsedRealtime())
-        // 让进度循环在接下来 2s 内持续刷新,覆盖 MediaController 返回新位置之前的空窗,
-        // 这样暂停态拖动也能在一次 tick 内显示到目标位置。
+        // A-067: MediaController.seekTo 会**立即乐观 mask** 成新位置/新状态,这里马上
+        // updateState() 读到的已经是新值,不是旧快照。仍保留刷新窗口,是因为要等
+        // session 侧 clamp/调整后的最终值(以及暂停态没有 3s 周期事件);窗口必须 >3s。
         positionRefreshUntilMs = SystemClock.elapsedRealtime() + POSITION_REFRESH_WINDOW_MS
-        updateState() // Immediate update for UI responsiveness
+        updateState() // Immediate update for UI responsiveness (optimistic mask already applied)
     }
 
     fun setRepeatMode(repeatMode: Int) {

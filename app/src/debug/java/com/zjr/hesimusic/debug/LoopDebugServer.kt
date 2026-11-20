@@ -174,7 +174,10 @@ object LoopDebugServer {
     private fun installLoopBridge(d: DebugEntryPoint) {
         if (DebugHooks.loopBridge != null) return
         // 不变量采样器与 bridge 同生命周期：deps 就绪即开始每 500ms 采样（幂等）。
-        player?.let { PlaybackInvariantMonitor.start(d, it) }
+        val ctx = appContext
+        if (ctx != null) {
+            player?.let { PlaybackInvariantMonitor.start(d, it, ctx) }
+        }
         DebugHooks.loopBridge = object : LoopDebugBridge {
             override fun snapshot(): Map<String, Any?> {
                 val runtime = d.loopRuntime()
@@ -1439,8 +1442,17 @@ object LoopDebugServer {
      * - "silent"：注入「播放但零帧」→ playing-but-sink-silent（约 1s 后触发）；
      * - "source-plain"：注入「循环投影但 item 无 tag / 工厂选普通源」→ projection=loop but source=plain；
      * - "source-loop"：注入「非循环投影但 item 带 tag」→ projection=plain but source=loop；
+     * - §12.2 的 12 个 kind（每个 code 一个）：
+     *   "period-continue-loading" / "extractor-track-after-end" / "sink-empty-buffer" /
+     *   "sink-configure-split" / "timeline-frame-us-roundtrip" / "projection-duration" /
+     *   "sink-position-domain" / "seek-same-position" / "prepare-error" /
+     *   "sink-configure-no-flush" / "controller-commands" / "notification-gone"；
      * - "off"：关闭注入（判定器状态复位）；
      * - "clear"：清空 /state.invariants 历史并关闭注入。
+     *
+     * 每种 kind 都喂**真实判定器**合成采样，验证「采样 → 判定 → Log.e → /state.invariants」；
+     * "prepare-error" 例外：它记录注入时刻，然后观察真实 onPlayerError 是否在 3s 内到达。
+     * 对应的 code 清单见 docs/runtime-invariants-undefined.md。
      */
     private fun handleInvariantFault(body: JSONObject?): Map<String, Any?> {
         // 确保 Hilt 依赖已解析 + 采样器已启动；顺手拉起 player controller（注入生效需要它在跑）。
@@ -1448,18 +1460,20 @@ object LoopDebugServer {
         player?.ensureConnecting()
         val kind = body?.optString("kind", "")?.trim()?.lowercase().orEmpty()
         if (kind.isEmpty()) throw HttpError(400, "kind required")
-        val allowed = setOf(
-            "off",
-            "clear",
-            PlaybackInvariantMonitor.FAULT_PAUSED_WRITE,
-            PlaybackInvariantMonitor.FAULT_SILENT,
-            PlaybackInvariantMonitor.FAULT_SOURCE_PLAIN,
-            PlaybackInvariantMonitor.FAULT_SOURCE_LOOP,
-        )
-        if (kind !in allowed) throw HttpError(400, "unknown kind: " + kind + " (allowed=" + allowed + ")")
+        if (kind != "off" && kind != "clear" && kind !in PlaybackInvariantMonitor.FAULT_KINDS) {
+            throw HttpError(
+                400,
+                "unknown kind: " + kind + " (allowed=" +
+                    (setOf("off", "clear") + PlaybackInvariantMonitor.FAULT_KINDS) + ")",
+            )
+        }
         PlaybackInvariantMonitor.setFaultInjection(kind)
         Log.i(TAG, "debug/invariant kind=" + kind)
-        return linkedMapOf("injected" to kind)
+        return linkedMapOf(
+            "injected" to kind,
+            "kind" to kind,
+            "faultKinds" to PlaybackInvariantMonitor.FAULT_KINDS.sorted(),
+        )
     }
 
     /** POST /debug/reconnect —— 显式丢弃当前 controller 并重建(最多等 2s)。 */

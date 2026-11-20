@@ -116,27 +116,38 @@ class MusicService : MediaSessionService() {
             }
 
             override fun seekToNext() {
-                if (hasNextMediaItem()) {
+                val hasNext = hasNextMediaItem()
+                if (hasNext) {
                     super.seekToNext()
-                } else {
-                    if (mediaItemCount > 0) {
-                        seekToDefaultPosition(0)
-                        if (playbackState == Player.STATE_ENDED || !isPlaying) {
-                            play()
-                        }
+                } else if (MusicNavigationPolicy.shouldWrapToStart(
+                        hasNext = hasNext,
+                        repeatMode = repeatMode,
+                        mediaItemCount = mediaItemCount,
+                    )
+                ) {
+                    // A-085: repeat=ALL 时 hasNextMediaItem() 恒 true(播放器自己绕回),
+                    // 手写绕回只对 repeat != ALL 的最后一项生效。
+                    seekToDefaultPosition(0)
+                    if (playbackState == Player.STATE_ENDED || !isPlaying) {
+                        play()
                     }
                 }
             }
             
             override fun seekToPrevious() {
-                if (hasPreviousMediaItem()) {
+                val hasPrevious = hasPreviousMediaItem()
+                if (hasPrevious) {
                     super.seekToPrevious()
-                } else {
-                    if (mediaItemCount > 0) {
-                        seekToDefaultPosition(mediaItemCount - 1)
-                        if (playbackState == Player.STATE_ENDED || !isPlaying) {
-                            play()
-                        }
+                } else if (MusicNavigationPolicy.shouldWrapToEnd(
+                        hasPrevious = hasPrevious,
+                        repeatMode = repeatMode,
+                        mediaItemCount = mediaItemCount,
+                    )
+                ) {
+                    // 同 A-085: repeat=ALL 时上一项由播放器自己绕回。
+                    seekToDefaultPosition(mediaItemCount - 1)
+                    if (playbackState == Player.STATE_ENDED || !isPlaying) {
+                        play()
                     }
                 }
             }
@@ -292,6 +303,8 @@ class MusicService : MediaSessionService() {
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
+                // A-077: ExoPlayer 创建时不会派发初始 IDLE;IDLE 只在 stop()/错误重置后回调。
+                // 初始化不能等首个回调,见 setupPlayerListeners 末尾的主动读。
                 Log.d(TAG, "onPlaybackStateChanged: state=$playbackState")
                 saveCurrentState()
             }
@@ -320,6 +333,17 @@ class MusicService : MediaSessionService() {
                 showPlaybackErrorToast(error)
             }
         })
+
+        // A-077: 初始 IDLE 不会以回调形式到达;需要初始态时主动读 player.playbackState。
+        // 不要在后面任何初始化逻辑里等 onPlaybackStateChanged(IDLE)。
+        Log.d(
+            TAG,
+            "initial player state=" + player.playbackState +
+                " pwr=" + player.playWhenReady +
+                " playing=" + player.isPlaying +
+                " mediaItems=" + player.mediaItemCount +
+                " pos=" + player.currentPosition,
+        )
     }
 
     private var lastPlaybackErrorToastTime = 0L

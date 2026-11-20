@@ -46,11 +46,15 @@ class LoopingPcmMediaPeriodPrepareTest {
 
     private class FakeCallback : MediaPeriod.Callback {
         val prepared = CountDownLatch(1)
+        var continueLoadingCalls: Int = 0
+
         override fun onPrepared(mediaPeriod: MediaPeriod) {
             prepared.countDown()
         }
 
-        override fun onContinueLoadingRequested(source: MediaPeriod) {}
+        override fun onContinueLoadingRequested(source: MediaPeriod) {
+            continueLoadingCalls += 1
+        }
     }
 
     @Test
@@ -74,6 +78,12 @@ class LoopingPcmMediaPeriodPrepareTest {
                 dispatcher.drainPosted()
             }
             assertEquals(0L, callback.prepared.count)
+            assertEquals(
+                "§12.3: media3 会在 handleLoadingPeriodPrepared 末尾自己调 maybeContinueLoading," +
+                    "period 不应再主动踢 loader",
+                0,
+                callback.continueLoadingCalls,
+            )
             assertTrue("first block decode must call provider", provider.decodeCount() >= 1)
             assertTrue(
                 "continuous ready blocks must cover at least 3s for LoadControl",
