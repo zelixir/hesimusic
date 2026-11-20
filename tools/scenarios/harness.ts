@@ -75,6 +75,10 @@ export type Check = {
   detail: string;
   /** 失败时的初步归因提示（写给 issue，不写猜测性结论） */
   hint?: string;
+  /** true = 已知依赖未落地(如 jump-fill)：不算 FAIL，场景状态记 PENDING。 */
+  pending?: boolean;
+  /** 依赖项名称，用于报告归纳。 */
+  dependency?: string;
 };
 
 export interface FrameMeasurement {
@@ -806,6 +810,11 @@ export function check(
   hint?: string,
 ): Check {
   return { name, pass, detail, hint };
+}
+
+/** 已知依赖（例如 jump-fill 未落地时的出声延迟）不算失败，标 PENDING 等依赖落地后自动变严。 */
+export function pendingCheck(name: string, detail: string, dependency: string, hint?: string): Check {
+  return { name, pass: false, detail: detail, hint, pending: true, dependency };
 }
 
 export function within(value: number, low: number, high: number): boolean {
