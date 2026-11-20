@@ -232,6 +232,8 @@ class RingBandExtractor(
     }
 
     override fun seek(position: Long, timeUs: Long) {
+        // 00023 后续的分段计时：请求 → media3 真正调到这里（loading 线程）。
+        LoopPreviewDebugBridge.seekStages.noteExtractorSeek()
         val offset = Math.floorMod(
             timeline.frameAtTimeline(timeUs) - timeline.aFrame,
             timeline.loopFrames,

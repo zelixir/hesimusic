@@ -100,6 +100,8 @@ class TapAudioSink(
     ): Boolean {
         handledBuffers += 1L
         if (buffer.hasRemaining()) {
+            // 00023 后续的分段计时：seek 请求 → 首个 PCM 进 sink（数据侧终点）。
+            LoopPreviewDebugBridge.seekStages.noteFirstBuffer()
             // 00022/00023 真机计时：seek 请求 → 首个 PCM buffer 进入 AudioSink。
             LoopPreviewDebugBridge.consumeSeekProbe()?.let { probe ->
                 try {
@@ -203,6 +205,7 @@ class TapAudioSink(
 
     override fun play() {
         logD("tap play")
+        LoopPreviewDebugBridge.seekStages.noteSinkPlay()
         super.play()
     }
 

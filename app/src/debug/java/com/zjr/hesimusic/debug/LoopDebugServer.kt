@@ -1524,12 +1524,17 @@ object LoopDebugServer {
      *
      * 测量口径(issue 00023 对照表):
      * - `applyMs`: 请求 → PreviewPlayer 真正调用 ExoPlayer.seekTo 的耗时(主线程应用延迟);
-     * - `advanceMs`: 请求 → 播放器位置推进到落点之后 30ms 且 state=READY 的耗时
-     *   (ExoPlayer 的位置是**渲染播放头**,推进即音频在走;≤100ms 是验收线);
+     * - `advanceMs`: 请求 → 播放器位置推进到落点之后 30ms 且 state=READY 的耗时。
+     *   **注意(00023 后续实测)**: seek 未确认前 currentPosition 可能还是旧位置,advanceMs
+     *   会被提前满足(真机出现 67ms 而真正出声 160ms 的偏差),只作参考;
+     * - `stages`: 逐段耗时(请求 → apply → extractorSeek → firstBuffer → sinkPlay → ready → playout)。
+     *   `stages.playoutMs` = media3 `onAudioPositionAdvancing` 给出的 AudioTrack 播放头开始
+     *   推进时刻,是**真正出声**的应用侧口径,验收以它为准;
      * - `framesDelta`: 同窗口内 TapAudioSink 真正写出给 AudioTrack 的帧数增量(出声的旁证);
      * - `displayAfterMs`: 稳定后的展示位置 —— 区外 seek 若被夹回会在这一项立刻暴露。
      *
-     * 轮询 4ms 一次,最多 2.5s;暂停态只测 applyMs(不会推进)。
+     * 轮询 4ms 一次,最多 2.5s;暂停态只测 applyMs(不会推进);播放态会额外等到 playout
+     * (最多再 800ms),让 stages 里的出声时间可直接读。
      */
     private fun handlePreviewSeek(body: JSONObject?): Map<String, Any?> {
         val requested = body?.requireLong("positionMs")
@@ -1549,8 +1554,10 @@ object LoopDebugServer {
         var advanceMs: Long? = null
         var appliedTarget: Long? = null
         var framesAtApply: Long? = null
+        var advanceSatisfiedAtMs = 0L
         val deadline = t0 + 2_500L
         while (SystemClock.elapsedRealtime() < deadline) {
+            val now = SystemClock.elapsedRealtime()
             val s = try {
                 PreviewProbe.snapshot()
             } catch (t: Throwable) {
@@ -1559,19 +1566,31 @@ object LoopDebugServer {
             last = s
             val seq = (s["seekRequests"] as? Number)?.toLong() ?: 0L
             if (applyMs == null && seq > seqBefore) {
-                applyMs = SystemClock.elapsedRealtime() - t0
+                applyMs = now - t0
                 appliedTarget = (s["lastSeekPlayerTargetMs"] as? Number)?.toLong()
                 framesAtApply = (s["outputFrames"] as? Number)?.toLong()
                 if (!wasPlaying) break
             }
             val target = appliedTarget
-            if (target != null) {
+            if (advanceMs == null && target != null) {
                 val pos = (s["playerPositionMs"] as? Number)?.toLong() ?: 0L
                 val state = s["playbackStateName"] as? String
                 if (pos >= target + 30L && state == "READY") {
-                    advanceMs = SystemClock.elapsedRealtime() - t0
-                    break
+                    advanceMs = now - t0
+                    advanceSatisfiedAtMs = now
                 }
+            }
+            // advanceMs 会被"seek 未确认时的旧位置"提前满足，所以继续等到真正出声
+            // （onAudioPositionAdvancing → stages.playoutMs），最多再等 800ms。
+            val stages = s["seekStages"] as? Map<*, *>
+            val playoutMs = (stages?.get("playoutMs") as? Number)?.toLong()
+            if (applyMs != null) {
+                val graceBase = if (advanceSatisfiedAtMs > 0L) {
+                    advanceSatisfiedAtMs
+                } else {
+                    t0 + (applyMs ?: 0L)
+                }
+                if (playoutMs != null || now - graceBase >= 800L) break
             }
             try {
                 Thread.sleep(4L)
@@ -1605,6 +1624,11 @@ object LoopDebugServer {
             "sourceWindowAfterB_ms" to last["sourceWindowB_ms"],
             "mode" to last["mode"],
             "outputFrames" to framesEnd,
+            // 00023 后续：逐段耗时（请求→落地→extractor.seek→首 PCM→sink.play→READY→出声）。
+            // playoutMs 用 media3 的 onAudioPositionAdvancing（AudioTrack 播放头开始推进），
+            // 比 advanceMs 的位置轮询稳定：seek 未确认时 currentPosition 可能是旧位置。
+            "stages" to last["seekStages"],
+            "playoutMs" to ((last["seekStages"] as? Map<*, *>)?.get("playoutMs") as? Number)?.toLong(),
             "elapsedMs" to (SystemClock.elapsedRealtime() - t0),
         )
     }

@@ -698,6 +698,8 @@ class PreviewPlayer @Inject constructor(
         seekRequests += 1L
         lastSeekRequestAtMs = SystemClock.elapsedRealtime()
         lastSeekRequestedMs = ms.coerceAtLeast(0L)
+        // 00023 后续：逐段计时从这里起算（请求 → 落地 → 首个 PCM → sink.play → READY → 出声）。
+        LoopPreviewDebugBridge.seekStages.begin(lastSeekRequestAtMs)
         val w = window
         val p = player
         if (p == null) {
@@ -912,6 +914,8 @@ class PreviewPlayer @Inject constructor(
 
                 override fun onAudioPositionAdvancing(eventTime: EventTime, playoutStartSystemTimeMs: Long) {
                     Log.d(TAG, "analytics audio position advancing at=" + playoutStartSystemTimeMs)
+                    // 00023 后续：AudioTrack 播放头开始推进 = 真正出声（应用侧代理）。
+                    LoopPreviewDebugBridge.seekStages.notePlayout(playoutStartSystemTimeMs)
                 }
 
                 override fun onAudioUnderrun(
@@ -1232,6 +1236,7 @@ class PreviewPlayer @Inject constructor(
     private fun recordAppliedSeek(playerTargetMs: Long) {
         lastSeekAppliedAtMs = SystemClock.elapsedRealtime()
         lastSeekPlayerTargetMs = playerTargetMs
+        LoopPreviewDebugBridge.seekStages.noteApplied()
     }
 
     /**
@@ -1283,6 +1288,8 @@ class PreviewPlayer @Inject constructor(
             } else {
                 null
             },
+            // 00023 后续：最近一次 seek 的逐段耗时（apply/extractor/firstBuffer/sinkPlay/ready/playout）。
+            "seekStages" to LoopPreviewDebugBridge.seekStages.snapshot(),
             "error" to _error.value,
         )
         lastProbeSnapshot = out
@@ -1414,6 +1421,8 @@ class PreviewPlayer @Inject constructor(
                         Log.d(TAG, "source first block ready")
                     }
                     _sourceFirstBlockReady.value = true
+                    // 00023 后续：seek 后回到 READY 的时刻（LoadControl 是否卡住一眼可见）。
+                    LoopPreviewDebugBridge.seekStages.noteReady()
                     _sourceFirstBlockEvents.tryEmit(Unit)
                 } else if (playbackState == Player.STATE_BUFFERING) {
                     _sourceFirstBlockReady.value = false
