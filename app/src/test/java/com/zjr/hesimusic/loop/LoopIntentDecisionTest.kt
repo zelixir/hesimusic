@@ -68,6 +68,32 @@ class LoopIntentDecisionTest {
     }
 
     @Test
+    fun `队列表重建的 transition 落在武装歌上时不清意图`() {
+        // 场景 12:进循环必须整表 setMediaItems(重建源),ExoPlayer 一定会派发
+        // PLAYLIST_CHANGED transition。只要落点还是武装歌,它就只是"队列重建",
+        // 绝不能被当成用户切歌 —— 否则 repeat=ONE 被恢复成 off、intent 被清、无缝秒退。
+        val armedSong = LoopIntent.Armed(
+            songId = 39944L,
+            previousRepeatMode = Player.REPEAT_MODE_OFF,
+            previousShuffleEnabled = false,
+        )
+        assertFalse(
+            "队列重建后仍是同一首(#39944)",
+            LoopIntentDecision.shouldExitOnSongChange(armedSong, newSongId = 39944L),
+        )
+        assertNull(
+            "不得恢复 previousRepeatMode=off,无缝必须保持 repeat=one",
+            LoopIntentDecision.modeToRestoreOnSongChange(
+                armedSong,
+                newSongId = 39944L,
+                current = LoopIntentDecision.Mode(Player.REPEAT_MODE_ONE, shuffleEnabled = false),
+            ),
+        )
+        // 对照:落点真的漂到别的歌(#41405,旧 bug 的症状)时才允许退出并恢复。
+        assertTrue(LoopIntentDecision.shouldExitOnSongChange(armedSong, newSongId = 41405L))
+    }
+
+    @Test
     fun `切到别的歌时 repeat 与 shuffle 都恢复进入前的值`() {
         assertTrue(
             "切到 2 号歌应退出无缝",

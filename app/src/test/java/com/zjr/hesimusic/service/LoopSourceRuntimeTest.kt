@@ -142,4 +142,26 @@ class LoopSourceRuntimeTest {
             assertFalse(paused.play)
         }
     }
+
+    @Test
+    fun `rebuild always prepares even when the player was ready before`() {
+        // A-086:整表 setMediaItems 强制把播放器复位成 IDLE,所以换源前是 READY 也必须 prepare。
+        for (state in listOf(Player.STATE_IDLE, Player.STATE_BUFFERING, Player.STATE_READY, Player.STATE_ENDED)) {
+            val playing = LoopSourceRuntime.revivePlan(
+                state,
+                playWhenReadyBefore = true,
+                sourcesRebuilt = true,
+            )
+            assertTrue("state=$state must prepare after a queue rebuild", playing.prepare)
+            assertTrue("用户要求播放时要补 play", playing.play)
+
+            val paused = LoopSourceRuntime.revivePlan(
+                state,
+                playWhenReadyBefore = false,
+                sourcesRebuilt = true,
+            )
+            assertTrue(paused.prepare)
+            assertFalse("pwr=false 绝不偷播", paused.play)
+        }
+    }
 }

@@ -93,15 +93,16 @@ class PreviewPlayer @Inject constructor(
         /** 展示位置刷新周期:插值在 UI 侧 60fps 做,状态源 10Hz 足够。 */
         private const val POSITION_TICK_MS = 100L
 
-        /** 接缝检查起播提前量(契约 §2.3:B−5s)。 */
-        const val SEAM_LEAD_MS = 5_000L
+        /** 接缝检查起播提前量(契约 §2.3:B−5s)。唯一来源见 [PreviewStartPlan.SEAM_LEAD_MS]。 */
+        const val SEAM_LEAD_MS = PreviewStartPlan.SEAM_LEAD_MS
 
         /**
          * 循环模式起播预卷(ms):ExoPlayer 的 seek 会落到目标 ±十几毫秒,若正好从 A 起播,
          * ring 会缺 [A, 实际起点) 这一小段 → 引擎判定 ring 不完整而退化为直通。
          * 因此从 A 前预卷 300ms 起播,让环缓冲区从 A 之前开始捕获。
+         * 唯一来源见 [PreviewStartPlan.LOOP_PREROLL_MS]。
          */
-        const val LOOP_PREROLL_MS = 300L
+        const val LOOP_PREROLL_MS = PreviewStartPlan.LOOP_PREROLL_MS
 
         /** 循环段最短时长(与 UI 拖拽下限一致)。 */
         const val MIN_LOOP_LENGTH_MS = 500L
@@ -541,8 +542,9 @@ class PreviewPlayer @Inject constructor(
         val p = player
         if (!prepared || p == null) {
             // 尚未真正创建播放器：退回普通 play，并使用播放器就绪前的 pending seek。
-            val start = pendingSeekMs
-                ?: if (shouldUseSource(mode)) sourceStartMs(mode) else modeStartMs()
+            // 起点必须是**展示口径**(play() 内部再按引擎换算成 T);
+            // 用 SOURCE 的 T 当展示位置会把 FULL/SEAM 的起点映射错(issue 00007)。
+            val start = pendingSeekMs ?: modeStartMs(mode)
             pendingSeekMs = null
             play(mode, start, freeAudition)
             return
@@ -582,7 +584,8 @@ class PreviewPlayer @Inject constructor(
         val wantSource = shouldUseSource(mode)
         if (sourceEngine != wantSource) {
             // 模式跨 SOURCE/M3′：重建播放器（预览页允许，A/B 改动不会走到这里）。
-            play(mode, sourceStartMs(mode))
+            // 传展示口径起点，由 play() 按目标引擎换算（T / 原始位置）。
+            play(mode, modeStartMs(mode))
             return
         }
         this.mode = mode
@@ -815,6 +818,12 @@ class PreviewPlayer @Inject constructor(
             updatePositionOnce()
             return
         }
+        if (engineKind == EngineKind.SOURCE) {
+            // 新模式/新窗口不再由 SOURCE 表达(如前奏非空的 FULL):交给 play() 换到 M3′,
+            // 不能对 SOURCE 时间轴做 seekRaw(那会把落点当成 T 再折回 A)。
+            play(this.mode, modeStartMs())
+            return
+        }
         val wasPlaying = p.isPlaying
         degradeRetryUsed = false
         seekRaw(modeStartMs())
@@ -1015,9 +1024,15 @@ class PreviewPlayer @Inject constructor(
         _outsideLoop.value = false
     }
 
-    /** 当前模式是否走循环数据源：SOURCE + 非 FREE + 有有效窗口。 */
+    /**
+     * 当前模式是否走循环数据源。
+     *
+     * = 引擎开关为 SOURCE + 有有效窗口 + 模式能被 SOURCE 表达。
+     * **前奏非空的 FULL 不走 SOURCE**：SOURCE 时间轴 T=0 恒对应 A,表达不了「0..A 前奏」;
+     * 这类 FULL 交给 M3′(前奏原样播放,B 处 sink 折回 A),语义见 [PreviewStartPlan]。
+     */
     private fun shouldUseSource(mode: PreviewMode): Boolean =
-        LoopSourceMode.isSource() && mode != PreviewMode.FREE && window != null
+        PreviewStartPlan.usesSource(mode, window, LoopSourceMode.isSource())
 
     /**
      * 为当前窗口构建/安装循环 PCM 数据源。
@@ -1093,16 +1108,15 @@ class PreviewPlayer @Inject constructor(
         }
     }
 
-    /** SOURCE 模式起始时间轴 T（ms）。FULL/LOOP_ONLY 从 A 起，SEAM 从 B−5s 起。 */
-    private fun sourceStartMs(mode: PreviewMode): Long {
-        val w = window ?: return 0L
-        val startUs = when (mode) {
-            PreviewMode.FULL, PreviewMode.LOOP_ONLY -> w.loopStartUs
-            PreviewMode.SEAM -> maxOf(w.loopStartUs, w.loopEndUs - SEAM_LEAD_MS * 1000L)
-            PreviewMode.FREE -> 0L
-        }
-        return LoopSourceProjection.initialTimelineUs(startUs, w) / 1000L
-    }
+    /**
+     * SOURCE 模式起始时间轴 T（ms）。T=0 恒对应 A：
+     * - FULL（无前奏，A=0）→ 0（= 媒体 0，与 M3′ 起播一致）；
+     * - LOOP_ONLY → 0（预卷落点被钳回 A）；
+     * - SEAM → max(A, B−5s) − A；
+     * - FULL 有前奏（A>0）不会走 SOURCE（[shouldUseSource] 为 false），交给 M3′ 从 0 起播。
+     */
+    private fun sourceStartMs(mode: PreviewMode): Long =
+        PreviewStartPlan.sourceStartMs(mode, aMs, bMs, window)
 
         private fun applyLoopShape(song: Song) {
         val w = window ?: buildWindow(song.id, aMs, bMs).also {
@@ -1184,13 +1198,11 @@ class PreviewPlayer @Inject constructor(
         return a to b
     }
 
-    private fun modeStartMs(): Long = when (mode) {
-        PreviewMode.FULL -> 0L
-        PreviewMode.LOOP_ONLY -> (aMs - LOOP_PREROLL_MS).coerceAtLeast(0L)
-        // 极短循环段 B−5s < A 时取 A。
-        PreviewMode.SEAM -> maxOf(aMs, bMs - SEAM_LEAD_MS)
-        PreviewMode.FREE -> 0L
-    }
+    /**
+     * 展示口径的模式起点(ms)。FULL 恒为 0(前奏参与);语义唯一来源见 [PreviewStartPlan.displayStartMs]。
+     */
+    private fun modeStartMs(mode: PreviewMode = this.mode): Long =
+        PreviewStartPlan.displayStartMs(mode, aMs, bMs)
 
     /** 展示口径 seek → 引擎原始位置(窗口存在时按当前轮次映射,避免把播放拽回第 0 轮)。 */
     private fun seekRaw(displayMs: Long) {

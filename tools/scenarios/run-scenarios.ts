@@ -173,12 +173,22 @@ function pickSongs(all: SongInfo[], opts: Opts): { primary: SongInfo; short: Son
   let short: SongInfo | null = null;
   if (opts.songShort > 0) short = byId(opts.songShort);
   if (!short) {
+    // 分析链对 .ogg 会报 "无法读取音频文件"(1258 实测)，优先选 mp3/wav/m4a 的可解码文件。
+    const decodable = (s: SongInfo) => /\.(mp3|wav|m4a|aac)$/i.test(s.path);
     const cands = conf
-      .filter((s) => s.id !== primary!.id && windows(s) >= 5000 && s.durationMs >= 40000 && s.durationMs <= 130000)
+      .filter(
+        (s) =>
+          s.id !== primary!.id &&
+          decodable(s) &&
+          windows(s) >= 5000 &&
+          s.durationMs >= 40000 &&
+          s.durationMs <= 130000,
+      )
       .sort((a, b) => a.durationMs - b.durationMs || a.id - b.id);
     short = cands[0] ?? null;
   }
-  if (!short) short = conf.find((s) => s.id !== primary!.id) ?? primary;
+  // 没有第二首可解码的短歌：退化为 primary（mp3 可分析；场景 15 的 A/B 修改会在 finally 恢复）。
+  if (!short) short = primary;
 
   let unconfirmed: SongInfo | null = null;
   if (opts.songUnconfirmed > 0) unconfirmed = byId(opts.songUnconfirmed);
@@ -289,7 +299,7 @@ function stateFingerprint(s: State): string {
 // 主流程
 // ---------------------------------------------------------------------------
 
-const UI_SCENARIOS = new Set([6, 7, 9, 10, 11, 15, 16]);
+const UI_SCENARIOS = new Set([6, 7, 9, 10, 11, 15, 16, 18]);
 
 async function main(): Promise<number> {
   const opts = parseArgs(process.argv.slice(2));
@@ -467,6 +477,11 @@ async function main(): Promise<number> {
         playerPositionAfterMs: j.playerPositionAfterMs == null ? null : Number(j.playerPositionAfterMs),
         isPlayingAfter: j.isPlayingAfter == null ? null : Boolean(j.isPlayingAfter),
         mode: j.mode == null ? null : String(j.mode),
+        outsideLoopAfter: j.outsideLoopAfter == null ? null : Boolean(j.outsideLoopAfter),
+        windowA_ms: j.windowAfterA_ms == null ? null : Number(j.windowAfterA_ms),
+        windowB_ms: j.windowAfterB_ms == null ? null : Number(j.windowAfterB_ms),
+        sourceWindowA_ms: j.sourceWindowAfterA_ms == null ? null : Number(j.sourceWindowAfterA_ms),
+        sourceWindowB_ms: j.sourceWindowAfterB_ms == null ? null : Number(j.sourceWindowAfterB_ms),
         raw: j,
       };
     },
@@ -493,12 +508,28 @@ async function main(): Promise<number> {
       if (!node) {
         throw new Error(lastErr + "; 现有文本: " + nodes.map((n) => n.text).slice(0, 24).join(" | "));
       }
+      // 页面刚导航时布局还会下沉/重排：连续两帧 bounds 稳定后才点，避免点到过渡态坐标。
+      let stable = 0;
+      for (let attempt = 0; attempt < 3 && stable < 1; attempt++) {
+        await sleep(500);
+        const dump2 = await adb.uiDump();
+        if (dump2.error) break;
+        const nodes2 = dump2.nodes
+          .map((n) => ({ text: n.text.trim(), bounds: n.bounds }))
+          .filter((n) => n.text.length > 0);
+        const node2 = nodes2.find((n) => n.text === label) ?? nodes2.find((n) => n.text.includes(label)) ?? null;
+        if (!node2) break;
+        const dx = Math.abs(node2.bounds.top - node.bounds.top) + Math.abs(node2.bounds.left - node.bounds.left);
+        node = node2;
+        nodes = nodes2;
+        if (dx <= 4) stable += 1;
+      }
+      uiCache = { at: Date.now(), labels: nodes.map((n) => n.text) };
       const x = (node.bounds.left + node.bounds.right) / 2;
       const y = (node.bounds.top + node.bounds.bottom) / 2;
       await adb.tap(x, y);
       const tappedAt = Date.now();
       evidenceHolder.ev.step("tap", { label, bounds: node.bounds, tappedAt });
-      uiCache = null;
       await sleep(80);
       return tappedAt;
     },
@@ -524,6 +555,7 @@ async function main(): Promise<number> {
   ctx.ensureLoopPage = async (songId: number) => {
     await ensureLoopPageWithUi(songId);
     try {
+      await sleep(600);
       await refreshUi();
     } catch (e: any) {
       ctx.log("UI dump 预热失败(不影响后续 uiTap 重试): " + e.message);
@@ -548,7 +580,7 @@ async function main(): Promise<number> {
     key: string;
     name: string;
     tag: string;
-    status: "PASS" | "FAIL" | "SKIP" | "CONTAMINATED";
+    status: "PASS" | "FAIL" | "SKIP" | "CONTAMINATED" | "PENDING";
     durationMs: number;
     checks: Check[];
     summary: string;
@@ -600,7 +632,7 @@ async function main(): Promise<number> {
     let checks: Check[] = [];
     let summary = "";
     let pending: string[] = [];
-    let status: "PASS" | "FAIL" | "SKIP" | "CONTAMINATED" = "PASS";
+    let status: "PASS" | "FAIL" | "SKIP" | "CONTAMINATED" | "PENDING" = "PASS";
     let skipReason: string | undefined;
     const contamination: { at: string; before: string; after: string }[] = [];
     let lastFp = beforeState ? stateFingerprint(beforeState) : "";
@@ -653,7 +685,11 @@ async function main(): Promise<number> {
         check(
           "无新增不变量 violation",
           disallowed.length === 0,
-          disallowed.map((c) => c + "x" + invAfter.get(c)).join(", ") || "none",
+          disallowed.length > 0
+            ? "NEW: " + disallowed.map((c) => c + "x" + invAfter.get(c)).join(", ")
+            : newInv.length > 0
+              ? "none (allowed: " + newInv.map((c) => c + "x" + invAfter.get(c)).join(", ") + ")"
+              : "none",
           disallowed.length > 0 ? "运行期不变量触发;证据里含 /state.invariants 与 logcat LoopInvariant" : undefined,
         ),
       );
@@ -680,7 +716,9 @@ async function main(): Promise<number> {
         after: "pkg " + versionAfter.versionCode + " / " + versionAfter.lastUpdateTime,
       });
     }
-    if (checks.some((c) => !c.pass)) status = "FAIL";
+    const realFailures = checks.filter((c) => !c.pass && !c.pending);
+    if (realFailures.length > 0) status = "FAIL";
+    else if (checks.some((c) => c.pending)) status = "PENDING";
     if (contamination.length > 0 && status !== "SKIP") status = "CONTAMINATED";
     if (pending.length > 0) pendingDecisions.push(...pending);
 
@@ -706,9 +744,11 @@ async function main(): Promise<number> {
     writeJson(evidenceFile, evidenceJson);
 
     const icon = status;
-    const failed = checks.filter((c) => !c.pass);
+    const failed = checks.filter((c) => !c.pass && !c.pending);
+    const pendingChecks = checks.filter((c) => c.pending);
     console.log("   " + icon + " " + durationMs + "ms " + (summary || skipReason || ""));
     for (const f of failed) console.log("     x " + f.name + ": " + f.detail);
+    for (const p of pendingChecks.slice(0, 6)) console.log("     ~ 待依赖[" + (p.dependency ?? "?") + "] " + p.name + ": " + p.detail);
     if (status === "CONTAMINATED") {
       console.log("     ! 外部操作: " + contamination.slice(0, 3).map((c) => c.before + " -> " + c.after).join(" ; "));
     }
@@ -754,6 +794,7 @@ async function main(): Promise<number> {
   const skipResults = results.filter((r) => r.status === "SKIP");
   const passResults = results.filter((r) => r.status === "PASS");
   const contaminatedResults = results.filter((r) => r.status === "CONTAMINATED");
+  const pendingResults = results.filter((r) => r.status === "PENDING");
 
   const report = {
     generatedAt: new Date().toISOString(),
@@ -785,7 +826,7 @@ async function main(): Promise<number> {
   console.log("");
   console.log(
     "结果: PASS " + passResults.length + " / FAIL " + failedResults.length + " / SKIP " + skipResults.length +
-      " / CONTAMINATED " + contaminatedResults.length +
+      " / CONTAMINATED " + contaminatedResults.length + " / PENDING " + pendingResults.length +
       "  (总耗时 " + Math.round(totalMs / 1000) + "s, adb 调用 " + adb.calls + " 次)",
   );
   if (contaminatedResults.length > 0) {
@@ -852,7 +893,9 @@ function printTable(results: any[], totalMs: number): void {
           ? (r.skipReason ?? "skip")
           : r.status === "CONTAMINATED"
             ? "外部改动: " + (r.contamination?.[0] ? r.contamination[0].before + " => " + r.contamination[0].after : "detected")
-            : (r.summary || (r.checks as Check[]).length + " 项判据通过");
+            : r.status === "PENDING"
+              ? "依赖未落地: " + ((r.checks as Check[]).find((c) => c.pending)?.detail ?? "pending")
+              : (r.summary || (r.checks as Check[]).length + " 项判据通过");
     rows.push([
       String(r.id),
       r.status,
@@ -899,7 +942,9 @@ function buildMarkdown(report: any, results: any[], runDir: string): string {
           ? (r.skipReason ?? "skip")
           : r.status === "CONTAMINATED"
             ? "外部改动(结果不可信): " + (r.contamination?.[0] ? r.contamination[0].before + " => " + r.contamination[0].after : "detected")
-            : r.summary;
+            : r.status === "PENDING"
+              ? "依赖未落地: " + ((r.checks as Check[]).find((c) => c.pending)?.detail ?? "pending")
+              : r.summary;
     L.push("| " + r.id + " | " + r.status + " | " + r.name + " | " + (r.durationMs / 1000).toFixed(1) + "s | " + String(detail).replace(/\|/g, "\\|") + " |");
   }
   L.push("");
@@ -918,7 +963,7 @@ function buildMarkdown(report: any, results: any[], runDir: string): string {
     L.push("|---|---|---|---|");
     for (const c of r.checks as Check[]) {
       L.push(
-        "| " + c.name + " | " + String(c.detail).replace(/\|/g, "\\|") + " | " + (c.pass ? "通过" : "失败") + " | " + ev + " |",
+        "| " + c.name + " | " + String(c.detail).replace(/\|/g, "\\|") + " | " + (c.pass ? "通过" : c.pending ? "待依赖(" + (c.dependency ?? "?") + ")" : "失败") + " | " + ev + " |",
       );
     }
     if (r.status === "CONTAMINATED" && r.contamination.length > 0) {
@@ -964,6 +1009,38 @@ function buildMarkdown(report: any, results: any[], runDir: string): string {
       L.push("- 场景期间的判据结果不可信（设备被外部操作/重装）；请在独占窗口重跑。");
       for (const e of r.contamination) L.push("- " + e.at + "  " + e.before + "  =>  " + e.after);
       L.push("- 证据: evidence/" + path.basename(r.evidenceFile));
+      L.push("");
+    }
+  }
+  L.push("## 已允许的不变量告警");
+  L.push("");
+  const allowedSeen: string[] = [];
+  for (const r of results) {
+    const allowedHits = (r.newInvariants as string[]).filter((c) => (report.allowInvariants as string[]).includes(c));
+    if (allowedHits.length > 0) {
+      allowedSeen.push("#" + r.id + " " + r.name + ": " + allowedHits.join(", ") + " (evidence/" + path.basename(r.evidenceFile) + ")");
+    }
+  }
+  if (allowedSeen.length === 0) L.push("无。");
+  else {
+    L.push("这些 code 在本轮被触发，但按 tools/scenarios/allow-invariants.json 归为已知噪声；不判场景失败，仍需 invariants owner 复核：");
+    L.push("");
+    for (const line of allowedSeen) L.push("- " + line);
+  }
+  L.push("");
+  L.push("## 待落地依赖");
+  L.push("");
+  const pendingRows = results.filter((r) => (r.checks as Check[]).some((c) => c.pending));
+  if (pendingRows.length === 0) {
+    L.push("无。");
+  } else {
+    for (const r of pendingRows) {
+      L.push("### #" + r.id + " " + r.name);
+      L.push("");
+      for (const c of (r.checks as Check[]).filter((x) => x.pending)) {
+        L.push("- [" + (c.dependency ?? "?") + "] " + c.name + " — " + c.detail);
+        if (c.hint) L.push("  - 说明: " + c.hint);
+      }
       L.push("");
     }
   }

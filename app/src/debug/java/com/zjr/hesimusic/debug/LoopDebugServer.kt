@@ -20,6 +20,7 @@ import com.zjr.hesimusic.loop.analysis.AnalysisState
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
 import com.zjr.hesimusic.loop.analysis.LoopCandidateKt
 import com.zjr.hesimusic.loop.analysis.ParallelDecodeHooks
+import com.zjr.hesimusic.service.LibraryQueueTarget
 import com.zjr.hesimusic.ui.loop.PreviewProbe
 import com.zjr.hesimusic.ui.player.state.PlayerPageShadowDiagnostics
 import dagger.hilt.android.EntryPointAccessors
@@ -702,9 +703,10 @@ object LoopDebugServer {
     private suspend fun libraryQueueFor(d: DebugEntryPoint, songId: Long): Pair<List<MediaItem>, Int>? {
         val songs = runCatching { d.libraryRepository().getAllSongs().first() }.getOrNull()
             ?: return null
-        val index = songs.indexOfFirst { it.id == songId }
-        if (index < 0) return null
-        return songs.map { it.toMediaItem() } to index
+        // 定位口径收口在 LibraryQueueTarget：index 必须指向同一份 items 里的目标歌
+        // （场景 12 的根因是"进循环后 replaceMediaItem 把当前项甩走"，但 index 计算也一并单测锁住）。
+        val located = LibraryQueueTarget.locate(songs, songId) ?: return null
+        return located.items to located.index
     }
 
     /**

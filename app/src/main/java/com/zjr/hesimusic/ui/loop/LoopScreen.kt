@@ -542,12 +542,10 @@ private fun ResultContent(
                 )
             }
         }
+        // issue 00007:完整循环在 SOURCE 设备上也必须「从 0 起播」——SOURCE 时间轴表达不了前奏,
+        // 该模式由播放器自动改走 M3′(见 PreviewStartPlan),所以这里不再提示「从 A 起播」。
         Text(
-            if (state.sourceMode && mode == LoopPageMode.FULL) {
-                "SOURCE 模式:直接从循环段 A 起播(前奏不参与循环);需要听前奏请切回 M3′。"
-            } else {
-                modeHint(mode.toPreviewMode())
-            },
+            modeHint(mode.toPreviewMode()),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

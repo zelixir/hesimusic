@@ -659,9 +659,11 @@ class LoopPlaybackCoordinator @Inject constructor(
     /**
      * SOURCE 形态的唯一写点（③ 接线点）。
      *
-     * 进入：只做**一次** `replaceMediaItem(当前 index)` + 一次 seek；落点由
-     * [LoopSourceItemPlan.enter] 给出（A 或 A+entryOffset），队列其它项一根手指都不碰。
-     * 退出：把数据源时间轴 T 映射回媒体时间（`A + floorMod(T,L)`）后恢复原 item。
+     * 进入：**一次原子整表重建**（[rebuildQueueItem]，等价 `setMediaItems(items, index, pos)`）；
+     * 落点由 [LoopSourceItemPlan.enter] 给出（A 或 A+entryOffset），队列内容/长度不变，
+     * 其它 item 只被原样带过、不被改写。**不用** `replaceMediaItem`（A-086：换源必须重建
+     * MediaSource 时它会把当前项当成"已移除"，repeat=ONE 下直接甩到第一项）。
+     * 退出：把数据源时间轴 T 映射回媒体时间（`A + floorMod(T,L)`）后恢复原 item（同样走整表重建）。
      *
      * 失败回退（④ 的入口）：预检不通过（格式不支持 / 环过大 / 文件缺失）或该窗口已被登记
      * 不可用时，**不替换** item、不投影，位置继续是媒体时间，并打一条带原因的日志。
@@ -688,6 +690,18 @@ class LoopPlaybackCoordinator @Inject constructor(
                 " window=" + window + " reason=" + reason,
         )
         val w = window
+        // 0-pre) 当前 item 必须就是窗口所属歌：不校验的话，把 A 歌的循环源挂到 B 歌的 item 上
+        // 会让两首歌的音频/位置彻底搅乱（场景 12 的二次污染：item 0 是 #41405，播的却是 #39944）。
+        // 这里只做防御：真正的落点由"换源用整表 setMediaItems"保证（见 rebuildQueueItem）。
+        val currentSongId = current.mediaId?.let { mediaIdToSongId(it) }
+        if (w != null && currentSongId != w.songId) {
+            Log.w(
+                TAG_PERF,
+                "syncSourceItem skip=song-mismatch current=" + currentSongId +
+                    " window=" + w.songId + " reason=" + reason,
+            )
+            return
+        }
         val unavailable = LoopSourceFallback.isUnavailable(w?.songId, w)
         // 0) 没有窗口 / 该窗口已登记 SOURCE 不可用 → 退出循环（只恢复当前项）。
         if (w == null || !MainPlayerRouting.coordinatorReplacesItem(w, unavailable)) {
@@ -766,48 +780,31 @@ class LoopPlaybackCoordinator @Inject constructor(
         val stateBefore = player.playbackState
         val playWhenReadyBefore = player.playWhenReady
         val mediaPositionMs = player.currentPosition
-        // 关键（00021）：media3 的 replaceMediaItem 对同 uri 只做"原地更新 item"，
-        // ProgressiveMediaSource.canUpdateMediaItem 不看 tag，于是旧普通源继续出声。
-        // 这里给循环 item 写一个不同的 customCacheKey，强制 ExoPlayer createMediaSources
-        // 重建源；否则 tag 永远到不了 LoopAwareMediaSourceFactory（真机进度 A / 声音 0 的根因）。
+        // 关键（00021 / A-086）：循环 item 带不同的 customCacheKey，ExoPlayer 必然重建 MediaSource。
+        // 但**绝不能**用 replaceMediaItem 换当前项：media3 1.8.0 的 ExoPlayerImpl.replaceMediaItems
+        // 在"不能原地更新源"时退化成 addMediaSource + removeMediaItem(当前项)，被删掉的正是当前
+        // period，于是按"当前项被移除，续播后继"去解析 —— repeat=OFF 会变成下一首（index 不变但
+        // item 换人），repeat=ONE 更会回退到**第一项**（getNextWindowIndex 原地返回同一 window，
+        // resolveSubsequentPeriod 找不到后继 period 后取 firstWindowIndex=0）。
+        // 这就是场景 12 / issue 00024"进循环 500ms 内变成 #41405、repeat=off、intent 被清"的根因。
+        // 整表 setMediaItems(items, index, position) 是唯一"重建源 + 落点由调用方指定"的公开 API：
+        // 队列内容不变，index 与进入落点（A 或 A+entryOffset）都由参数决定，不会漂。
         val tagged = LoopSourceMediaItem.tagged(current, plan.tag)
         val loopCountBefore = LoopAwareMediaSourceFactory.loopSourcesCreated()
-        Log.i(TAG_PERF, "source replace before index=" + plan.index +
+        Log.i(TAG_PERF, "source rebuild before index=" + plan.index +
             " " + describeItem(current) + " -> " + describeItem(tagged))
-        player.replaceMediaItem(plan.index, tagged)
-        var loopCountAfter = LoopAwareMediaSourceFactory.loopSourcesCreated()
-        Log.i(TAG_PERF, "source replace after item=" + describeItem(player.currentMediaItem) +
+        rebuildQueueItem(player, plan.index, tagged, plan.seekTimelineMs)
+        val loopCountAfter = LoopAwareMediaSourceFactory.loopSourcesCreated()
+        Log.i(TAG_PERF, "source rebuild after index=" + player.currentMediaItemIndex +
+            " item=" + describeItem(player.currentMediaItem) +
             " loopSources=" + loopCountAfter + " delta=" + (loopCountAfter - loopCountBefore))
-        // 兜底（00021）：如果 media3 仍然走 updateMediaSourcesWithMediaItems 捷径，
-        // tag 只会挂在 timeline item 上，工厂不会被调用（loopSources 不增）。
-        // 这时用一次性整表 setMediaItems 强制 createMediaSources 重建全部源（同 list/同 index/
-        // 显式起始位置），保证带 tag 的 item 一定经过 LoopAwareMediaSourceFactory。
-        var forcedFullRebuild = false
         if (loopCountAfter == loopCountBefore) {
-            forcedFullRebuild = true
-            Log.w(TAG_PERF, "source replace shortcut detected: forcing full setMediaItems rebuild")
-            val items = ArrayList<MediaItem>(player.mediaItemCount)
-            for (i in 0 until player.mediaItemCount) {
-                items.add(if (i == plan.index) tagged else player.getMediaItemAt(i))
-            }
-            player.setMediaItems(items, plan.index, plan.seekTimelineMs)
-            // prepare() 在非 IDLE 时是 no-op；IDLE/刚重建时保证新源开始加载。
-            player.prepare()
-            loopCountAfter = LoopAwareMediaSourceFactory.loopSourcesCreated()
-            Log.i(TAG_PERF, "source replace fallback done loopSources=" + loopCountAfter +
-                " item=" + describeItem(player.currentMediaItem))
+            // 整表重建一定走 createMediaSources；这里只留一条可检索的诊断（工厂没被命中）。
+            Log.w(TAG_PERF, "source rebuild did not create a loop source index=" + plan.index)
         }
-        // 进入落点：A（进循环前在 A 之前）或 A+entryOffset（正在窗口内），不是永远 seek 0。
-        // replaceMediaItem 会保留替换前的位置；只有替换前不在 0 时才需要补一次 seek，
-        // 避免"进循环固定两次 flush"（00020 的 flush 风暴里有一次就是这个空 seek）。
-        // 源替换后 ExoPlayer 通常已经把位置复位到 0（或保留了旧位置）；
-        // 只有实际位置与目标 T 相差超过 50ms 才补 seek，避免一次空 seek 带来的额外 flush。
-        val seeked = !forcedFullRebuild &&
-            kotlin.math.abs(player.currentPosition - plan.seekTimelineMs) > 50L
-        if (seeked) player.seekTo(plan.index, plan.seekTimelineMs)
-        // 换源只改播放列表，**不会自己开始加载**：IDLE 上换源必须 prepare；用户要求播放时
-        // 把 play 补上（pwr=false 时绝不偷播）。真机上 `/loop/enter` 出现 idle/pos=0 就是这个坑。
-        val revive = LoopSourceRuntime.revivePlan(stateBefore, playWhenReadyBefore)
+        // 整表重建把播放器复位成 IDLE：必须 prepare 才会加载新源；play 只在进入前就要求播放时补
+        // （pwr=false 时绝不偷播）。
+        val revive = LoopSourceRuntime.revivePlan(stateBefore, playWhenReadyBefore, sourcesRebuilt = true)
         if (revive.prepare) player.prepare()
         if (revive.play) player.play()
         LoopSourceRuntime.onInstalled(w, path)
@@ -824,7 +821,7 @@ class LoopPlaybackCoordinator @Inject constructor(
             "source installed index=" + plan.index + " itemCount=" + player.mediaItemCount +
                 " route=" + MainPlayerRouting.current.useSourceForMainPlayer +
                 " replacesItem=true window=" + w + " fromMediaMs=" + mediaPositionMs +
-                " entryTMs=" + plan.seekTimelineMs + " seekAfterReplace=" + seeked +
+                " entryTMs=" + plan.seekTimelineMs + " rebuild=true" +
                 " cacheKey=" + LoopSourceMediaItem.sourceCacheKey(plan.tag) +
                 " band=" + ringBytes + "B" +
                 " stateBefore=" + stateBefore + " stateAfter=" + player.playbackState +
@@ -847,6 +844,9 @@ class LoopPlaybackCoordinator @Inject constructor(
      *
      * 只替换当前 index（[LoopSourceItemPlan.exit] 的 touchedIndices 恒为单个 index），
      * 队列其它项、首页、通知栏都不变。
+     *
+     * 退出同样不能用 replaceMediaItem（清 cacheKey 也要重建源，A-086 在 repeat=ONE 下同样会
+     * 把当前项甩到第一项），必须走 [rebuildQueueItem] 的整表重建。
      */
     private fun restoreSourceItem(player: Player, index: Int, tag: LoopSourceItemTag, reason: String) {
         val plan = LoopSourceItemPlan.exit(
@@ -861,20 +861,48 @@ class LoopPlaybackCoordinator @Inject constructor(
         sourceOriginalItem = null
         sourceOriginalIndex = -1
         if (restored == null) return
-        player.replaceMediaItem(index, restored)
+        val stateBefore = player.playbackState
+        val playWhenReadyBefore = player.playWhenReady
+        val mediaMs = plan?.seekMediaMs ?: player.currentPosition
+        rebuildQueueItem(player, index, restored, mediaMs)
         LoopSourceRuntime.onReleased()
-        if (plan == null) return
-        player.seekTo(plan.index, plan.seekMediaMs)
-        if (player.playbackState == Player.STATE_IDLE && player.playWhenReady) {
-            player.prepare()
-        }
+        val revive = LoopSourceRuntime.revivePlan(stateBefore, playWhenReadyBefore, sourcesRebuilt = true)
+        if (revive.prepare) player.prepare()
+        if (revive.play) player.play()
         Log.i(
             TAG,
-            "source item restored reason=" + reason + " index=" + plan.index +
-                " mediaMs=" + plan.seekMediaMs + " window=[" + tag.loopStartUs +
+            "source item restored reason=" + reason + " index=" + index +
+                " mediaMs=" + mediaMs + " window=[" + tag.loopStartUs +
                 "," + tag.loopEndUs + ")" +
                 " state=" + player.playbackState + " pwr=" + player.playWhenReady,
         )
+    }
+
+    /**
+     * 原子换源：保持队列内容不变，只把 [index] 换成 [item]，并把落点设成 [positionMs]。
+     *
+     * **为什么不用 `replaceMediaItem`（A-086 / 场景 12 / issue 00024）**：
+     * 循环 item 为了逼 ExoPlayer 重建 MediaSource 换过 customCacheKey，于是
+     * `ExoPlayerImpl.replaceMediaItems` 必然走 add + remove(当前项) 分支。当前 period 被删掉后
+     * 它按"续播后继"解析：repeat=OFF 恰好把临时插入的新源解析回来（看起来正常），
+     * 但 repeat=ONE 时 `getNextWindowIndex` 原地返回同一 window，`resolveSubsequentPeriod`
+     * 永远找不到后继 period，最后回退到 **firstWindowIndex = 0** —— 进循环立刻切到第 1 首、
+     * transition 把 intent 清掉、repeat 被恢复成 off。
+     *
+     * 整表 `setMediaItems(items, index, positionMs)` 是唯一同时满足"重建源"与"落点由调用方
+     * 指定"的公开 API：队列长度/内容不变，index 与位置都不漂。
+     */
+    private fun rebuildQueueItem(player: Player, index: Int, item: MediaItem, positionMs: Long) {
+        val count = player.mediaItemCount
+        if (index < 0 || index >= count) {
+            Log.w(TAG_PERF, "rebuild skipped index=" + index + " itemCount=" + count)
+            return
+        }
+        val items = ArrayList<MediaItem>(count)
+        for (i in 0 until count) {
+            items.add(if (i == index) item else player.getMediaItemAt(i))
+        }
+        player.setMediaItems(items, index, positionMs.coerceAtLeast(0L))
     }
 
     /** 引擎原始位置（µs）：旧窗口属于当前项且处于重放期时用 sink 位置，否则用播放器位置。 */

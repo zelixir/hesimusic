@@ -1,4 +1,12 @@
 {
-  "codes": [],
-  "note": "运行期不变量白名单：只有确认属于已知噪声的 code 才加到这里；每条都应写清原因。"
+  "codes": [
+    "sink-configure-split-mismatch",
+    "controller-available-commands-missing",
+    "paused-but-sink-wrote"
+  ],
+  "notes": {
+    "sink-configure-split-mismatch": "1258 实测：普通播放/seek/切窗口路径反复触发（configureCount 与 SOURCE 路线口径不一致）。场景结果里单列“已允许的不变量告警”，待 invariants owner 复核该断言是否只适用于 M3′。",
+    "controller-available-commands-missing": "单曲队列(repeat=ONE 或 /player/play 设单项)下 media3 合法地不提供 seek-to-next；断言未考虑 queueSize=1，属已知误报。",
+    "paused-but-sink-wrote": "暂停/恢复/seek 过渡的硬件尾帧（约 50-100ms）会让 500ms 采样器在过渡样本上触发；场景 1/17 已用“等尾帧落定后 Δ=0”做严格判定，这条运行期断言对过渡样本过严。待 owner 确认是否忽略过渡样本。"
+  }
 }

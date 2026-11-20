@@ -118,11 +118,19 @@ export function sleep(ms: number): Promise<void> {
 export const selfActivity = {
   lastAt: 0,
   analysisHoldUntil: 0,
+  holdUntil: 0,
   mark(): void {
     this.lastAt = Date.now();
   },
+  /** 某些 POST(/confirm) 的播放副作用会延迟数秒；在这段时间内忽略"外部改动"判定。 */
+  hold(holdMs: number): void {
+    this.holdUntil = Math.max(this.holdUntil, Date.now() + holdMs);
+  },
   recent(windowMs = 3500): boolean {
-    return this.lastAt > 0 && Date.now() - this.lastAt <= windowMs;
+    return (
+      (this.lastAt > 0 && Date.now() - this.lastAt <= windowMs) ||
+      Date.now() < this.holdUntil
+    );
   },
   /** 自己发起的分析会持续几十秒；期间 analysis.phase 的变化不当作外部污染。 */
   markAnalysis(holdMs = 180000): void {
@@ -481,6 +489,7 @@ export class Api {
   async request(method: string, apiPath: string, body?: any, timeoutMs = 15000): Promise<HttpResult> {
     if (method !== "GET") selfActivity.mark();
     if (apiPath === "/analyze" || apiPath === "/cancelAnalysis") selfActivity.markAnalysis();
+    if (apiPath === "/confirm") selfActivity.hold(8000);
     const t0 = Date.now();
     const url = this.cfg.base + apiPath;
     const init: RequestInit = {

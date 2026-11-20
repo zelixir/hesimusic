@@ -88,14 +88,23 @@ object LoopSourceRuntime {
     data class Revive(val prepare: Boolean, val play: Boolean)
 
     /**
-     * 换源不会自动开始加载：`replaceMediaItem` 只改播放列表，IDLE 状态下必须 `prepare()`。
+     * 换源后不会自动开始加载，必须按需 `prepare()`。
      *
      * 规则（绝不偷播）：
-     * - `prepare`：换源前处于 [Player.STATE_IDLE]（`/loop/enter` 之类只 setMediaItems 没 prepare）；
+     * - `prepare`：[sourcesRebuilt] = true（整表 setMediaItems 会强制把播放器复位成 IDLE，
+     *   无论换源前是什么状态都必须 prepare 才会加载新源）；否则只在换源前是 [Player.STATE_IDLE]
+     *   时 prepare（`/loop/enter` 之类只 setMediaItems 没 prepare）；
      * - `play`：换源前 `playWhenReady == true`（用户/接口明确要求播放）。
+     *
+     * @param sourcesRebuilt 本次换源是否走了整表重建（[LoopPlaybackCoordinator] 的
+     *   `rebuildQueueItem`；A-086 之后所有换源都是这条路）
      */
-    fun revivePlan(stateBefore: Int, playWhenReadyBefore: Boolean): Revive = Revive(
-        prepare = stateBefore == Player.STATE_IDLE,
+    fun revivePlan(
+        stateBefore: Int,
+        playWhenReadyBefore: Boolean,
+        sourcesRebuilt: Boolean = false,
+    ): Revive = Revive(
+        prepare = sourcesRebuilt || stateBefore == Player.STATE_IDLE,
         play = playWhenReadyBefore,
     )
 }
