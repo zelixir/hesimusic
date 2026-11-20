@@ -28,12 +28,33 @@ class MediaCodecRingBandDecoder(
     @Volatile
     private var extractor: MediaExtractor? = null
 
+    /** 00022：renderer 换了填充目标时置位，stream 循环尽快退出（不销毁 codec，由 finally 释放）。 */
+    @Volatile
+    private var cancelled = false
+
+    /** 释放请求：由 [close] 置位；真正的 native release 只在没有 stream 在跑时执行。 */
+    @Volatile
+    private var closeRequested = false
+
+    /** stream 生命周期锁：保证 native 调用（readSampleData/getInputBuffer）与 release 互斥。 */
+    private val sessionLock = Any()
+    private var sessionActive = false
+
+    override fun cancel() {
+        cancelled = true
+    }
+
     override fun stream(
         startUs: Long,
         endUs: Long,
         prerollUs: Long,
         onPcm: (data: ByteArray, size: Int) -> Unit,
     ) {
+        synchronized(sessionLock) {
+            if (closeRequested) return
+            sessionActive = true
+        }
+        cancelled = false
         val bpf = channels * 2
         val targetStartFrame = Pcm16Frames.frameAtOrAfterUs(startUs, sampleRate)
         val targetEndFrame = Pcm16Frames.frameAtOrAfterUs(endUs, sampleRate)
@@ -84,7 +105,7 @@ class MediaCodecRingBandDecoder(
             var outputChannels = channels
             var outputBpf = bpf
 
-            while (!outputDone && emittedFrames < targetFrames) {
+            while (!outputDone && emittedFrames < targetFrames && !cancelled && !closeRequested) {
                 if (!inputDone) {
                     val inIdx = c.dequeueInputBuffer(10_000L)
                     if (inIdx >= 0) {
@@ -159,6 +180,10 @@ class MediaCodecRingBandDecoder(
                                     val remaining = targetFrames - emittedFrames
                                     val takeFrames = minOf(available, remaining)
                                     if (takeFrames > 0L) {
+                                        if (cancelled) {
+                                            c.releaseOutputBuffer(outIdx, false)
+                                            break
+                                        }
                                         val from = (skipFrames * outputBpf).toInt()
                                         val bytes = (takeFrames * outputBpf).toInt()
                                         if (!firstOutputLogged) {
@@ -196,29 +221,43 @@ class MediaCodecRingBandDecoder(
                     }
                 }
             }
-            if (emittedFrames < targetFrames) {
+            if (cancelled) {
+                logger(
+                    "RingBand decode cancelled emitted=" + emittedFrames +
+                        " target=" + targetFrames,
+                )
+            } else if (emittedFrames < targetFrames) {
                 logger(
                     "RingBand decode short emitted=" + emittedFrames +
                         " target=" + targetFrames,
                 )
             }
         } finally {
-            try {
-                codec?.stop()
-            } catch (_: Throwable) {
+            // native 资源只允许在**跑 stream 的线程**上释放（会话内所有 native 调用已返回）。
+            synchronized(sessionLock) {
+                releaseSessionLocked()
+                sessionActive = false
             }
-            try {
-                codec?.release()
-            } catch (_: Throwable) {
-            }
-            try {
-                ex.release()
-            } catch (_: Throwable) {
-            }
-            codec = null
-            extractor = null
             logger("RingBand decode session close emittedFrames=" + emittedFrames)
         }
+    }
+
+    /** 调用方必须在持有 [sessionLock] 且 [sessionActive] == false 时调用。 */
+    private fun releaseSessionLocked() {
+        try {
+            codec?.stop()
+        } catch (_: Throwable) {
+        }
+        try {
+            codec?.release()
+        } catch (_: Throwable) {
+        }
+        try {
+            extractor?.release()
+        } catch (_: Throwable) {
+        }
+        codec = null
+        extractor = null
     }
 
     /** 前 8 个交错 int16（L,R,L,R...），给离线脚本与源 PCM 逐样本比对。 */
@@ -253,20 +292,18 @@ class MediaCodecRingBandDecoder(
         return out
     }
 
+    /**
+     * 释放会话；幂等，可从任意线程调用。
+     *
+     * 若此时有 stream 正在跑，**只置标志**（cancel + closeRequested），native 释放推迟到
+     * stream 所在线程的 finally —— 跨线程 close 会在 readSampleData/getInputBuffer 中途
+     * 释放 native 结构，真机表现为 SIGSEGV in __memcpy（seek-ux 已复现）。
+     */
     override fun close() {
-        try {
-            codec?.stop()
-        } catch (_: Throwable) {
+        closeRequested = true
+        cancelled = true
+        synchronized(sessionLock) {
+            if (!sessionActive) releaseSessionLocked()
         }
-        try {
-            codec?.release()
-        } catch (_: Throwable) {
-        }
-        try {
-            extractor?.release()
-        } catch (_: Throwable) {
-        }
-        codec = null
-        extractor = null
     }
 }

@@ -122,6 +122,21 @@ sealed interface LoopPageState {
         val drag: DragState,
         /** true = 当前页由 SOURCE 数据源驱动（预览页专用；M3′ 模式为 false）。 */
         val sourceMode: Boolean = false,
+        /**
+         * true = 循环区外自由试听(issue 00023)。
+         *
+         * 用户把播放头拖到 [aMs, bMs) 之外时置 true:循环窗口不生效,按**文件时间**播放,
+         * 进度条/播放头都是真实媒体时间(不折返);拖回区间内(或显式点模式/选候选)自动恢复循环。
+         *
+         * 语义取舍(见 PreviewPlayer.seekToDisplayMs 注释):
+         * - 区外 seek **允许且必须落到用户点的位置** —— 分析页的核心动作就是试听别的小节来调 A/B,
+         *   把目标折回 [A,B) 等于让"其它段落"无法试听;
+         * - 回 [A,B) 内的 seek **自动恢复循环**(同一 A/B/模式),因为这一次 seek 的意图就是
+         *   "回到循环区",没有理由再让用户手动点一次模式;
+         * - 自然播放(不 seek)穿过 A/B 不会自动恢复循环:自由试听就是要连续听完某一段,
+         *   播到区间里突然开始环回会打断试听。
+         */
+        val auditionOutside: Boolean = false,
     ) : LoopPageState
 
     /** 分析失败 / 入口守卫失败（未找到歌曲、CUE 分轨等）。 */
@@ -435,6 +450,8 @@ object LoopPageReducer {
                 drag = DragState.Idle,
                 prefill = PrefillState.FirstBlockLoading,
                 playback = PlaybackState.Playing,
+                // 选候选是明确的循环试听意图:从自由试听回到循环。
+                auditionOutside = false,
             )
             return next to listOf(
                 LoopPageEffect.ApplyWindow(next.window()),
@@ -462,6 +479,8 @@ object LoopPageReducer {
             drag = DragState.Idle,
             prefill = PrefillState.InProgress(0f),
             playback = playback,
+            // 选候选是明确的循环试听意图:从自由试听回到循环。
+            auditionOutside = false,
         )
         val effects = mutableListOf<LoopPageEffect>(
             LoopPageEffect.CancelPrefill,
@@ -525,6 +544,14 @@ object LoopPageReducer {
     private fun commitWindow(
         state: LoopPageState.Ready,
     ): Pair<LoopPageState, List<LoopPageEffect>> {
+        if (state.auditionOutside) {
+            // 自由试听中松手改 A/B:只落窗口(拖拽事件已更新 aMs/bMs),不 seek、不重装源 ——
+            // 否则播放头会从"区外试听位置"被拽回 A,等于把用户刚拖到的位置夹掉。
+            // ApplyWindow 仅同步窗口记录(播放器在自由试听里 defer 它,不换源),
+            // 保证"返回区间"的判定用的是**新的** A/B。
+            val next = state.copy(drag = DragState.Idle)
+            return next to listOf(LoopPageEffect.ApplyWindow(next.window()))
+        }
         val startMs = modeStartMs(state.mode, state.aMs, state.bMs)
         val active = state.playback is PlaybackState.Playing ||
             state.playback is PlaybackState.AwaitingPrefill
@@ -587,6 +614,8 @@ object LoopPageReducer {
             mode = mode,
             playback = PlaybackState.Playing,
             positionMs = startMs,
+            // 点模式 = 明确的循环试听意图:从自由试听回到循环(自由模式本身也不再需要该标记)。
+            auditionOutside = false,
             prefill = if (state.sourceMode && mode != LoopPageMode.FREE) {
                 PrefillState.FirstBlockLoading
             } else if (state.sourceMode && mode == LoopPageMode.FREE) {
@@ -784,22 +813,46 @@ object LoopPageReducer {
         )
     }
 
+    /**
+     * 波形点击/时间 seek(issue 00023)。
+     *
+     * 循环区外 = 自由试听(按文件时间),区外 seek **不再被折回 [A,B)**;
+     * 拖回区间内自动恢复循环(同一 A/B/模式)。只产出一个 [LoopPageEffect.SeekTo]:
+     * 真正的换源/恢复由 PreviewPlayer 按目标位置自行完成,UI 不额外加等待、不重建播放器。
+     */
     private fun seek(
         state: LoopPageState.Ready,
         positionMs: Long,
     ): Pair<LoopPageState, List<LoopPageEffect>> {
         val target = positionMs.coerceIn(0L, state.durationMs)
+        val outside = state.loopArmed() && !state.isInsideLoop(target)
+        // 回区间 = 要重新装循环窗口/数据源:给一个"首块加载中"弱提示,READY 事件会清掉;
+        // 它不阻塞交互(不冻结位置、不禁用控件)。
+        val restoring = state.auditionOutside && !outside
+        val switching = outside != state.auditionOutside
+        val intentToPlay = state.playback is PlaybackState.Playing ||
+            state.playback is PlaybackState.AwaitingPrefill
+        val prefill = when {
+            restoring && state.sourceMode -> PrefillState.FirstBlockLoading
+            outside -> PrefillState.NotStarted
+            state.sourceMode && state.mode != LoopPageMode.FREE &&
+                state.playback is PlaybackState.Playing -> PrefillState.FirstBlockLoading
+            else -> state.prefill
+        }
+        // 模式切换(区外/回区间)时不再等预填:AwaitingPrefill 转 Playing 并补一次 Play,
+        // 保证"位置到了就一定有声音意图",不留下永远等不到的补发。
+        val awaiting = state.playback is PlaybackState.AwaitingPrefill
+        val playback = if (switching && awaiting) PlaybackState.Playing else state.playback
+        val effects = mutableListOf<LoopPageEffect>(LoopPageEffect.SeekTo(target))
+        if (switching && awaiting && intentToPlay) {
+            effects += LoopPageEffect.Play(state.mode, target)
+        }
         return state.copy(
             positionMs = target,
-            prefill = if (state.sourceMode &&
-                state.mode != LoopPageMode.FREE &&
-                state.playback is PlaybackState.Playing
-            ) {
-                PrefillState.FirstBlockLoading
-            } else {
-                state.prefill
-            },
-        ) to listOf(LoopPageEffect.SeekTo(target))
+            auditionOutside = outside,
+            prefill = prefill,
+            playback = playback,
+        ) to effects
     }
 
     // ------------------------------------------------------------------ 纯工具
@@ -843,3 +896,15 @@ object LoopPageReducer {
 /** [LoopPageState.Ready] 当前 A/B 对应的环形窗口(微秒);UI/effect runner 共用。 */
 fun LoopPageState.Ready.window(): LoopWindow =
     LoopWindow(songId, aMs * 1000L, bMs * 1000L)
+
+/** 当前是否真的在"循环试听"(自由模式没有循环窗口,整段直通)。 */
+fun LoopPageState.Ready.loopArmed(): Boolean =
+    mode != LoopPageMode.FREE && bMs > aMs
+
+/**
+ * 展示位置是否落在循环区 [aMs, bMs) 内(右开,与音频层环回边界一致)。
+ *
+ * issue 00023:区外位置 = 自由试听;判定集中在 reducer / 播放器 / 测试三处共用,避免口径漂移。
+ */
+fun LoopPageState.Ready.isInsideLoop(positionMs: Long): Boolean =
+    positionMs in aMs until bMs

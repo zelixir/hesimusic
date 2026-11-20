@@ -520,6 +520,14 @@ private fun ResultContent(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        if (state.auditionOutside) {
+            // 00023:区外 seek = 按文件时间自由试听;这条提示说明"现在没有在环回",以及怎么回去。
+            Text(
+                "循环已暂停 · 按文件时间试听(拖回 A/B 区间内自动恢复循环)",
+                style = MaterialTheme.typography.bodySmall,
+                color = MarkerAColor,
+            )
+        }
 
         // 四模式(契约 §2.3):点击即试听
         SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {

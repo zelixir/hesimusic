@@ -38,6 +38,9 @@ class RingBandExtractor(
     private var lastThrottleLogMs = 0L
     private var activeElapsedMs = 0L
     private var lastActiveClockMs = -1L
+
+    /** seek 时的已输出帧数基准：seek 后允许重新领先 [MAX_AHEAD_SECONDS]（00023）。 */
+    private var emittedBaseFrames = 0L
     private var queueGuard = false
     private var readsAtLastRateLog = 0L
     private var lastRateLogMs = 0L
@@ -85,10 +88,6 @@ class RingBandExtractor(
         if (LoopSourcePauseGate.paused) return Extractor.RESULT_CONTINUE
         renderer.error?.let { throw IOException("RingBand render failed: " + it) }
         val track = trackOutput ?: return Extractor.RESULT_CONTINUE
-        val minFrames = minOf(timeline.loopFrames, 2L * timeline.sampleRate)
-        if (ring.renderedFrames < minFrames && !awaitFilled(minFrames)) {
-            return Extractor.RESULT_CONTINUE
-        }
 
         // 关键：不能无限领先播放头。这里用「加载活跃时间」做墙钟节流，
         // 最多领先 5s；暂停/长时间不读时不计入 activeElapsed，避免恢复后暴冲。
@@ -138,13 +137,9 @@ class RingBandExtractor(
         queueGuard = false
         var result = reader.read(request)
         if (result == null) {
-            // 高水位后 media3 会立刻重试；必须在这里等新 append，不能空转。
-            val target = if (ring.renderedFrames >= timeline.loopFrames) {
-                reader.offsetFrames + 1L
-            } else {
-                ring.renderedFrames + 1L
-            }
-            if (awaitFilled(target)) {
+            // media3 会立刻重试；这里只等**当前读取位置**被跳填/续填补齐，不能空转。
+            // （00022 之前的实现等的是 ring 高水位，等于逼解码从 A 顺序追到环尾。）
+            if (awaitFilled(reader.offsetFrames)) {
                 result = reader.read(request)
             }
             if (result == null) return Extractor.RESULT_CONTINUE
@@ -214,12 +209,13 @@ class RingBandExtractor(
             lastActiveClockMs = now
             if (delta in 0L..200L) activeElapsedMs += delta
         }
-        return maxAheadFrames + activeElapsedMs * timeline.sampleRate / 1000L
+        return emittedBaseFrames + maxAheadFrames + activeElapsedMs * timeline.sampleRate / 1000L
     }
 
-    private fun awaitFilled(targetFrames: Long): Boolean {
+    /** 等环内 [offsetFrames] 这一帧可读（跳填写入会立即唤醒）。 */
+    private fun awaitFilled(offsetFrames: Long): Boolean {
         reader.recordWait()
-        val ready = ring.awaitRenderedAtLeast(targetFrames, READ_WAIT_MS)
+        val ready = reader.awaitFilled(offsetFrames, 1L, READ_WAIT_MS)
         logHeapIfDue(System.currentTimeMillis())
         if (!ready) {
             val now = System.currentTimeMillis()
@@ -227,8 +223,8 @@ class RingBandExtractor(
                 lastWaitLogMs = now
                 RingBandLog.w(
                     "RingBand read wait filled=" + ring.renderedFrames +
-                        " offset=" + reader.offsetFrames +
-                        " target=" + targetFrames,
+                        " covered=" + ring.coveredFrames +
+                        " offset=" + reader.offsetFrames,
                 )
             }
         }
@@ -241,6 +237,15 @@ class RingBandExtractor(
             timeline.loopFrames,
         )
         reader.seekToOffset(offset, timeUs)
+        // 00023：seek 后重新给满 maxAhead 的发射预算，否则墙钟节流会按实时速度喂数据，
+        // media3 要等 1.5s 才凑够起播缓冲（表现为 seek 慢 1~2 秒）。
+        emittedBaseFrames = reader.totalReadFrames
+        activeElapsedMs = 0L
+        lastActiveClockMs = clock()
+        // 00022：让渲染线程立刻跳到目标 offset 开始解码，而不是从 A 顺序追上来。
+        renderer.requestFillAt(offset)
+        // 真机计时探针：从 seek 请求到第一个 PCM buffer 进入 AudioSink（LoopPerf 日志）。
+        LoopPreviewDebugBridge.noteSeekRequest(timeUs / 1000L)
         logger(
             "RingBand seek position=" + position + " timeUs=" + timeUs +
                 " offsetFrames=" + offset,

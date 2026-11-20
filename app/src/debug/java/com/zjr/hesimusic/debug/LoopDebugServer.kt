@@ -20,6 +20,7 @@ import com.zjr.hesimusic.loop.analysis.AnalysisState
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
 import com.zjr.hesimusic.loop.analysis.LoopCandidateKt
 import com.zjr.hesimusic.loop.analysis.ParallelDecodeHooks
+import com.zjr.hesimusic.ui.loop.PreviewProbe
 import com.zjr.hesimusic.ui.player.state.PlayerPageShadowDiagnostics
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.CancellationException
@@ -371,6 +372,7 @@ object LoopDebugServer {
             method == "POST" && segments == listOf("debug", "seam") -> handleSeamToggle(body)
             method == "POST" && segments == listOf("debug", "source-mode") -> handleSourceModeToggle(body)
             method == "POST" && segments == listOf("debug", "preview-seek") -> handlePreviewSeek(body)
+            method == "GET" && segments == listOf("debug", "preview") -> handlePreviewSnapshot()
             method == "POST" && segments == listOf("debug", "invariant") -> handleInvariantFault(body)
             else -> throw HttpError(404, "unknown endpoint: $method ${request.path}")
         }
@@ -1498,14 +1500,111 @@ object LoopDebugServer {
      * path 非空 → LoopAudioController.setPcmTap(File(path));空/缺省 → 关闭。
      * 相对路径按 filesDir 解析;返回 tapping/path,便于 PC 用 run-as 拉文件。
      */
-    /** POST /debug/preview-seek {positionMs} —— 脚本触发 SOURCE 预览 seek。 */
+    /**
+     * GET /debug/preview —— 预览播放器只读快照(issue 00023 量测)。
+     *
+     * 返回当前页面那一份 PreviewPlayer 的现场:engine/sourceActive/窗口/播放器位置(原始 T)/展示位置/
+     * 播放状态/isPlaying/真正写出的音频帧数(outputFrames)/最近一次 seek 的请求与应用时刻。
+     * 409 = 结果页还没 prepare 出预览播放器。
+     */
+    private fun handlePreviewSnapshot(): Map<String, Any?> {
+        val snapshot = PreviewProbe.snapshot()
+            ?: throw HttpError(409, "preview probe not attached (result page not open)")
+        return linkedMapOf(
+            "available" to true,
+            "bridgeRegistered" to (LoopPreviewDebugBridge.seekRequest != null),
+            "snapshot" to snapshot,
+        )
+    }
+
+    /**
+     * POST /debug/preview-seek {positionMs} —— 脚本触发预览 seek,并**同步测量**到落点/出声的延迟。
+     *
+     * 测量口径(issue 00023 对照表):
+     * - `applyMs`: 请求 → PreviewPlayer 真正调用 ExoPlayer.seekTo 的耗时(主线程应用延迟);
+     * - `advanceMs`: 请求 → 播放器位置推进到落点之后 30ms 且 state=READY 的耗时
+     *   (ExoPlayer 的位置是**渲染播放头**,推进即音频在走;≤100ms 是验收线);
+     * - `framesDelta`: 同窗口内 TapAudioSink 真正写出给 AudioTrack 的帧数增量(出声的旁证);
+     * - `displayAfterMs`: 稳定后的展示位置 —— 区外 seek 若被夹回会在这一项立刻暴露。
+     *
+     * 轮询 4ms 一次,最多 2.5s;暂停态只测 applyMs(不会推进)。
+     */
     private fun handlePreviewSeek(body: JSONObject?): Map<String, Any?> {
         val requested = body?.requireLong("positionMs")
             ?: throw HttpError(400, "positionMs is required")
         if (requested < 0L) throw HttpError(400, "positionMs must be >= 0")
+        val before = PreviewProbe.snapshot()
+            ?: throw HttpError(409, "preview probe not attached (result page not open)")
+        val seqBefore = (before["seekRequests"] as? Number)?.toLong() ?: 0L
+        val framesBefore = (before["outputFrames"] as? Number)?.toLong() ?: 0L
+        val wasPlaying = before["isPlaying"] == true
+        val t0 = SystemClock.elapsedRealtime()
         val ok = LoopPreviewDebugBridge.requestSeek(requested)
         if (!ok) throw HttpError(409, "preview seek bridge is not registered (SOURCE player not created)")
-        return linkedMapOf("ok" to true, "displayMs" to requested)
+
+        var last: Map<String, Any?> = before
+        var applyMs: Long? = null
+        var advanceMs: Long? = null
+        var appliedTarget: Long? = null
+        var framesAtApply: Long? = null
+        val deadline = t0 + 2_500L
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val s = try {
+                PreviewProbe.snapshot()
+            } catch (t: Throwable) {
+                null
+            } ?: break
+            last = s
+            val seq = (s["seekRequests"] as? Number)?.toLong() ?: 0L
+            if (applyMs == null && seq > seqBefore) {
+                applyMs = SystemClock.elapsedRealtime() - t0
+                appliedTarget = (s["lastSeekPlayerTargetMs"] as? Number)?.toLong()
+                framesAtApply = (s["outputFrames"] as? Number)?.toLong()
+                if (!wasPlaying) break
+            }
+            val target = appliedTarget
+            if (target != null) {
+                val pos = (s["playerPositionMs"] as? Number)?.toLong() ?: 0L
+                val state = s["playbackStateName"] as? String
+                if (pos >= target + 30L && state == "READY") {
+                    advanceMs = SystemClock.elapsedRealtime() - t0
+                    break
+                }
+            }
+            try {
+                Thread.sleep(4L)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                break
+            }
+        }
+        val framesEnd = (last["outputFrames"] as? Number)?.toLong() ?: framesBefore
+        return linkedMapOf(
+            "ok" to true,
+            "requestedMs" to requested,
+            "wasPlaying" to wasPlaying,
+            "applyMs" to applyMs,
+            "advanceMs" to advanceMs,
+            "appliedPlayerTargetMs" to appliedTarget,
+            "framesBefore" to framesBefore,
+            "framesAtApply" to framesAtApply,
+            "framesEnd" to framesEnd,
+            "framesDelta" to (framesEnd - framesBefore),
+            "displayAfterMs" to (last["displayMs"] as? Number)?.toLong(),
+            "playerPositionAfterMs" to (last["playerPositionMs"] as? Number)?.toLong(),
+            "playbackStateAfter" to last["playbackStateName"],
+            "isPlayingAfter" to last["isPlaying"],
+            "engine" to last["engine"],
+            "sourceActive" to last["sourceActive"],
+            "windowAfterA_ms" to last["windowA_ms"],
+            "windowAfterB_ms" to last["windowB_ms"],
+            "outsideLoopAfter" to last["outsideLoop"],
+            "sourceWindowAfterA_ms" to last["sourceWindowA_ms"],
+            "sourceWindowAfterB_ms" to last["sourceWindowB_ms"],
+            "mode" to last["mode"],
+            "outputFrames" to framesEnd,
+            "elapsedMs" to (SystemClock.elapsedRealtime() - t0),
+        )
     }
 
     private suspend fun handleDebugTap(body: JSONObject?): Map<String, Any?> {

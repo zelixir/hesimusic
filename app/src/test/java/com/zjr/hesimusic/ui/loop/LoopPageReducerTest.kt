@@ -12,6 +12,8 @@ import com.zjr.hesimusic.ui.loop.state.LoopPageReducer
 import com.zjr.hesimusic.ui.loop.state.LoopPageState
 import com.zjr.hesimusic.ui.loop.state.PlaybackState
 import com.zjr.hesimusic.ui.loop.state.PrefillState
+import com.zjr.hesimusic.ui.loop.state.isInsideLoop
+import com.zjr.hesimusic.ui.loop.state.loopArmed
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -798,6 +800,33 @@ object LoopPageMatrix {
         )
     }
 
+    /** 与 LoopPageReducer.seek 同口径(矩阵用;区外 seek = 自由试听)。 */
+    private fun seekExpected(state: LoopPageState.Ready): Expectation.Transition {
+        val target = 70_000L
+        val outside = state.loopArmed() && !state.isInsideLoop(target)
+        val restoring = state.auditionOutside && !outside
+        val switching = outside != state.auditionOutside
+        val awaiting = state.playback is PlaybackState.AwaitingPrefill
+        val prefill = when {
+            restoring && state.sourceMode -> PrefillState.FirstBlockLoading
+            outside -> PrefillState.NotStarted
+            state.sourceMode && state.mode != LoopPageMode.FREE &&
+                state.playback is PlaybackState.Playing -> PrefillState.FirstBlockLoading
+            else -> state.prefill
+        }
+        val effects = mutableListOf<LoopPageEffect>(LoopPageEffect.SeekTo(target))
+        if (switching && awaiting) effects += LoopPageEffect.Play(state.mode, target)
+        return Expectation.Transition(
+            state.copy(
+                positionMs = target,
+                auditionOutside = outside,
+                prefill = prefill,
+                playback = if (switching && awaiting) PlaybackState.Playing else state.playback,
+            ),
+            effects,
+        )
+    }
+
     private fun toggleExpected(state: LoopPageState.Ready): Expectation.Transition = when (state.playback) {
         PlaybackState.Playing, is PlaybackState.AwaitingPrefill ->
             Expectation.Transition(state.copy(playback = PlaybackState.Paused), listOf(LoopPageEffect.Pause))
@@ -901,14 +930,8 @@ object LoopPageMatrix {
                 "Tick",
                 Expectation.Transition(ready.copy(positionMs = 70_000L), emptyList()),
             )
-            expect(
-                stateKey,
-                "Seek",
-                Expectation.Transition(
-                    ready.copy(positionMs = 70_000L),
-                    listOf(LoopPageEffect.SeekTo(70_000L)),
-                ),
-            )
+            // 00023:Seek(70s) 落在循环区 [A,B) 外 → 进入自由试听(不再折回区间)。
+            expect(stateKey, "Seek", seekExpected(ready))
             expect(
                 stateKey,
                 "ConfirmAndSave",

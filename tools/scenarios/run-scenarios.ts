@@ -1,0 +1,1005 @@
+#!/usr/bin/env bun
+/**
+ * tools/scenarios/run-scenarios.ts —— 场景矩阵执行器（一条命令跑完，输出表格）。
+ *
+ * 用法：
+ *   bun run tools/scenarios/run-scenarios.ts [选项]
+ *   powershell -NoProfile -File tools/scenarios/run-scenarios.ps1 [选项]
+ *
+ * 选项：
+ *   --device <serial>         adb 序列号（默认取第一台在线设备）
+ *   --base <url>              调试口地址（默认 http://127.0.0.1:18765）
+ *   --out <dir>               产物根目录（默认 e2e-artifacts/scenarios）
+ *   --only 1,2,9              只跑指定场景
+ *   --list                    列出场景
+ *   --skip-ui                 跳过依赖 uiautomator 的场景（6/7/9/10/11/15/16）
+ *   --timeout <ms>            单场景硬超时（默认 150000）
+ *   --song <id>               指定主场景用歌（有已确认循环）
+ *   --song-short <id>         指定分析/接缝/seek 用歌（已确认循环）
+ *   --song-unconfirmed <id>   指定未确认循环用歌
+ *   --allow-invariant <code>  允许出现的不变量 code（可重复；也可写 tools/scenarios/allow-invariants.json）
+ *
+ * 前置：debug 包已装、设备已连、LoopDebugServer 在跑（adb forward tcp:18765 tcp:8765
+ * 由脚本自动重建）。判据与扩展说明见 docs/testing-scenarios.md。
+ */
+
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { spawnSync } from "node:child_process";
+import {
+  Adb,
+  Api,
+  Evidence,
+  check,
+  selfActivity,
+  compactState,
+  displayWidth,
+  ensureDir,
+  nowHHMMSS,
+  padEndWidth,
+  resolveAdb,
+  sleep,
+  stamp,
+  waitFor,
+  writeJson,
+} from "./harness";
+import type { Cfg, Check, SongInfo, State } from "./harness";
+import { SCENARIOS, SkipError } from "./scenarios";
+import type { PreviewSeekResult, Scenario, ScenarioCtx, ScenarioRunResult } from "./scenarios";
+
+// ---------------------------------------------------------------------------
+// 参数
+// ---------------------------------------------------------------------------
+
+interface Opts {
+  device: string;
+  base: string;
+  out: string;
+  only: number[];
+  list: boolean;
+  skipUi: boolean;
+  exclusiveOnly: boolean;
+  nonExclusiveOnly: boolean;
+  timeoutMs: number;
+  song: number;
+  songShort: number;
+  songUnconfirmed: number;
+  allow: string[];
+}
+
+function parseArgs(argv: string[]): Opts {
+  const opts: Opts = {
+    device: "",
+    base: "http://127.0.0.1:18765",
+    out: path.join("e2e-artifacts", "scenarios"),
+    only: [],
+    list: false,
+    skipUi: false,
+    exclusiveOnly: false,
+    nonExclusiveOnly: false,
+    timeoutMs: 150000,
+    song: 0,
+    songShort: 0,
+    songUnconfirmed: 0,
+    allow: [],
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    const next = () => {
+      i += 1;
+      return argv[i] ?? "";
+    };
+    if (a === "--device") opts.device = next();
+    else if (a === "--base") opts.base = next().replace(/\/$/, "");
+    else if (a === "--out") opts.out = next();
+    else if (a === "--only") opts.only = next().split(",").map((s) => Number(s.trim())).filter((n) => n > 0);
+    else if (a === "--list") opts.list = true;
+    else if (a === "--skip-ui") opts.skipUi = true;
+    else if (a === "--exclusive") opts.exclusiveOnly = true;
+    else if (a === "--non-exclusive") opts.nonExclusiveOnly = true;
+    else if (a === "--timeout") opts.timeoutMs = Number(next()) || 150000;
+    else if (a === "--song") opts.song = Number(next()) || 0;
+    else if (a === "--song-short") opts.songShort = Number(next()) || 0;
+    else if (a === "--song-unconfirmed") opts.songUnconfirmed = Number(next()) || 0;
+    else if (a === "--allow-invariant") opts.allow.push(next());
+    else if (a === "--help" || a === "-h") {
+      printHelp();
+      process.exit(0);
+    } else if (a.startsWith("--")) {
+      console.error("未知参数: " + a);
+      process.exit(2);
+    }
+  }
+  return opts;
+}
+
+function printHelp(): void {
+  console.log(
+    [
+      "场景矩阵执行器",
+      "  bun run tools/scenarios/run-scenarios.ts [--device b1e84dad] [--only 1,2,9] [--skip-ui]",
+      "  powershell -NoProfile -File tools/scenarios/run-scenarios.ps1 ...",
+      "产物: e2e-artifacts/scenarios/<时间戳>/report.md + report.json + evidence/*.json",
+    ].join("\n"),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 设备与歌曲
+// ---------------------------------------------------------------------------
+
+function pickDevice(adbExe: string, wanted: string): string {
+  const out = spawnSync(adbExe, ["devices"], { encoding: "utf8", windowsHide: true });
+  const lines = (out.stdout || "").split(/\r?\n/);
+  const devices: string[] = [];
+  for (const line of lines) {
+    const m = line.match(/^(\S+)\s+device\b/);
+    if (m) devices.push(m[1]);
+  }
+  if (wanted) {
+    if (!devices.includes(wanted)) throw new Error("设备 " + wanted + " 不在线; 在线: " + (devices.join(",") || "无"));
+    return wanted;
+  }
+  if (devices.length === 0) throw new Error("没有在线 adb 设备");
+  return devices[0];
+}
+
+function pickSongs(all: SongInfo[], opts: Opts): { primary: SongInfo; short: SongInfo; unconfirmed: SongInfo } {
+  const byId = (id: number): SongInfo | null => all.find((s) => s.id === id) ?? null;
+  const conf = all.filter(
+    (s) =>
+      s.hasLoop &&
+      s.loopConfirmed &&
+      s.loopStartMs != null &&
+      s.loopEndMs != null &&
+      s.durationMs > s.loopEndMs! + 3000,
+  );
+  const windows = (s: SongInfo) => Number(s.loopEndMs) - Number(s.loopStartMs);
+
+  let primary: SongInfo | null = null;
+  if (opts.song > 0) primary = byId(opts.song);
+  if (!primary) {
+    const cands = conf
+      .filter((s) => windows(s) >= 15000 && windows(s) <= 130000 && s.durationMs >= 90000 && s.durationMs <= 320000)
+      .sort((a, b) => a.durationMs - b.durationMs || a.id - b.id);
+    primary = cands[0] ?? null;
+  }
+  if (!primary) {
+    const cands = conf.sort((a, b) => a.durationMs - b.durationMs || a.id - b.id);
+    primary = cands[0] ?? null;
+  }
+  if (!primary) throw new Error("曲库中没有「已确认循环」的歌;先 /analyze + /confirm 至少一首");
+
+  let short: SongInfo | null = null;
+  if (opts.songShort > 0) short = byId(opts.songShort);
+  if (!short) {
+    const cands = conf
+      .filter((s) => s.id !== primary!.id && windows(s) >= 5000 && s.durationMs >= 40000 && s.durationMs <= 130000)
+      .sort((a, b) => a.durationMs - b.durationMs || a.id - b.id);
+    short = cands[0] ?? null;
+  }
+  if (!short) short = conf.find((s) => s.id !== primary!.id) ?? primary;
+
+  let unconfirmed: SongInfo | null = null;
+  if (opts.songUnconfirmed > 0) unconfirmed = byId(opts.songUnconfirmed);
+  if (!unconfirmed) {
+    const cands = all
+      .filter((s) => s.hasLoop && !s.loopConfirmed && s.loopStartMs != null && s.loopEndMs != null)
+      .sort((a, b) => a.durationMs - b.durationMs || a.id - b.id);
+    unconfirmed = cands[0] ?? null;
+  }
+  if (!unconfirmed) throw new Error("曲库中没有「未确认循环」的歌;场景 14 无法执行");
+
+  return { primary: primary!, short: short!, unconfirmed: unconfirmed! };
+}
+
+function songLine(s: SongInfo): string {
+  return (
+    "#" + s.id + " 「" + s.title + "」dur=" + Math.round(s.durationMs / 1000) + "s" +
+    (s.loopStartMs != null ? " A=" + s.loopStartMs + " B=" + s.loopEndMs : "")
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 不变量
+// ---------------------------------------------------------------------------
+
+function invariantCounts(list: any[]): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const item of list ?? []) {
+    const code = String(item.code ?? "");
+    if (!code) continue;
+    map.set(code, Number(item.count ?? 1));
+  }
+  return map;
+}
+
+function newInvariantCodes(before: Map<string, number>, after: Map<string, number>): string[] {
+  const codes: string[] = [];
+  for (const [code, count] of after) {
+    const prev = before.get(code) ?? 0;
+    if (count > prev) codes.push(code);
+  }
+  return codes;
+}
+
+function loadAllowlist(opts: Opts): Set<string> {
+  const set = new Set<string>(opts.allow);
+  const file = path.join("tools", "scenarios", "allow-invariants.json");
+  if (fs.existsSync(file)) {
+    try {
+      const json = JSON.parse(fs.readFileSync(file, "utf8"));
+      for (const code of json.codes ?? []) set.add(String(code));
+    } catch (e: any) {
+      console.warn("allow-invariants.json 解析失败: " + e.message);
+    }
+  }
+  return set;
+}
+
+// ---------------------------------------------------------------------------
+// 超时
+// ---------------------------------------------------------------------------
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("场景超时(" + ms + "ms): " + label)), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 污染检测
+// ---------------------------------------------------------------------------
+
+/**
+ * 场景期间"外部有人在动设备"的检测：
+ * - 每 300ms 读一次 /state，比较 songId/engine/window/screen/playing/repeat 指纹；
+ * - 指纹变化时，如果最近 3.5s 内没有本执行器的 POST/tap/HOME/am start，就记一次污染；
+ * - 包 lastUpdateTime/versionCode 在场景前后变化（被重新安装）也算污染。
+ *
+ * 启发式而非证明：自己的动作会短暂"掩盖"外部改动；报告里仍建议独占窗口。
+ */
+function stateFingerprint(s: State): string {
+  const w = s.loop?.window;
+  const analysis = selfActivity.analysisHeld()
+    ? "analysis-held"
+    : (s.analysis?.analyzing === true ? "analyzing" : String(s.analysis?.phase ?? "?")) + ":" + (s.analysis?.songId ?? "null");
+  return [
+    s.screen,
+    s.playback?.songId ?? "null",
+    s.playback?.engine ?? "null",
+    s.playback?.playing ?? "null",
+    s.playback?.repeatMode ?? "null",
+    w ? w.songId + "@" + w.loopStartUs + "-" + w.loopEndUs : "none",
+    analysis,
+  ].join("|");
+}
+
+// ---------------------------------------------------------------------------
+// 主流程
+// ---------------------------------------------------------------------------
+
+const UI_SCENARIOS = new Set([6, 7, 9, 10, 11, 15, 16]);
+
+async function main(): Promise<number> {
+  const opts = parseArgs(process.argv.slice(2));
+  if (opts.list) {
+    for (const s of SCENARIOS) {
+      console.log(s.id + "\t" + s.tag + "\t" + (s.exclusive ? "EXCL" : "shared") + "\t" + s.name + "\t" + s.key);
+    }
+    return 0;
+  }
+
+  const adbExe = resolveAdb();
+  const device = pickDevice(adbExe, opts.device);
+  const cfg: Cfg = {
+    device,
+    base: opts.base,
+    forwardLocal: Number(new URL(opts.base).port || 18765),
+    forwardRemote: 8765,
+    outDir: opts.out,
+    adbExe,
+    pkg: "com.zjr.hesimusic",
+    scenarioTimeoutMs: opts.timeoutMs,
+  };
+  const adb = new Adb(adbExe, device);
+  const api = new Api(cfg, adb);
+
+  console.log("== 环境 ==");
+  console.log("adb: " + adbExe);
+  console.log("device: " + device);
+  await adb.forwardEnsure(cfg.forwardLocal, cfg.forwardRemote);
+
+  // 安装/重装后进程可能还没起来：先拉起应用（debug server 随进程启动）。
+  let pidNow = await adb.pidof(cfg.pkg);
+  if (pidNow == null) {
+    console.log("应用未运行,正在启动…");
+    await adb.bringForeground(cfg.pkg);
+    await sleep(1200);
+  }
+  // UI 场景必须前台 + 亮屏（/navigate 只是 Activity 导航，后台时 Compose 不组合）。
+  const wake = await adb.shell("dumpsys power");
+  if (/mWakefulness=Asleep/.test(wake)) {
+    await adb.shell("input keyevent KEYCODE_WAKEUP");
+    await adb.shell("wm dismiss-keyguard");
+    await sleep(500);
+  }
+  const fgOk = await adb.bringForeground(cfg.pkg);
+  if (!fgOk) console.warn("警告: 无法把应用带到前台,UI 场景可能失败");
+  for (let i = 0; i < 20; i++) {
+    pidNow = await adb.pidof(cfg.pkg);
+    if (pidNow != null) break;
+    await sleep(500);
+  }
+  if (pidNow == null) throw new Error("应用进程不存在(安装后未启动?)");
+
+  let initial: State | null = null;
+  for (let i = 0; i < 10 && !initial; i++) {
+    try {
+      initial = await api.state();
+    } catch (e: any) {
+      if (i === 9) throw new Error("调试口不可达: " + e.message + " (确认 debug 包在跑且 forward 正常)");
+      await adb.forwardEnsure(cfg.forwardLocal, cfg.forwardRemote);
+      await sleep(700);
+    }
+  }
+  const version = await adb.versionInfo(cfg.pkg);
+  const pid0 = await adb.pidof(cfg.pkg);
+  const runStartEpochSec = Math.floor(Date.now() / 1000) - 5;
+  const startedAt = new Date();
+  const runDir = path.join(opts.out, stamp());
+  ensureDir(path.join(runDir, "evidence"));
+  console.log("pkg: " + cfg.pkg + " versionCode=" + version.versionCode + " versionName=" + version.versionName);
+  console.log("pid: " + pid0 + "  screen=" + initial!.screen);
+  console.log("foreground: " + (await adb.foregroundActivity()));
+
+  const all = await api.songsAll();
+  const songs = pickSongs(all, opts);
+  console.log("primary: " + songLine(songs.primary));
+  console.log("short:   " + songLine(songs.short));
+  console.log("unconf:  " + songLine(songs.unconfirmed));
+
+  const sampleRateMap = new Map<number, number>();
+  for (const s of all) if (s.sampleRate != null) sampleRateMap.set(s.id, s.sampleRate);
+  const sampleRateFor = (songId: number): number => sampleRateMap.get(songId) ?? 44100;
+
+  const allowSet = loadAllowlist(opts);
+  const baselineRepeat = initial.playback?.repeatMode ?? null;
+  const baselineShuffle = initial.playback?.shuffle ?? null;
+  const baselineInv = invariantCounts(initial.invariants ?? []);
+  const pendingDecisions: string[] = [];
+
+  // ---- ctx ----
+  let uiCache: { at: number; labels: string[] } | null = null;
+  const evidenceHolder = { ev: new Evidence("boot") };
+
+  const ctx: ScenarioCtx = {
+    cfg,
+    api,
+    adb,
+    songs,
+    get evidence() {
+      return evidenceHolder.ev;
+    },
+    log: (message: string) => console.log("    " + message),
+    sampleRateFor,
+    async resetForMain() {
+      await api.post("/loop/exit").catch(() => null);
+      await api.post("/navigate", { route: "about" }).catch(() => null);
+      await sleep(350);
+    },
+    async ensureLoopPage(songId: number) {
+      const route = "loop/" + songId;
+      const nav = await api.post("/navigate", { route });
+      if (nav.status !== 200) throw new Error("/navigate " + route + " -> " + nav.status + " " + nav.text.slice(0, 160));
+      const ready = await waitFor(
+        async () => api.preview(),
+        (p) => p.available === true,
+        20000,
+        150,
+      );
+      if (!ready.ok) {
+        const reason = ready.value?.reason ?? "timeout";
+        if (reason === "endpoint-missing") {
+          throw new SkipError("当前 build 没有 GET /debug/preview(issue 00023 之前的包),无法观测结果页");
+        }
+        throw new Error("循环页 20s 内未就绪: " + reason);
+      }
+      uiCache = null;
+      await sleep(300);
+    },
+    async previewReady(timeoutMs = 10000) {
+      const got = await waitFor(async () => api.preview(), (p) => p.available === true, timeoutMs, 120);
+      if (!got.ok || !got.value || !got.value.snapshot) {
+        const reason = got.value?.reason ?? "timeout";
+        if (reason === "endpoint-missing") throw new SkipError("当前 build 没有 /debug/preview");
+        throw new SkipError("结果页预览未打开: " + reason);
+      }
+      return got.value.snapshot;
+    },
+    async previewSeek(positionMs: number): Promise<PreviewSeekResult> {
+      const before = await api.preview();
+      if (!before.available || !before.snapshot) {
+        if (before.reason === "endpoint-missing") throw new SkipError("当前 build 没有 /debug/preview");
+        throw new SkipError("结果页预览未打开: " + (before.reason ?? "unknown"));
+      }
+      const snapBefore = before.snapshot;
+      const r = await api.post("/debug/preview-seek", { positionMs }, 10000);
+      if (r.status === 404) throw new SkipError("当前 build 没有 POST /debug/preview-seek");
+      if (r.status === 409) throw new SkipError("预览 seek 桥未注册: " + (r.json?.error ?? ""));
+      if (r.status !== 200 || !r.json) {
+        throw new Error("/debug/preview-seek -> " + r.status + " " + r.text.slice(0, 160));
+      }
+      const j = r.json;
+      let latencyToFramesMs: number | null = null;
+      const framesDelta = Number(j.framesDelta ?? 0);
+      if (framesDelta > 0) {
+        latencyToFramesMs = j.applyMs == null ? null : Number(j.applyMs);
+      } else {
+        const t0 = Date.now();
+        while (Date.now() - t0 < 1200) {
+          const p = await api.preview();
+          if (p.available && Number(p.snapshot?.outputFrames ?? 0) > Number(snapBefore.outputFrames ?? 0)) {
+            latencyToFramesMs = Date.now() - t0;
+            break;
+          }
+          await sleep(20);
+        }
+      }
+      return {
+        ok: true,
+        via: "endpoint",
+        applyMs: j.applyMs == null ? null : Number(j.applyMs),
+        advanceMs: j.advanceMs == null ? null : Number(j.advanceMs),
+        latencyToFramesMs,
+        framesDelta,
+        displayAfterMs: j.displayAfterMs == null ? null : Number(j.displayAfterMs),
+        playerPositionAfterMs: j.playerPositionAfterMs == null ? null : Number(j.playerPositionAfterMs),
+        isPlayingAfter: j.isPlayingAfter == null ? null : Boolean(j.isPlayingAfter),
+        mode: j.mode == null ? null : String(j.mode),
+        raw: j,
+      };
+    },
+    async uiTap(label: string): Promise<number> {
+      let nodes: { text: string; bounds: { left: number; top: number; right: number; bottom: number } }[] = [];
+      let node: (typeof nodes)[number] | null = null;
+      let lastErr = "";
+      for (let attempt = 0; attempt < 3 && !node; attempt++) {
+        if (attempt > 0) await sleep(400);
+        const dump = await adb.uiDump();
+        if (dump.error) {
+          lastErr = "uiautomator dump 失败: " + dump.error;
+          continue;
+        }
+        nodes = dump.nodes
+          .map((n) => ({ text: n.text.trim(), bounds: n.bounds }))
+          .filter((n) => n.text.length > 0);
+        node =
+          nodes.find((n) => n.text === label) ??
+          nodes.find((n) => n.text.includes(label)) ??
+          null;
+        if (!node) lastErr = "UI 找不到「" + label + "」";
+      }
+      if (!node) {
+        throw new Error(lastErr + "; 现有文本: " + nodes.map((n) => n.text).slice(0, 24).join(" | "));
+      }
+      const x = (node.bounds.left + node.bounds.right) / 2;
+      const y = (node.bounds.top + node.bounds.bottom) / 2;
+      await adb.tap(x, y);
+      const tappedAt = Date.now();
+      evidenceHolder.ev.step("tap", { label, bounds: node.bounds, tappedAt });
+      uiCache = null;
+      await sleep(80);
+      return tappedAt;
+    },
+    uiLabels() {
+      return uiCache ? uiCache.labels : [];
+    },
+    async foregroundForeground() {
+      return adb.bringForeground(cfg.pkg);
+    },
+  };
+
+  const refreshUi = async (): Promise<string[]> => {
+    const dump = await adb.uiDump();
+    uiCache = {
+      at: Date.now(),
+      labels: dump.nodes.map((n) => n.text.trim()).filter((t) => t.length > 0),
+    };
+    return uiCache.labels;
+  };
+  (ctx as any).__refreshUi = refreshUi;
+
+  const ensureLoopPageWithUi = ctx.ensureLoopPage;
+  ctx.ensureLoopPage = async (songId: number) => {
+    await ensureLoopPageWithUi(songId);
+    try {
+      await refreshUi();
+    } catch (e: any) {
+      ctx.log("UI dump 预热失败(不影响后续 uiTap 重试): " + e.message);
+    }
+  };
+
+  // ---- 场景执行 ----
+  if (opts.exclusiveOnly && opts.nonExclusiveOnly) throw new Error("--exclusive 与 --non-exclusive 不能同时用");
+  const selected = SCENARIOS.filter(
+    (s) =>
+      (opts.only.length === 0 || opts.only.includes(s.id)) &&
+      (!opts.exclusiveOnly || s.exclusive === true) &&
+      (!opts.nonExclusiveOnly || s.exclusive !== true),
+  );
+  if (selected.length === 0) throw new Error("没有匹配的场景;--list 查看编号");
+  if (opts.exclusiveOnly) {
+    console.log("独占组: " + selected.map((s) => "#" + s.id).join(",") + " (跑之前确认设备没有其它 agent 在操作)");
+  }
+
+  interface ScenarioResult {
+    id: number;
+    key: string;
+    name: string;
+    tag: string;
+    status: "PASS" | "FAIL" | "SKIP" | "CONTAMINATED";
+    durationMs: number;
+    checks: Check[];
+    summary: string;
+    skipReason?: string;
+    pendingDecision: string[];
+    evidenceFile: string;
+    before: any;
+    after: any;
+    newInvariants: string[];
+    pidBefore: number | null;
+    pidAfter: number | null;
+    contamination: { at: string; before: string; after: string }[];
+  }
+  const results: ScenarioResult[] = [];
+
+  for (const scenario of selected) {
+    evidenceHolder.ev = new Evidence(scenario.key);
+    if (opts.skipUi && UI_SCENARIOS.has(scenario.id)) {
+      results.push({
+        id: scenario.id,
+        key: scenario.key,
+        name: scenario.name,
+        tag: scenario.tag,
+        status: "SKIP",
+        durationMs: 0,
+        checks: [],
+        summary: "",
+        skipReason: "--skip-ui",
+        pendingDecision: [],
+        evidenceFile: "",
+        before: null,
+        after: null,
+        newInvariants: [],
+        pidBefore: null,
+        pidAfter: null,
+        contamination: [],
+      });
+      console.log("#" + scenario.id + " SKIP " + scenario.name + " (--skip-ui)");
+      continue;
+    }
+
+    console.log("");
+    console.log("== #" + scenario.id + " " + scenario.name + " ==");
+    const pidBefore = await adb.pidof(cfg.pkg);
+    const beforeState = await api.state().catch(() => null);
+    const invBefore = invariantCounts(beforeState?.invariants ?? []);
+    const before = compactState(beforeState ?? initial!);
+    const t0 = Date.now();
+    let checks: Check[] = [];
+    let summary = "";
+    let pending: string[] = [];
+    let status: "PASS" | "FAIL" | "SKIP" | "CONTAMINATED" = "PASS";
+    let skipReason: string | undefined;
+    const contamination: { at: string; before: string; after: string }[] = [];
+    let lastFp = beforeState ? stateFingerprint(beforeState) : "";
+    let monitorStop = false;
+    const monitor = (async () => {
+      while (!monitorStop) {
+        await sleep(300);
+        if (monitorStop) break;
+        try {
+          const s = await api.state();
+          const fp = stateFingerprint(s);
+          if (lastFp && fp !== lastFp) {
+            if (!selfActivity.recent(3500)) {
+              contamination.push({ at: nowHHMMSS(), before: lastFp, after: fp });
+            }
+            lastFp = fp;
+          } else if (!lastFp) {
+            lastFp = fp;
+          }
+        } catch {
+          // 读不到 /state 不作为污染证据
+        }
+      }
+    })();
+
+    try {
+      const res: ScenarioRunResult = await withTimeout(scenario.run(ctx), cfg.scenarioTimeoutMs, scenario.name);
+      checks = res.checks;
+      summary = res.summary;
+      pending = res.pendingDecision ?? [];
+    } catch (e: any) {
+      if (e instanceof SkipError) {
+        status = "SKIP";
+        skipReason = e.message;
+      } else {
+        status = "FAIL";
+        checks = [check("执行异常", false, String(e?.message ?? e), e?.stack ? String(e.stack).split("\n")[1]?.trim() : undefined)];
+      }
+    } finally {
+      monitorStop = true;
+      await monitor;
+    }
+    const durationMs = Date.now() - t0;
+    const afterState = await api.state().catch(() => null);
+    const invAfter = invariantCounts(afterState?.invariants ?? []);
+    const newInv = newInvariantCodes(invBefore, invAfter);
+    const disallowed = newInv.filter((c) => !allowSet.has(c));
+    if (status !== "SKIP") {
+      checks.push(
+        check(
+          "无新增不变量 violation",
+          disallowed.length === 0,
+          disallowed.map((c) => c + "x" + invAfter.get(c)).join(", ") || "none",
+          disallowed.length > 0 ? "运行期不变量触发;证据里含 /state.invariants 与 logcat LoopInvariant" : undefined,
+        ),
+      );
+    }
+    const pidAfter = await adb.pidof(cfg.pkg);
+    if (status !== "SKIP" || pidBefore !== pidAfter) {
+      checks.push(
+        check(
+          "进程存活(未重启)",
+          pidBefore !== null && pidAfter !== null && pidBefore === pidAfter,
+          "pid " + pidBefore + " -> " + pidAfter,
+          pidBefore !== pidAfter ? "场景执行中应用进程重启(崩溃/被系统杀/被重新安装)" : undefined,
+        ),
+      );
+    }
+    const versionAfter = await adb.versionInfo(cfg.pkg).catch(() => null);
+    if (
+      versionAfter &&
+      (versionAfter.versionCode !== version.versionCode || versionAfter.lastUpdateTime !== version.lastUpdateTime)
+    ) {
+      contamination.push({
+        at: nowHHMMSS(),
+        before: "pkg " + version.versionCode + " / " + version.lastUpdateTime,
+        after: "pkg " + versionAfter.versionCode + " / " + versionAfter.lastUpdateTime,
+      });
+    }
+    if (checks.some((c) => !c.pass)) status = "FAIL";
+    if (contamination.length > 0 && status !== "SKIP") status = "CONTAMINATED";
+    if (pending.length > 0) pendingDecisions.push(...pending);
+
+    const logSlice =
+      status === "FAIL" || status === "CONTAMINATED" ? await adb.logcatSlice(nowHHMMSS(new Date(t0))) : [];
+    const evidenceFile = path.join(runDir, "evidence", String(scenario.id).padStart(2, "0") + "-" + scenario.key + ".json");
+    const evidenceJson = evidenceHolder.ev.toJSON({
+      scenarioId: scenario.id,
+      name: scenario.name,
+      status,
+      durationMs,
+      checks,
+      summary,
+      skipReason: skipReason ?? null,
+      pidBefore,
+      pidAfter,
+      before,
+      after: afterState ? compactState(afterState) : null,
+      newInvariants: newInv,
+      contamination,
+      logcat: logSlice,
+    });
+    writeJson(evidenceFile, evidenceJson);
+
+    const icon = status;
+    const failed = checks.filter((c) => !c.pass);
+    console.log("   " + icon + " " + durationMs + "ms " + (summary || skipReason || ""));
+    for (const f of failed) console.log("     x " + f.name + ": " + f.detail);
+    if (status === "CONTAMINATED") {
+      console.log("     ! 外部操作: " + contamination.slice(0, 3).map((c) => c.before + " -> " + c.after).join(" ; "));
+    }
+
+    results.push({
+      id: scenario.id,
+      key: scenario.key,
+      name: scenario.name,
+      tag: scenario.tag,
+      status,
+      durationMs,
+      checks,
+      summary,
+      skipReason,
+      pendingDecision: pending,
+      evidenceFile,
+      before,
+      after: afterState ? compactState(afterState) : null,
+      newInvariants: newInv,
+      pidBefore,
+      pidAfter,
+      contamination,
+    });
+  }
+
+  // ---- 全局崩溃检查 ----
+  const crash = await adb.crashLinesSince(runStartEpochSec, cfg.pkg);
+  const finalPid = await adb.pidof(cfg.pkg);
+  const totalMs = Date.now() - startedAt.getTime();
+
+  // ---- 收尾：尽量把设备放回普通播放状态 ----
+  try {
+    await api.post("/loop/exit");
+    if (baselineRepeat) await api.post("/player/repeat", { mode: baselineRepeat });
+    if (baselineShuffle != null) await api.post("/player/shuffle", { on: baselineShuffle });
+    await api.post("/navigate", { route: "about" });
+  } catch (e: any) {
+    console.warn("收尾失败: " + e.message);
+  }
+
+  // ---- 报告 ----
+  const failedResults = results.filter((r) => r.status === "FAIL");
+  const skipResults = results.filter((r) => r.status === "SKIP");
+  const passResults = results.filter((r) => r.status === "PASS");
+  const contaminatedResults = results.filter((r) => r.status === "CONTAMINATED");
+
+  const report = {
+    generatedAt: new Date().toISOString(),
+    device,
+    package: cfg.pkg,
+    versionCode: version.versionCode,
+    versionName: version.versionName,
+    lastUpdateTime: version.lastUpdateTime,
+    pidStart: pid0,
+    pidEnd: finalPid,
+    adbCalls: adb.calls,
+    totalMs,
+    songs,
+    baselineInvariants: Array.from(baselineInv),
+    allowInvariants: Array.from(allowSet),
+    crash,
+    pendingDecisions,
+    results: results.map((r) => ({
+      ...r,
+      failedChecks: r.checks.filter((c) => !c.pass),
+    })),
+  };
+  writeJson(path.join(runDir, "report.json"), report);
+
+  const md = buildMarkdown(report, results, runDir);
+  fs.writeFileSync(path.join(runDir, "report.md"), md, "utf8");
+
+  printTable(results, totalMs);
+  console.log("");
+  console.log(
+    "结果: PASS " + passResults.length + " / FAIL " + failedResults.length + " / SKIP " + skipResults.length +
+      " / CONTAMINATED " + contaminatedResults.length +
+      "  (总耗时 " + Math.round(totalMs / 1000) + "s, adb 调用 " + adb.calls + " 次)",
+  );
+  if (contaminatedResults.length > 0) {
+    console.log("注意: CONTAMINATED = 场景执行期间检测到外部改动(另一个 agent/重装),结果不可信;独占窗口重跑。");
+  }
+  if (crash.length > 0) {
+    console.log("!! 崩溃/ANR 证据(" + crash.length + " 条):");
+    for (const line of crash.slice(-6)) console.log("   " + line.slice(0, 220));
+  }
+  if (contaminatedResults.length > 0) {
+    console.log("");
+    console.log("污染清单:");
+    for (const r of contaminatedResults) {
+      console.log("  #" + r.id + " " + r.name + " -> " + r.contamination.slice(0, 2).map((c: any) => c.before + " => " + c.after).join(" ; "));
+    }
+  }
+  if (failedResults.length > 0) {
+    console.log("");
+    console.log("失败清单:");
+    for (const r of failedResults) {
+      const first = r.checks.find((c) => !c.pass);
+      console.log("  #" + r.id + " " + r.name + " -> " + (first ? first.name + ": " + first.detail : "unknown"));
+      if (first?.hint) console.log("      归因线索: " + first.hint);
+    }
+  }
+  console.log("");
+  console.log("报告: " + path.join(runDir, "report.md"));
+  console.log("数据: " + path.join(runDir, "report.json"));
+  console.log("证据: " + path.join(runDir, "evidence"));
+
+  const bad = failedResults.length > 0 || crash.length > 0 || finalPid === null;
+  return bad ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
+// 输出
+// ---------------------------------------------------------------------------
+
+function truncateWidth(text: string, width: number): string {
+  if (displayWidth(text) <= width) return text;
+  let out = "";
+  for (const ch of text) {
+    if (displayWidth(out + ch) > width - 1) break;
+    out += ch;
+  }
+  return out + "…";
+}
+
+function firstFailure(result: any): Check | null {
+  return (result.checks as Check[]).find((c) => !c.pass) ?? null;
+}
+
+function printTable(results: any[], totalMs: number): void {
+  console.log("");
+  console.log("== 场景矩阵执行结果 ==");
+  const header = ["#", "结果", "场景", "用时", "关键证据 / 失败判据"];
+  const rows: string[][] = [];
+  for (const r of results) {
+    const first = firstFailure(r);
+    const detail =
+      r.status === "FAIL"
+        ? (first ? first.name + ": " + first.detail : "unknown")
+        : r.status === "SKIP"
+          ? (r.skipReason ?? "skip")
+          : r.status === "CONTAMINATED"
+            ? "外部改动: " + (r.contamination?.[0] ? r.contamination[0].before + " => " + r.contamination[0].after : "detected")
+            : (r.summary || (r.checks as Check[]).length + " 项判据通过");
+    rows.push([
+      String(r.id),
+      r.status,
+      r.name,
+      (r.durationMs / 1000).toFixed(1) + "s",
+      detail,
+    ]);
+  }
+  const widths = header.map((h) => displayWidth(h));
+  for (const row of rows) {
+    for (let i = 0; i < row.length; i++) widths[i] = Math.max(widths[i], displayWidth(row[i]));
+  }
+  const maxDetail = Math.max(40, 118 - (widths[0] + widths[1] + widths[2] + widths[3] + 12));
+  widths[4] = Math.min(widths[4], maxDetail);
+  const line = (cells: string[]) =>
+    cells.map((c, i) => padEndWidth(truncateWidth(c, widths[i]), widths[i])).join("  ");
+  console.log(line(header));
+  console.log(widths.map((w) => "-".repeat(w)).join("  "));
+  for (const row of rows) console.log(line(row));
+  console.log("(总耗时 " + Math.round(totalMs / 1000) + "s)");
+}
+
+function buildMarkdown(report: any, results: any[], runDir: string): string {
+  const L: string[] = [];
+  L.push("# 场景矩阵执行报告");
+  L.push("");
+  L.push("- 生成时间: " + report.generatedAt);
+  L.push("- 设备: " + report.device + "  包: " + report.package + "  versionCode: " + report.versionCode + " (" + report.versionName + ")");
+  L.push("- 包更新时间: " + report.lastUpdateTime);
+  L.push("- pid: " + report.pidStart + " -> " + report.pidEnd + "  adb 调用: " + report.adbCalls);
+  L.push("- 总耗时: " + Math.round(report.totalMs / 1000) + "s");
+  L.push("- 选歌: primary " + songLine(report.songs.primary) + "; short " + songLine(report.songs.short) + "; unconfirmed " + songLine(report.songs.unconfirmed));
+  L.push("");
+  L.push("## 结果总览");
+  L.push("");
+  L.push("| # | 结果 | 场景 | 用时 | 关键证据 / 失败判据 |");
+  L.push("|---|---|---|---|---|");
+  for (const r of results) {
+    const first = firstFailure(r);
+    const detail =
+      r.status === "FAIL"
+        ? (first ? "**" + first.name + "**: " + first.detail : "unknown")
+        : r.status === "SKIP"
+          ? (r.skipReason ?? "skip")
+          : r.status === "CONTAMINATED"
+            ? "外部改动(结果不可信): " + (r.contamination?.[0] ? r.contamination[0].before + " => " + r.contamination[0].after : "detected")
+            : r.summary;
+    L.push("| " + r.id + " | " + r.status + " | " + r.name + " | " + (r.durationMs / 1000).toFixed(1) + "s | " + String(detail).replace(/\|/g, "\\|") + " |");
+  }
+  L.push("");
+  L.push("## 判据明细");
+  L.push("");
+  for (const r of results) {
+    const ev = r.evidenceFile ? "evidence/" + path.basename(r.evidenceFile) : "-";
+    L.push("### #" + r.id + " " + r.name + " — " + r.status + " (" + (r.durationMs / 1000).toFixed(1) + "s)");
+    L.push("");
+    if (!r.checks || r.checks.length === 0) {
+      L.push(r.skipReason ? "跳过: " + r.skipReason : "无判据。");
+      L.push("");
+      continue;
+    }
+    L.push("| 判据 | 实测 | 结论 | 证据路径 |");
+    L.push("|---|---|---|---|");
+    for (const c of r.checks as Check[]) {
+      L.push(
+        "| " + c.name + " | " + String(c.detail).replace(/\|/g, "\\|") + " | " + (c.pass ? "通过" : "失败") + " | " + ev + " |",
+      );
+    }
+    if (r.status === "CONTAMINATED" && r.contamination.length > 0) {
+      L.push("");
+      L.push("污染事件:");
+      for (const e of r.contamination) L.push("- " + e.at + "  " + e.before + "  =>  " + e.after);
+    }
+    if (r.newInvariants.length > 0) {
+      L.push("");
+      L.push("新增不变量: " + r.newInvariants.join(", "));
+    }
+    L.push("");
+  }
+  const failed = results.filter((r) => r.status === "FAIL");
+  const skipped = results.filter((r) => r.status === "SKIP");
+  const contaminated = results.filter((r) => r.status === "CONTAMINATED");
+  L.push("## 失败清单");
+  L.push("");
+  if (failed.length === 0) {
+    L.push("无。");
+  } else {
+    for (const r of failed) {
+      L.push("### #" + r.id + " " + r.name + " — FAIL");
+      L.push("");
+      for (const c of (r.checks as Check[]).filter((x) => !x.pass)) {
+        L.push("- 判据失败: **" + c.name + "** — " + c.detail);
+        if (c.hint) L.push("  - 归因线索: " + c.hint);
+      }
+      L.push("- 场景摘要: " + (r.summary || "(无)"));
+      L.push("- 证据: evidence/" + path.basename(r.evidenceFile));
+      if (r.newInvariants.length > 0) L.push("- 新增不变量: " + r.newInvariants.join(", "));
+      L.push("");
+    }
+  }
+  L.push("## 污染清单（CONTAMINATED）");
+  L.push("");
+  if (contaminated.length === 0) {
+    L.push("无。");
+  } else {
+    for (const r of contaminated) {
+      L.push("### #" + r.id + " " + r.name);
+      L.push("");
+      L.push("- 场景期间的判据结果不可信（设备被外部操作/重装）；请在独占窗口重跑。");
+      for (const e of r.contamination) L.push("- " + e.at + "  " + e.before + "  =>  " + e.after);
+      L.push("- 证据: evidence/" + path.basename(r.evidenceFile));
+      L.push("");
+    }
+  }
+  L.push("## 跳过");
+  L.push("");
+  if (skipped.length === 0) L.push("无。");
+  else for (const r of skipped) L.push("- #" + r.id + " " + r.name + ": " + (r.skipReason ?? "skip"));
+  L.push("");
+  L.push("## 待裁决（产品行为）");
+  L.push("");
+  const decisions: string[] = Array.from(new Set(report.pendingDecisions ?? []));
+  if (decisions.length === 0) L.push("无。");
+  else for (const d of decisions) L.push("- " + d);
+  L.push("");
+  L.push("## 环境事实");
+  L.push("");
+  L.push("- 起始不变量: " + (report.baselineInvariants.length ? report.baselineInvariants.map((x: any) => x[0] + "x" + x[1]).join(", ") : "none"));
+  L.push("- 允许的不变量: " + (report.allowInvariants.length ? report.allowInvariants.join(", ") : "none"));
+  L.push("- 崩溃/ANR(运行期): " + (report.crash.length ? report.crash.length + " 条(见 report.json)" : "无"));
+  L.push("- 产物目录: " + runDir);
+  L.push("");
+  L.push("## 判据说明");
+  L.push("");
+  L.push("- 出声 = 主播放器 invariantProbe.writtenFrames / 预览页 outputFrames 在窗口内 >= 0.85~0.9 × 采样率 × 秒数；暂停静音要求 Δ=0（先等尾帧落定：连续两次 500ms 采样帧数不变）。");
+  L.push("- 位置 = /state.playback.positionMs（已按窗口折返）或 /debug/preview.snapshot.displayMs。");
+  L.push("- 不变量 = 每条场景前后对比 /state.invariants 的 code×count，出现新增即失败（allowlist 见 tools/scenarios/allow-invariants.json）。");
+  L.push("- 不崩 = 进程 pid 不变 + crash buffer/main logcat 无本包 FATAL/ANR。");
+  L.push("");
+  return L.join("\n");
+}
+
+main()
+  .then((code) => process.exit(code))
+  .catch((e) => {
+    console.error("");
+    console.error("执行器失败: " + (e?.message ?? e));
+    if (e?.stack) console.error(String(e.stack).split("\n").slice(0, 6).join("\n"));
+    process.exit(2);
+  });

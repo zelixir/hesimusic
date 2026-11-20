@@ -3,6 +3,7 @@ package com.zjr.hesimusic.ui.loop
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -17,6 +18,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime
+import com.zjr.hesimusic.core.invariants.AudioOutputFrames
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.loop.LoopPosition
@@ -43,6 +45,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 
 /** 分析/预览页的四种试听模式(契约 §2.3 / v2 §0)。 */
@@ -107,6 +111,8 @@ class PreviewPlayer @Inject constructor(
         // 打开结果页时读取真机调试开关（默认 M3′）。
         LoopSourceMode.refreshFromSettings(context)
         LoopSourcePipeline.refreshFromSettings(context)
+        // 量测探针：debug 端点读当前页面这一份预览播放器（release 不编译 debug 端点，这里只是挂引用）。
+        PreviewProbe.attach(this)
     }
 
     /** 独立音频控制器:窗口/ring/位置都只属于预览,不污染主播放。 */
@@ -130,6 +136,29 @@ class PreviewPlayer @Inject constructor(
     /** SOURCE 播放器是否正在运行（位置口径/UI 状态用）。 */
     @Volatile
     private var sourceActive: Boolean = false
+
+    // ---- 量测（issue 00023）：seek 请求/应用时刻与只读快照 ------------------
+    // 只累加计数与时间戳，不改变任何播放行为；debug 源集的 /debug/preview[-seek] 读它。
+
+    /** 收到多少次展示口径 seek（含 seekToDisplayMs 的 pending 分支）。 */
+    @Volatile
+    private var seekRequests: Long = 0L
+
+    /** 最近一次 seek 请求时刻（elapsedRealtime）与目标（展示口径）。 */
+    @Volatile
+    private var lastSeekRequestAtMs: Long = 0L
+    @Volatile
+    private var lastSeekRequestedMs: Long = 0L
+
+    /** 最近一次真正落到播放器的 seek：时刻与播放器时间轴目标（T/raw ms）。 */
+    @Volatile
+    private var lastSeekAppliedAtMs: Long = 0L
+    @Volatile
+    private var lastSeekPlayerTargetMs: Long = 0L
+
+    /** 主线程繁忙时给 debug 线程回退用的上一份快照。 */
+    @Volatile
+    private var lastProbeSnapshot: Map<String, Any?>? = null
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -174,6 +203,16 @@ class PreviewPlayer @Inject constructor(
 
     /** 环缓冲区是否已完整覆盖 [A,B)(false 时接缝检查会退化为普通播放)。 */
     val ringReady: StateFlow<Boolean> = _ringReady.asStateFlow()
+
+    private val _outsideLoop = MutableStateFlow(false)
+
+    /**
+     * 是否处于"循环区外自由试听"(issue 00023)。
+     *
+     * true = 用户把播放头拖到了 [A,B) 之外:循环窗口**不生效**,按文件时间播放,
+     * 位置/进度条都是真实媒体时间(不折返)。拖回 [A,B) 内或显式选模式/选候选时恢复循环。
+     */
+    val outsideLoop: StateFlow<Boolean> = _outsideLoop.asStateFlow()
 
     private val _sourceFirstBlockReady = MutableStateFlow(false)
     private val _sourceFirstBlockEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
@@ -230,17 +269,26 @@ class PreviewPlayer @Inject constructor(
         controller.tapWindow = newWindow
         prepared = true
         pendingSeekMs = null
+        // 新页面/新歌一律从循环试听开始;自由试听只在本次页面内由区外 seek 触发。
+        _outsideLoop.value = false
         _positionMs.value = aa
         updatePositionOnce()
     }
 
-    /** 按模式起播。已 prepare 时只做窗口切换 + seek + play(MediaItem 不裁剪、不重建)。 */
-    fun play(mode: PreviewMode, startMs: Long) {
+    /**
+     * 按模式起播。已 prepare 时只做窗口切换 + seek + play(MediaItem 不裁剪、不重建)。
+     *
+     * @param freeAudition true = 循环区外自由试听(issue 00023):循环窗口不生效,按**文件时间**
+     *   从 [startMs] 播放。由页面状态 [com.zjr.hesimusic.ui.loop.state.LoopPageState.Ready]
+     *   的 `auditionOutside` 传入;显式点模式/选候选恒为 false(每次都是明确的循环试听意图)。
+     */
+    fun play(mode: PreviewMode, startMs: Long, freeAudition: Boolean = false) {
         LoopSourcePauseGate.resume()
         val song = this.song ?: return
         Log.d(
             TAG,
-            "play mode=" + mode + " startMs=" + startMs + " path=" + song.filePath +
+            "play mode=" + mode + " startMs=" + startMs + " freeAudition=" + freeAudition +
+                " path=" + song.filePath +
                 " state=" + (player?.playbackState ?: -1) +
                 " durationMs=" + _durationMs.value +
                 " mediaItem=" + (player?.currentMediaItem?.mediaId),
@@ -250,6 +298,18 @@ class PreviewPlayer @Inject constructor(
         }
         pendingSeekMs = null
         this.mode = mode
+        if (freeAudition) {
+            // 区外自由试听:循环窗口不生效,按文件时间播放。
+            _outsideLoop.value = true
+            playFreeAudition(song, startMs, play = true)
+            return
+        }
+        if (_outsideLoop.value) {
+            // 从自由试听回到循环(显式点模式/候选/播放键):先装回循环窗口,再从 startMs 起播。
+            _outsideLoop.value = false
+            armLoopAt(song, startMs, play = true)
+            return
+        }
         val useSource = shouldUseSource(mode)
         val p = ensurePlayer(if (useSource) EngineKind.SOURCE else EngineKind.M3)
 
@@ -294,6 +354,130 @@ class PreviewPlayer @Inject constructor(
         }
 
         playM3(song, mode, startMs)
+    }
+
+    // ------------------------------------------------------------ 循环区外自由试听(issue 00023)
+
+    /**
+     * 整曲"伪窗口"(0 → 时长):给 SOURCE 数据源当自由试听的源。
+     *
+     * 为什么不能只把 window 置空:SOURCE 播放器的数据源是按窗口构建的(T=0 对应 A,
+     * 媒体位置按 [A,B) 取模),**不存在窗口外的位置**;要按文件时间播放就必须换一个覆盖整曲的
+     * 时间轴(T = 媒体时间,环回点落到文件末尾)。这里只换 MediaSource,不重建 ExoPlayer,
+     * 所以自由试听与循环试听共用同一个播放器/音频管线。
+     */
+    private fun freeAuditionWindow(song: Song): LoopWindow? {
+        if (!LoopSourceMode.isSource()) return null
+        val duration = _durationMs.value.coerceAtLeast(0L)
+        if (duration < MIN_LOOP_LENGTH_MS) return null
+        return LoopWindow(song.id, 0L, duration * 1000L)
+    }
+
+    /**
+     * 区外自由试听:按文件时间从 [startMs] 起播(循环窗口不生效)。
+     *
+     * 优先保 SOURCE 数据源(整曲窗口),失败回退 M3′ 直通;两条路都不做"把目标折回 [A,B)"的投影,
+     * 这是 issue 00023 的核心:原生 ExoPlayer 的 seek 目标是必须被尊重的。
+     */
+    private fun playFreeAudition(song: Song, startMs: Long, play: Boolean) {
+        val duration = _durationMs.value.coerceAtLeast(0L)
+        val target = if (duration > 0L) startMs.coerceIn(0L, duration) else startMs.coerceAtLeast(0L)
+        val current = player
+        val freeWindow = freeAuditionWindow(song)
+        Log.i(
+            TAG,
+            "free audition enter song=" + song.id + " target=" + target + " play=" + play +
+                " engine=" + engineKind + " freeWindow=" + freeWindow,
+        )
+        if (freeWindow != null &&
+            (current == null || engineKind == EngineKind.SOURCE) &&
+            prepareSource(song, freeWindow)
+        ) {
+            val p = player ?: return
+            // 整曲窗口的 T 与媒体时间一一对应;mute M3′ 的窗口字段,避免两条通路对同一字段的理解冲突。
+            controller.window = null
+            controller.tapWindow = null
+            p.seekTo(target)
+            recordAppliedSeek(target)
+            _sourceFirstBlockReady.value = false
+            sourceActive = true
+            if (p.playbackState == Player.STATE_IDLE || p.playbackState == Player.STATE_ENDED) {
+                p.prepare()
+            }
+            if (play) p.play() else p.pause()
+            markSourceReadyFromState(p)
+            updatePositionOnce()
+            Log.i(TAG, "free audition source ready target=" + target + " window=" + freeWindow)
+            return
+        }
+        // 回退:M3′ 直通(窗口置空),原生按文件时间播放。
+        val p = ensurePlayer(EngineKind.M3)
+        ensureM3MediaItem(p, song)
+        applyFreeShape()
+        val wasEnded = p.playbackState == Player.STATE_ENDED
+        p.seekTo(target)
+        recordAppliedSeek(target)
+        if (wasEnded) {
+            p.prepare()
+        } else if (p.playbackState == Player.STATE_IDLE) {
+            p.prepare()
+        }
+        if (play) p.play() else p.pause()
+        sourceActive = false
+        updatePositionOnce()
+        Log.i(TAG, "free audition passthrough(m3) target=" + target)
+    }
+
+    /**
+     * 装回循环窗口并从 [targetMs](展示口径)起播;用于"自由试听 → 拖回 [A,B)"与
+     * "自由试听中点模式/选候选"。
+     *
+     * 落点口径:新装的 SOURCE 数据源 T=0 恒对应 A(entryOffset=0),所以落点 T = target − A,
+     * **不能**再走 [LoopSourceProjection.timelineUsForDisplay] 的"当前轮次"映射 —— 那个函数
+     * 会把窗口外的目标折回 [A,B),正是本次要修掉的行为。
+     */
+    private fun armLoopAt(song: Song, targetMs: Long, play: Boolean) {
+        val w = window
+        val current = player
+        val target = targetMs.coerceAtLeast(0L)
+        Log.i(TAG, "arm loop target=" + target + " play=" + play + " window=" + w + " engine=" + engineKind)
+        if (w != null && shouldUseSource(mode) &&
+            (current == null || engineKind == EngineKind.SOURCE) &&
+            prepareSource(song, w)
+        ) {
+            val p = player ?: return
+            controller.window = w
+            controller.tapWindow = w
+            _sourceFirstBlockReady.value = false
+            val targetT = (target * 1000L - w.loopStartUs)
+                .coerceIn(0L, (w.lengthUs - 1L).coerceAtLeast(0L)) / 1000L
+            p.seekTo(targetT)
+            recordAppliedSeek(targetT)
+            sourceActive = true
+            if (p.playbackState == Player.STATE_IDLE || p.playbackState == Player.STATE_ENDED) {
+                p.prepare()
+            }
+            if (play) p.play() else p.pause()
+            markSourceReadyFromState(p)
+            updatePositionOnce()
+            Log.i(TAG, "arm loop source ready targetT=" + targetT + " window=" + w)
+            return
+        }
+        // M3′:窗口装回 + 展示口径 seek(第 0 轮)。自由模式没有循环窗口,不能装回窗口。
+        val p = ensurePlayer(EngineKind.M3)
+        ensureM3MediaItem(p, song)
+        if (mode == PreviewMode.FREE) applyFreeShape() else applyLoopShape(song)
+        val wasEnded = p.playbackState == Player.STATE_ENDED
+        seekRaw(target)
+        if (wasEnded) {
+            p.prepare()
+        } else if (p.playbackState == Player.STATE_IDLE) {
+            p.prepare()
+        }
+        if (play) p.play() else p.pause()
+        sourceActive = false
+        updatePositionOnce()
+        Log.i(TAG, "arm loop m3 target=" + target + " window=" + window)
     }
 
     private fun playM3(song: Song, mode: PreviewMode, startMs: Long) {
@@ -344,23 +528,38 @@ class PreviewPlayer @Inject constructor(
      * 响应 prepare），必须**先** seek 回模式起点触发 ENDED→BUFFERING，再 prepare/play；
      * 否则会停在 ENDED、位置冻结（真机复现）。
      */
-    fun playFromCurrent(mode: PreviewMode) {
+    fun playFromCurrent(mode: PreviewMode, freeAudition: Boolean = false) {
         LoopSourcePauseGate.resume()
         val song = this.song ?: return
+        if (freeAudition != _outsideLoop.value) {
+            // 自由试听 ↔ 循环 的切换必须走完整路径(装/拆整曲源),不能"从当前位置续播"。
+            val start = pendingSeekMs ?: _positionMs.value
+            pendingSeekMs = null
+            play(mode, start, freeAudition)
+            return
+        }
         val p = player
         if (!prepared || p == null) {
             // 尚未真正创建播放器：退回普通 play，并使用播放器就绪前的 pending seek。
             val start = pendingSeekMs
                 ?: if (shouldUseSource(mode)) sourceStartMs(mode) else modeStartMs()
             pendingSeekMs = null
-            play(mode, start)
+            play(mode, start, freeAudition)
             return
         }
         Log.d(
             TAG,
             "playFromCurrent enter mode=" + mode + " state=" + p.playbackState +
-                " prepared=" + prepared,
+                " prepared=" + prepared + " freeAudition=" + freeAudition,
         )
+        if (freeAudition) {
+            // 自由试听里继续播放:整曲源/直通已经在位,只 play。
+            this.mode = mode
+            if (p.playbackState == Player.STATE_IDLE) p.prepare()
+            p.play()
+            updatePositionOnce()
+            return
+        }
         if (sourceActive && shouldUseSource(mode)) {
             this.mode = mode
             val wasEnded = p.playbackState == Player.STATE_ENDED
@@ -479,30 +678,77 @@ class PreviewPlayer @Inject constructor(
         _isPlaying.value = false
     }
 
-    /** 按展示口径 seek。SOURCE 走数据源时间轴 T，M3′ 走 LoopPosition.rawSeekUs。 */
+    /**
+     * 按展示口径 seek。SOURCE 走数据源时间轴 T，M3′ 走 LoopPosition.rawSeekUs。
+     *
+     * 循环区外 seek(issue 00023):
+     * - **允许**,并且落点必须是真实媒体时间:退出循环播放,转"按文件时间"自由试听
+     *   (SOURCE 换整曲源 / M3′ 清窗口),进度条与播放头按真实媒体时间走,不再折返;
+     * - 回到 [A,B) 内再 seek → 自动恢复循环(同一 A/B/模式),从落点继续;
+     * - 自由试听里的普通 seek 走原生 seek(整曲源/直通),不重复换源。
+     *
+     * 循环区内 seek:保持原来的"快速 seek"路径(只 seekTo,不 prepare/不换源/不重建 player)。
+     */
     fun seekToDisplayMs(ms: Long) {
         if (!prepared) return
+        // 量测：先记请求（elapsedRealtime），真正 seekTo 后再记应用时刻（00023）。
+        seekRequests += 1L
+        lastSeekRequestAtMs = SystemClock.elapsedRealtime()
+        lastSeekRequestedMs = ms.coerceAtLeast(0L)
         val w = window
         val p = player
         if (p == null) {
             pendingSeekMs = ms.coerceAtLeast(0L)
             return
         }
+        val target = ms.coerceAtLeast(0L)
+        val loopArmed = w != null && mode != PreviewMode.FREE
+        val inside = if (w == null) {
+            false
+        } else {
+            target >= w.loopStartUs / 1000L && target < w.loopEndUs / 1000L
+        }
+        if (loopArmed && !inside && !_outsideLoop.value) {
+            // 区外 seek:离开循环播放,按文件时间试听(不再把目标折回 [A,B))。
+            _outsideLoop.value = true
+            Log.i(TAG, "seek outside loop -> free audition target=" + target + " window=" + w)
+            val song = this.song ?: return
+            playFreeAudition(song, target, play = p.isPlaying)
+            return
+        }
+        if (_outsideLoop.value) {
+            val song = this.song ?: return
+            if (loopArmed && inside) {
+                // 回到区间:恢复循环(同一 A/B/模式),从落点继续。
+                val wasPlaying = p.isPlaying
+                _outsideLoop.value = false
+                Log.i(TAG, "seek back inside loop -> restore loop target=" + target)
+                armLoopAt(song, target, play = wasPlaying)
+                return
+            }
+            // 自由试听中的普通 seek:整曲源/直通,原生 seek。
+            p.seekTo(target)
+            recordAppliedSeek(target)
+            updatePositionOnce()
+            Log.d(TAG, "free audition seek target=" + target)
+            return
+        }
         if (sourceActive && w != null && engineKind == EngineKind.SOURCE) {
             _sourceFirstBlockReady.value = false
             val currentT = p.currentPosition.coerceAtLeast(0L) * 1000L
             val targetT = LoopSourceProjection.timelineUsForDisplay(
-                displayUs = ms.coerceAtLeast(0L) * 1000L,
+                displayUs = target * 1000L,
                 currentTimelineUs = currentT,
                 window = w,
             )
             p.seekTo(targetT / 1000L)
+            recordAppliedSeek(targetT / 1000L)
             markSourceReadyFromState(p)
             updatePositionOnce()
-            Log.d(TAG, "source seek display=" + ms + "ms targetT=" + (targetT / 1000L) + "ms")
+            Log.d(TAG, "source seek display=" + target + "ms targetT=" + (targetT / 1000L) + "ms")
             return
         }
-        seekRaw(ms.coerceAtLeast(0L))
+        seekRaw(target)
         updatePositionOnce()
     }
 
@@ -524,6 +770,13 @@ class PreviewPlayer @Inject constructor(
 
         val newWindow = buildWindow(song.id, aa, bb, allowLong = LoopSourceMode.isSource())
         window = newWindow
+        if (_outsideLoop.value) {
+            // 自由试听中改 A/B:只记录新窗口,不打断"按文件时间"的试听;拖回区间内会用新窗口恢复循环。
+            // (若此时重建 SOURCE 源,播放头会被拽回 A,等于把用户刚拖到的区外位置又夹掉了。)
+            Log.d(TAG, "updateWindow while free audition -> defer window=" + newWindow)
+            updatePositionOnce()
+            return
+        }
         controller.window = newWindow
         controller.tapWindow = newWindow
 
@@ -571,6 +824,7 @@ class PreviewPlayer @Inject constructor(
 
     /** 释放预览播放器与音频控制器(退出页面/确认保存时调用,幂等)。 */
     fun release() {
+        PreviewProbe.detach(this)
         releasePlayerOnly()
         handler.removeCallbacks(ticker)
         controller.window = null
@@ -758,6 +1012,7 @@ class PreviewPlayer @Inject constructor(
         _isReplaying.value = false
         _ringReady.value = false
         _sourceFirstBlockReady.value = false
+        _outsideLoop.value = false
     }
 
     /** 当前模式是否走循环数据源：SOURCE + 非 FREE + 有有效窗口。 */
@@ -949,6 +1204,7 @@ class PreviewPlayer @Inject constructor(
         val w = window
         if (w == null) {
             p.seekTo(displayMs)
+            recordAppliedSeek(displayMs)
             return
         }
         val rawUs = LoopPosition.rawSeekUs(
@@ -958,6 +1214,93 @@ class PreviewPlayer @Inject constructor(
         val targetMs = (rawUs / 1000L).coerceAtLeast(0L)
         Log.d(TAG, "seekRaw target=" + targetMs + "Ms window=" + w)
         p.seekTo(targetMs)
+        recordAppliedSeek(targetMs)
+    }
+
+    private fun recordAppliedSeek(playerTargetMs: Long) {
+        lastSeekAppliedAtMs = SystemClock.elapsedRealtime()
+        lastSeekPlayerTargetMs = playerTargetMs
+    }
+
+    /**
+     * 只读快照（**必须在主线程调用**：ExoPlayer 的位置只能在创建它的线程读）。
+     *
+     * 字段口径与 /debug/preview 一致；outputFrames 是 TapAudioSink 真正写出的帧数
+     * （按 controller 分桶，预览与主播放互不污染），作为"出声"代理：
+     * 它增长 = PCM 已交给 AudioTrack。
+     */
+    fun debugSnapshot(): Map<String, Any?> {
+        val p = player
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val out = linkedMapOf<String, Any?>(
+            "atMs" to nowElapsed,
+            "prepared" to prepared,
+            "songId" to song?.id,
+            "durationMs" to _durationMs.value,
+            "mode" to mode.name,
+            "aMs" to aMs,
+            "bMs" to bMs,
+            "engine" to engineKind.name,
+            "sourceActive" to sourceActive,
+            "hasPlayer" to (p != null),
+            "hasMediaItem" to (p?.currentMediaItem != null),
+            "playbackState" to p?.playbackState,
+            "playbackStateName" to playbackStateName(p?.playbackState),
+            "isPlaying" to (p?.isPlaying == true),
+            "playWhenReady" to (p?.playWhenReady == true),
+            "buffering" to _buffering.value,
+            "playerPositionMs" to (p?.currentPosition ?: -1L),
+            "displayMs" to _positionMs.value,
+            // 循环窗口(用于恢复循环);自由试听期间不生效,但保留着等"拖回区间"恢复。
+            "windowA_ms" to (window?.loopStartUs?.div(1000L) ?: null),
+            "windowB_ms" to (window?.loopEndUs?.div(1000L) ?: null),
+            // 当前真正装进 SOURCE 数据源的窗口(自由试听 = 0..duration 的整曲窗口)。
+            "sourceWindowA_ms" to (sourceWindow?.loopStartUs?.div(1000L) ?: null),
+            "sourceWindowB_ms" to (sourceWindow?.loopEndUs?.div(1000L) ?: null),
+            // true = 当前处于循环区外自由试听(循环窗口不生效,位置=文件时间)。
+            "outsideLoop" to _outsideLoop.value,
+            "outputFrames" to AudioOutputFrames.totalFrames(controller),
+            "sourceFirstBlockReady" to _sourceFirstBlockReady.value,
+            "seekRequests" to seekRequests,
+            "lastSeekRequestedMs" to lastSeekRequestedMs,
+            "lastSeekRequestAtMs" to lastSeekRequestAtMs,
+            "lastSeekAppliedAtMs" to lastSeekAppliedAtMs,
+            "lastSeekPlayerTargetMs" to lastSeekPlayerTargetMs,
+            "lastSeekApplyLatencyMs" to if (lastSeekAppliedAtMs > 0L) {
+                (lastSeekAppliedAtMs - lastSeekRequestAtMs).coerceAtLeast(0L)
+            } else {
+                null
+            },
+            "error" to _error.value,
+        )
+        lastProbeSnapshot = out
+        return out
+    }
+
+    /** 非主线程读快照：post 到主线程并等回填；超时退回上一份（可能 stale，看 atMs）。 */
+    fun debugSnapshotOnMain(timeoutMs: Long): Map<String, Any?>? {
+        val latch = CountDownLatch(1)
+        var result: Map<String, Any?>? = null
+        val posted = handler.post {
+            result = runCatching { debugSnapshot() }.getOrNull()
+            latch.countDown()
+        }
+        if (!posted) return lastProbeSnapshot
+        try {
+            latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        return result ?: lastProbeSnapshot
+    }
+
+    private fun playbackStateName(state: Int?): String? = when (state) {
+        null -> null
+        Player.STATE_IDLE -> "IDLE"
+        Player.STATE_BUFFERING -> "BUFFERING"
+        Player.STATE_READY -> "READY"
+        Player.STATE_ENDED -> "ENDED"
+        else -> "STATE_$state"
     }
 
     private fun rawNowUs(): Long {
@@ -979,6 +1322,17 @@ class PreviewPlayer @Inject constructor(
     private fun updatePositionOnce() {
         val p = player ?: return
         val w = window
+        if (_outsideLoop.value) {
+            // 自由试听:位置 = 真实媒体时间(整曲源的 T 与媒体时间一一对应;M3′ 直通同理),
+            // 不折返、不读 sink 重放位置 —— 进度条/播放头必须如实反映用户拖到的位置。
+            val raw = p.currentPosition.coerceAtLeast(0L)
+            val duration = _durationMs.value
+            _positionMs.value = if (duration > 0L) raw.coerceAtMost(duration) else raw
+            _isPlaying.value = p.isPlaying
+            _isReplaying.value = false
+            _ringReady.value = false
+            return
+        }
         if (sourceActive && engineKind == EngineKind.SOURCE && w != null) {
             val timelineUs = p.currentPosition.coerceAtLeast(0L) * 1000L
             val displayUs = LoopSourceProjection.displayUs(timelineUs, w)

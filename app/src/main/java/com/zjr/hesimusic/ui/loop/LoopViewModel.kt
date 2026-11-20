@@ -247,8 +247,12 @@ class LoopViewModel @Inject constructor(
             seekAppliedForNextPlay = null
             try {
                 val previewMode = mode.toPreviewMode()
+                // 00023:区外自由试听状态由页面状态机唯一持有,播放层只照做
+                // (true = 按文件时间播放;false = 正常循环试听)。
+                val freeAudition = (_pageState.value as? LoopPageState.Ready)?.auditionOutside == true
                 val usePlayFromCurrent = !(
-                    seek || appliedSeek != startMs || !previewPlayer.isPrepared
+                    seek || appliedSeek != startMs || !previewPlayer.isPrepared ||
+                        freeAudition != (previewPlayer.outsideLoop.value)
                 )
                 // 模式 chip/播放入口最终走哪条路径,一条日志即可对账(00008/ENDED 回归排查)。
                 Log.d(
@@ -256,12 +260,13 @@ class LoopViewModel @Inject constructor(
                     "effect play mode=" + previewMode + " startMs=" + startMs +
                         " seek=" + seek + " appliedSeek=" + appliedSeek +
                         " prepared=" + previewPlayer.isPrepared +
+                        " freeAudition=" + freeAudition +
                         " path=" + (if (usePlayFromCurrent) "playFromCurrent" else "play"),
                 )
                 if (usePlayFromCurrent) {
-                    previewPlayer.playFromCurrent(previewMode)
+                    previewPlayer.playFromCurrent(previewMode, freeAudition)
                 } else {
-                    previewPlayer.play(previewMode, startMs)
+                    previewPlayer.play(previewMode, startMs, freeAudition)
                 }
                 anchorMs = startMs
                 anchorElapsedRealtime = SystemClock.elapsedRealtime()
@@ -306,8 +311,9 @@ class LoopViewModel @Inject constructor(
         }
 
         override fun applyWindow(window: LoopWindow) {
-            val ready = _pageState.value as? LoopPageState.Ready
-            if (ready?.sourceMode != true) return
+            val ready = _pageState.value as? LoopPageState.Ready ?: return
+            // SOURCE 正常路径:换数据源窗口(新 cache key);
+            // 自由试听(00023):只同步窗口记录,PreviewPlayer.updateWindow 内部 defer,不换源、不 seek。
             previewPlayer.updateWindow(
                 aMs = window.loopStartUs / 1000L,
                 bMs = window.loopEndUs / 1000L,
@@ -935,25 +941,20 @@ class LoopViewModel @Inject constructor(
         dispatch(LoopPageEvent.ManualReanalyze)
     }
 
-    /** 60fps 播放头插值:锚点 + 时间外推,按当前窗口折返;positionMs 仅作校正。 */
+    /**
+     * 60fps 播放头插值:锚点 + 时间外推,按当前窗口折返;positionMs 仅作校正。
+     *
+     * 区外自由试听/自由模式**不折返**(issue 00023):播放头必须按真实媒体时间走,
+     * 否则"拖到 0:30 却显示循环区内的位置"会再次制造"seek 被夹回"的错觉。
+     */
     fun interpolatedPositionMs(nowElapsedRealtime: Long): Long {
         val ready = _pageState.value as? LoopPageState.Ready ?: return 0L
-        if (ready.playback !is PlaybackState.Playing) return ready.positionMs
-        if (anchorElapsedRealtime == 0L) return ready.positionMs
-
-        val duration = ready.durationMs.coerceAtLeast(0L)
-        val extrapolated = anchorMs + (nowElapsedRealtime - anchorElapsedRealtime)
-        if (ready.mode == LoopPageMode.FREE) return extrapolated.coerceIn(0L, duration)
-
-        val a = ready.aMs
-        val b = ready.bMs
-        val length = b - a
-        if (length <= 0L) return extrapolated.coerceIn(0L, duration)
-        return if (extrapolated < a) {
-            extrapolated.coerceIn(0L, duration)
-        } else {
-            a + ((extrapolated - a) % length)
-        }
+        return LoopPlayhead.interpolate(
+            state = ready,
+            anchorMs = anchorMs,
+            anchorElapsedRealtime = anchorElapsedRealtime,
+            nowElapsedRealtime = nowElapsedRealtime,
+        )
     }
 
     private fun currentPositionMs(): Long =

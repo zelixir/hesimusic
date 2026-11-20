@@ -27,6 +27,33 @@ object LoopPreviewDebugBridge {
         tapSink = handler
     }
 
+    /**
+     * 00022/00023 真机计时探针：seek/起播请求时刻 → 首个 PCM buffer 进入 AudioSink 的耗时。
+     *
+     * 由 [RingBandExtractor.seek] 打点，[SourceRenderersFactory.handleBuffer] 消费并打
+     * "LoopPerf first-audio" 日志；纯观测，不影响播放。
+     */
+    @Volatile
+    private var seekProbeNanos: Long = 0L
+
+    @Volatile
+    private var seekProbeDisplayMs: Long = -1L
+
+    fun noteSeekRequest(displayMs: Long) {
+        seekProbeDisplayMs = displayMs
+        seekProbeNanos = System.nanoTime()
+    }
+
+    /** 取走一次探针；返回 [elapsedMs, displayMs]，超过 [maxAgeMs] 视为过期。 */
+    fun consumeSeekProbe(maxAgeMs: Long = 3_000L): LongArray? {
+        val at = seekProbeNanos
+        if (at <= 0L) return null
+        seekProbeNanos = 0L
+        val elapsedMs = (System.nanoTime() - at) / 1_000_000L
+        if (elapsedMs < 0L || elapsedMs > maxAgeMs) return null
+        return longArrayOf(elapsedMs, seekProbeDisplayMs)
+    }
+
     fun setTap(file: java.io.File?) {
         tapSink?.invoke(file)
     }

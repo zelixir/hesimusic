@@ -99,6 +99,20 @@ class TapAudioSink(
         encodedAccessUnitCount: Int,
     ): Boolean {
         handledBuffers += 1L
+        if (buffer.hasRemaining()) {
+            // 00022/00023 真机计时：seek 请求 → 首个 PCM buffer 进入 AudioSink。
+            LoopPreviewDebugBridge.consumeSeekProbe()?.let { probe ->
+                try {
+                    Log.d(
+                        "LoopPerf",
+                        "first-audio afterSeek=" + probe[0] + "ms seekDisplayMs=" + probe[1] +
+                            " ptsUs=" + presentationTimeUs + " bufferBytes=" + buffer.remaining(),
+                    )
+                } catch (_: Throwable) {
+                    // JVM 单测里 android.util.Log 是抛异常的 stub。
+                }
+            }
+        }
         val active = controller.isTapActive
         if (active && !tapWasActive) {
             seenFrames = 0L
