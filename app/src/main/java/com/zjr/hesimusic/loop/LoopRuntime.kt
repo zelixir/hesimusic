@@ -35,8 +35,14 @@ class LoopRuntime @Inject constructor() {
      *
      * @param armedSongId 显式意图指向的歌([LoopIntent.armed] 的 songId);null = 未武装。
      */
-    fun refresh(songId: Long?, repeatMode: Int, row: SongLoop?, armedSongId: Long?) {
-        _window.value = LoopEligibility.derive(songId, repeatMode, row, armedSongId)
+    fun refresh(
+        songId: Long?,
+        repeatMode: Int,
+        row: SongLoop?,
+        armedSongId: Long?,
+        durationUs: Long = 0L,
+    ) {
+        _window.value = LoopEligibility.derive(songId, repeatMode, row, armedSongId, durationUs)
     }
 
     /** 清空窗口(停止/退出无缝场景)。 */

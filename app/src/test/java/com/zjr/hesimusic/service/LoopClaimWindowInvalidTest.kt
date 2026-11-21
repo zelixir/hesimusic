@@ -59,6 +59,34 @@ class LoopClaimWindowInvalidTest {
     }
 
     @Test
+    fun `invalid runtime window dropped by selection still reports window invalid`() {
+        // selectWindow 先把非法窗口丢掉（不写进播放层）是对的；但 claim 的原因不能因此丢失。
+        for (bad in listOf(oneMsWindow, oneSampleWindow)) {
+            assertNull(
+                "非法窗口应先被 selectWindow 丢弃 (" + bad + ")",
+                LoopClaimResolver.selectWindow(songId, bad, null, isReplaying = false),
+            )
+            val claim = LoopClaimResolver.resolve(
+                songId = songId,
+                runtimeWindow = bad,
+                audioWindow = null,
+                installedWindow = null,
+                isReplaying = false,
+                sourceRoute = true,
+                sourceUnavailable = false,
+            )
+            assertNull(claim.window)
+            assertFalse(claim.claimActive)
+            assertEquals(
+                "selectWindow 丢弃后仍必须报 window-invalid (" + bad + ")",
+                LoopSourceFallback.Reason.WINDOW_INVALID,
+                claim.fallbackReason,
+            )
+            assertEquals("window-invalid", claim.debugFields().claimReason)
+        }
+    }
+
+    @Test
     fun `exactly 500ms still claims`() {
         val claim = LoopClaimResolver.resolve(
             songId = songId,

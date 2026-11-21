@@ -1,5 +1,7 @@
 package com.zjr.hesimusic.service
 
+import com.zjr.hesimusic.data.model.SongLoop
+import com.zjr.hesimusic.loop.LoopIntent
 import com.zjr.hesimusic.loop.LoopPhase
 import com.zjr.hesimusic.loop.LoopPosition
 import com.zjr.hesimusic.loop.LoopRuntime
@@ -51,7 +53,7 @@ data class LoopClaim(
     val claimActive: Boolean
         get() = sourceActive &&
             window != null &&
-            LoopWindowRules.usable(window) &&
+            LoopWindowRules.writable(window) != null &&
             songId != null &&
             window.songId == songId
 
@@ -106,7 +108,7 @@ data class LoopClaim(
     fun debugFields(): LoopClaimDebugFields = LoopClaimDebugFields(
         // 非法窗口不算"有意图窗口"：claimed=false 才能让 loop-claim-without-source
         // 不误报（那条不变量判 claimed && !sourceActive）。
-        claimed = window != null && LoopWindowRules.usable(window),
+        claimed = window != null && LoopWindowRules.writable(window) != null,
         claimActive = claimActive,
         sourceActive = sourceActive,
         claimReason = if (sourceActive) null else fallbackReason?.logName,
@@ -130,6 +132,92 @@ data class LoopClaimDebugFields(
     val claimReason: String?,
 )
 
+/** 正在循环的歌被取消确认/删除/重启恢复失败时的**显式退场原因**（D13）。 */
+enum class LoopExitReason(val wire: String) {
+    /** 用户把已确认结果取消确认（confirmed 1→0）。 */
+    CONFIRMATION_REVOKED("confirmation-revoked"),
+
+    /** 用户删除了分析结果（整行删除）。 */
+    RESULT_DELETED("result-deleted"),
+
+    /** 进程重启时持久化的循环意图已不可恢复（歌/行/窗口/repeat 任一不一致）。 */
+    RESTORE_UNAVAILABLE("restore-unavailable"),
+}
+
+/**
+ * 一次显式退场的可见状态（[LoopClaimStore.exitNoticeFlow]）。
+ *
+ * 为什么需要：demote 过去只是让窗口"悄悄"变 null（repeat 还停在 ONE、intent 还 armed），
+ * 用户只看到循环突然没了。这里把"谁、为什么、退到哪个模式"变成一等状态；UI 收集后提示，
+ * 调试口/logcat 也能看到（[summary]）。
+ */
+data class LoopExitNotice(
+    val songId: Long,
+    val reason: LoopExitReason,
+    val window: LoopWindow?,
+    val previousRepeatMode: Int,
+    val nextRepeatMode: Int,
+    val previousShuffleEnabled: Boolean,
+    val nextShuffleEnabled: Boolean,
+    val notifiedAtMs: Long,
+) {
+    fun summary(): String =
+        "loop exit reason=" + reason.wire + " songId=" + songId +
+            " window=" + window +
+            " repeat=" + previousRepeatMode + "->" + nextRepeatMode +
+            " shuffle=" + previousShuffleEnabled + "->" + nextShuffleEnabled
+}
+
+/**
+ * D13：正在循环的歌被 demote / 删除时的**显式退出计划**（纯函数）。
+ *
+ * 触发条件全部满足：
+ * 1. 有显式意图，且武装的是当前歌；
+ * 2. 上一轮 refresh 确实算出过窗口（正在循环，或至少已经进入过循环形态）；
+ * 3. 当前 song_loop 行不存在（删除）或 confirmed=false（取消确认）。
+ *
+ * 返回的恢复值来自 [LoopIntent.Armed] 的进入前模式；调用方（协调器）负责清 intent、
+ * 写播放器/偏好，并把 [LoopExitNotice] 发布到 [LoopClaimStore]。
+ */
+object LoopRevocation {
+
+    data class Exit(
+        val songId: Long,
+        val reason: LoopExitReason,
+        val window: LoopWindow,
+        val currentRepeatMode: Int,
+        val currentShuffleEnabled: Boolean,
+        val restoreRepeatMode: Int,
+        val restoreShuffleEnabled: Boolean,
+    ) {
+        val repeatChanged: Boolean get() = restoreRepeatMode != currentRepeatMode
+        val shuffleChanged: Boolean get() = restoreShuffleEnabled != currentShuffleEnabled
+    }
+
+    fun detect(
+        armed: LoopIntent.Armed?,
+        previousWindow: LoopWindow?,
+        songId: Long?,
+        row: SongLoop?,
+        currentRepeatMode: Int,
+        currentShuffleEnabled: Boolean,
+    ): Exit? {
+        if (armed == null || previousWindow == null) return null
+        if (songId == null || songId <= 0L || armed.songId != songId) return null
+        if (previousWindow.songId != songId) return null
+        if (row != null && row.confirmed) return null
+        return Exit(
+            songId = songId,
+            reason = if (row == null) LoopExitReason.RESULT_DELETED else LoopExitReason.CONFIRMATION_REVOKED,
+            window = previousWindow,
+            currentRepeatMode = currentRepeatMode,
+            currentShuffleEnabled = currentShuffleEnabled,
+            restoreRepeatMode = armed.previousRepeatMode,
+            restoreShuffleEnabled = armed.previousShuffleEnabled,
+        )
+    }
+}
+
 /**
  * 唯一的 claim 解析器：输入“意图窗口 + 音频窗口 + 已安装窗口 + 路线 + 回退登记”，
  * 输出 [LoopClaim]。会话层、UI、debug、About 都只能通过它（或 [LoopClaimStore]）拿真值。
@@ -149,13 +237,14 @@ object LoopClaimResolver {
         audioWindow: LoopWindow?,
         isReplaying: Boolean,
     ): LoopWindow? {
-        val intended = runtimeWindow?.takeIf {
-            it.isValid() && songId != null && it.songId == songId
+        // D14：窗口合法性只认 LoopWindowRules；非法 runtime 窗口不能挡住重放期的 audio 回退。
+        val intended = LoopWindowRules.writable(runtimeWindow)?.takeIf {
+            songId != null && it.songId == songId
         }
         if (intended != null) return intended
         if (!isReplaying) return null
-        return audioWindow?.takeIf {
-            it.isValid() && songId != null && it.songId == songId
+        return LoopWindowRules.writable(audioWindow)?.takeIf {
+            songId != null && it.songId == songId
         }
     }
 
@@ -180,14 +269,21 @@ object LoopClaimResolver {
         // 窗口合法性（500ms 下限 / A<B / 时长上界）在 claim 层再判一次：
         // 历史坏行即使把源装上了也绝不能声称循环。非法窗口不下发（window=null），
         // 这样 claimed=false、claimActive=false，且 reason=window-invalid 仍可见。
-        val usableWindow = selected?.takeIf { LoopWindowRules.usable(it) }
+        val usableWindow = LoopWindowRules.writable(selected)
         val sourceActive = when {
             usableWindow == null -> false
             sourceUnavailable -> false
             sourceRoute -> sameWindow(installedWindow, usableWindow)
             else -> sameWindow(audioWindow, usableWindow)
         }
+        // 原因必须能看见：selectWindow 已经先丢掉非法窗口，不能再用 selected != null 判坏窗口。
+        // 直接对 runtimeWindow 做同一套 LoopWindowRules 判定（坏行即使被丢弃也报 window-invalid）；
+        // runtimeWindow 为空/别的歌时，才回退到 sourceUnavailable 的其它原因。
+        val runtimeInvalid = runtimeWindow != null &&
+            LoopWindowRules.writable(runtimeWindow) == null &&
+            (songId == null || runtimeWindow.songId == songId)
         val reason = when {
+            runtimeInvalid -> LoopSourceFallback.Reason.WINDOW_INVALID
             selected != null && usableWindow == null -> LoopSourceFallback.Reason.WINDOW_INVALID
             sourceActive -> null
             else -> fallbackReason
@@ -265,8 +361,33 @@ object LoopClaimStore {
     /** 每次 claim 相关事实可能变化时自增；UI collect 它来触发重算。 */
     val revisionFlow: StateFlow<Long> = revision.asStateFlow()
 
+    private val exitNotice = MutableStateFlow<LoopExitNotice?>(null)
+
+    /**
+     * 最近一次显式退场（D13）。UI 收集它做一次性 Toast/横幅；consumeExitNotice()
+     * 读后即清，避免旋转/重进页面重复弹。**不是**第二套 claim 真值：是否在循环仍只读 claim。
+     */
+    val exitNoticeFlow: StateFlow<LoopExitNotice?> = exitNotice.asStateFlow()
+
     @Volatile
     private var provider: ((Long?) -> LoopClaim)? = null
+
+    /** 发布一次显式退场（demote / delete / 重启恢复失败）。 */
+    fun publishExit(notice: LoopExitNotice) {
+        exitNotice.value = notice
+        invalidate()
+    }
+
+    /** 读取并清空（一次性提示语义；没有 notice 时返回 null）。 */
+    fun consumeExitNotice(): LoopExitNotice? {
+        val current = exitNotice.value ?: return null
+        exitNotice.value = null
+        return current
+    }
+
+    fun clearExitNotice() {
+        exitNotice.value = null
+    }
 
     fun install(provider: (Long?) -> LoopClaim) {
         this.provider = provider
@@ -303,5 +424,6 @@ object LoopClaimStore {
     fun resetForTest() {
         provider = null
         revision.value = 0L
+        exitNotice.value = null
     }
 }

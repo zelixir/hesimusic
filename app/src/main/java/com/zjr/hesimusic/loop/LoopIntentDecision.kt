@@ -82,7 +82,8 @@ object LoopIntentDecision {
      * 判定依据是**持久化偏好**:用户改 repeat 走 MusicViewModel.setRepeatMode,
      * 会同步把偏好写成同一个值;而队列播放的内部临时改写(MusicViewModel
      * applyQueuePlaybackOverridesIfNeeded:REPEAT_ONE → ALL)只动播放器、不写偏好。
-     * 无缝进入写 ONE 时也**不写偏好**,所以不会把自己触发的回调当成用户操作。
+     * D16 起无缝进入**会把偏好写成 ONE**(与 UI 显示一致);该事件 newRepeat==ONE,
+     * 被下面第一条直接放行,所以不会把自己触发的回调当成用户操作。
      *
      * - repeat 变成非 ONE 且 persisted == 新值 → 用户手动改 → 清意图;
      * - repeat 变成非 ONE 但 persisted 仍是旧值 → 内部临时改写 → 保留意图;
@@ -116,8 +117,9 @@ object LoopIntentDecision {
      * shuffle 事件是否应视为「用户手动改 shuffle」并清空意图。
      *
      * 与 repeat 同理用持久化偏好区分:用户改 shuffle 走 MusicViewModel.setShuffleModeEnabled,
-     * 会写偏好;而无缝进入写 false、退出写回 prevShuffle、队列临时改写都**不写偏好**,
-     * 因此不会被误判成用户操作。
+     * 会写偏好;D16 起无缝进入也会把偏好写成 false,但协调器给这次自写打了
+     * engineShuffleWrite 标记并在事件回来时消费(见 LoopPlaybackCoordinator),
+     * 因此不会被误判成用户操作。退出写回 prevShuffle、队列临时改写仍不写偏好。
      *
      * - persisted == 新值 → 用户手动改 → 清意图;
      * - 否则 → 内部写入 → 保留意图;

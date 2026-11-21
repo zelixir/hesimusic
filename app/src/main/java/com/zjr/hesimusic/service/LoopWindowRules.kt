@@ -155,6 +155,16 @@ object LoopWindowRules {
     fun usable(window: LoopWindow?, durationUs: Long = 0L): Boolean =
         violationOf(window, durationUs) == null
 
+    /**
+     * **唯一"可以把窗口写进播放层"的入口（D14）**：返回 null = 按普通播放处理。
+     *
+     * 资格判定（[com.zjr.hesimusic.loop.LoopEligibility]）、claim（[LoopClaimResolver]）、
+     * SOURCE 预检（[LoopSourceFallback]）与 M3 音频层写入（[LoopPlaybackCoordinator]）都必须
+     * 经过 [usable] / [writable]：1-sample、499ms、越界窗口在四条路径上必须得到同一个结论。
+     */
+    fun writable(window: LoopWindow?, durationUs: Long = 0L): LoopWindow? =
+        window?.takeIf { usable(it, durationUs) }
+
     /** 拒绝原因的日志/文案（不含协议码）。 */
     fun describe(window: LoopWindow?, durationUs: Long = 0L): String {
         val code = violationOf(window, durationUs) ?: return "ok"

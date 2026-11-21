@@ -9,7 +9,9 @@ import androidx.room.PrimaryKey
  *
  * 一首歌至多一条结果(以 songId 为主键);分析 Done 自动落库**临时结果**(confirmed=0),
  * 用户「确认并保存」后置 confirmed=1(已确认行不被后续分析覆盖)。
- * 桥接接管条件:song_loop 行存在即生效(临时结果同样无缝播放)。
+ *
+ * 生效条件(D13 统一口径):**confirmed=1 才可进入主播放的无缝循环**;
+ * confirmed=0 的临时结果只供结果页预览试听,不能直接循环(见 LoopEligibility)。
  */
 @Entity(tableName = "song_loop")
 data class SongLoop(
