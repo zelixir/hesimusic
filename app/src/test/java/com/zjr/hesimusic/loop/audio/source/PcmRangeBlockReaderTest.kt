@@ -134,13 +134,76 @@ class PcmRangeBlockReaderTest {
         reader.release()
     }
 
+    /**
+     * 真实 PcmDecoder 的行为：请求越过最后一个编码样本时**抛异常**，而不是返回短段。
+     * 最后一块必须逐步缩短请求拿到真实结尾音频，剩余不足 1s 的部分静音补齐。
+     */
+    private class ThrowingPastEndProvider(
+        private val sr: Int,
+        private val ch: Int,
+        private val realEndUs: Long,
+    ) : PcmRangeProvider {
+        override fun decode(startUs: Long, endUs: Long): Pcm16Segment {
+            if (endUs > realEndUs) {
+                throw IllegalStateException(
+                    "环缓冲解码不足: 需要 " + (endUs - startUs) + "us",
+                )
+            }
+            val startFrame = Pcm16Frames.frameAtOrAfterUs(startUs, sr)
+            val frames = Pcm16Frames.framesForUsCeil(endUs - startUs, sr)
+            val data = ByteArray((frames * ch * 2).toInt())
+            var offset = 0
+            for (i in 0 until frames.toInt()) {
+                val value = (startFrame + i).toShort()
+                repeat(ch) {
+                    data[offset++] = (value.toInt() and 0xff).toByte()
+                    data[offset++] = ((value.toInt() shr 8) and 0xff).toByte()
+                }
+            }
+            return Pcm16Segment(data, sr, ch, frames)
+        }
+    }
+
+    @Test
+    fun lastBlockPastRealEndIsTrimmedThenPaddedInsteadOfFailed() {
+        // 期望 4s；真实音频只到 3.9s；最后块 [3.0,4.0) 首轮请求 4.0s -> 抛异常。
+        val provider = ThrowingPastEndProvider(sr, ch, realEndUs = 3_900_000L)
+        val reader = PcmRangeBlockReader(provider, 0L, 4_000L, sr, ch)
+        val data = readExactly(reader, 4_000)
+        assertEquals(3_899, sampleAt(data, 3_899))
+        for (i in 3_900 until 4_000) {
+            assertEquals("padded frame $i", 0, sampleAt(data, i))
+        }
+        assertEquals(4_000L, reader.currentFrame())
+        assertTrue("must not stay failed", reader.error() == null)
+        reader.release()
+    }
+
+    @Test
+    fun lastBlockEntirelyPastRealEndBecomesSilenceWithoutHanging() {
+        val provider = ThrowingPastEndProvider(sr, ch, realEndUs = 3_000_000L)
+        val reader = PcmRangeBlockReader(provider, 0L, 4_000L, sr, ch)
+        val data = readExactly(reader, 4_000)
+        assertEquals(2_999, sampleAt(data, 2_999))
+        for (i in 3_000 until 4_000) {
+            assertEquals("padded frame $i", 0, sampleAt(data, i))
+        }
+        assertTrue(reader.error() == null)
+        reader.release()
+    }
+
     @Test
     fun decodeErrorsDoNotHangAndExposeLastError() {
+        // 非最后块的真失败必须暴露；最后块的"越过媒体结尾"才允许静音补齐。
         val failing = object : PcmRangeProvider {
-            override fun decode(startUs: Long, endUs: Long): Pcm16Segment =
-                throw IllegalStateException("boom")
+            override fun decode(startUs: Long, endUs: Long): Pcm16Segment {
+                if (endUs <= 1_000_000L) throw IllegalStateException("boom")
+                val frames = com.zjr.hesimusic.loop.analysis.Pcm16Frames
+                    .framesForUsCeil(endUs - startUs, sr)
+                return Pcm16Segment(ByteArray((frames * ch * 2).toInt()), sr, ch, frames)
+            }
         }
-        val reader = PcmRangeBlockReader(failing, 0L, 1_000L, sr, ch)
+        val reader = PcmRangeBlockReader(failing, 0L, 2_000L, sr, ch)
         var guard = 0
         while (reader.error() == null && guard++ < 100) {
             reader.kick()

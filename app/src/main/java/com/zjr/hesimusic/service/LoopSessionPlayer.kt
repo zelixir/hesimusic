@@ -103,13 +103,20 @@ class LoopSessionPlayer(
         if (!claim.claimActive || window == null) return super.getCurrentPosition()
         if (isSourceItem(snapshot)) {
             // T → 媒体时间：整曲口径下 prelude/tail 直通、[A,B) 折返；不是 sentinel T。
+            val timelineMs = super.getCurrentPosition()
             val displayUs = LoopSessionProjection.sourceDisplayUs(
-                super.getCurrentPosition(),
+                timelineMs,
                 window,
                 audio.fullDurationUs,
             )
-            // UI 的二次折返需要知道"B 之后是尾奏还是外推"，记录权威展示位置。
-            LoopPlaybackPhaseRuntime.update(claim.songId, displayUs, window)
+            // UI 的二次折返需要知道"B 之后是尾奏还是外推"，记录权威 T/展示位置。
+            LoopPlaybackPhaseRuntime.update(
+                songId = claim.songId,
+                timelineUs = timelineMs * LoopSessionProjection.US_PER_MS,
+                displayUs = displayUs,
+                window = window,
+                fullDurationUs = audio.fullDurationUs,
+            )
             return displayUs / LoopSessionProjection.US_PER_MS
         }
         val rawUs = currentRawUs(snapshot.isReplaying)
@@ -337,11 +344,13 @@ class LoopSessionPlayer(
                 fullDurationUs = audio.fullDurationUs,
             )
             super.seekTo(mediaItemIndex, targetT / LoopSessionProjection.US_PER_MS)
-            // seek 目标就是新的权威展示位置：tail 立即被视为 tail，进度条不会先折回 A。
+            // seek 目标就是新的权威位置：tail 立即被视为 tail，进度条不会先折回 A。
             LoopPlaybackPhaseRuntime.update(
-                claim.songId,
-                positionMs * LoopSessionProjection.US_PER_MS,
-                window,
+                songId = claim.songId,
+                timelineUs = targetT,
+                displayUs = positionMs * LoopSessionProjection.US_PER_MS,
+                window = window,
+                fullDurationUs = audio.fullDurationUs,
             )
         } else {
             val rawUs = LoopSessionProjection.seekUs(

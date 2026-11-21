@@ -16,10 +16,12 @@ import com.zjr.hesimusic.loop.audio.source.LoopEngineInfo
 import com.zjr.hesimusic.loop.audio.source.LoopPreviewDebugBridge
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMainPlayer
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
+import com.zjr.hesimusic.loop.audio.source.LoopWholeTimeline
 import com.zjr.hesimusic.loop.audio.source.RingBandSource
 import com.zjr.hesimusic.service.LoopClaim
 import com.zjr.hesimusic.service.LoopClaimResolver
 import com.zjr.hesimusic.service.LoopClaimStore
+import com.zjr.hesimusic.service.LoopPlaybackPhaseRuntime
 import com.zjr.hesimusic.service.LoopSourceFallback
 import com.zjr.hesimusic.service.LoopWindowRules
 import com.zjr.hesimusic.service.MainPlayerRouting
@@ -223,6 +225,31 @@ object LoopDebugServer {
                 } else {
                     null
                 }
+                // 同一份权威快照同时输出 T / 本地偏移 / display / phase，方便真机一眼定位
+                // "T 在哪个区间、display 折到哪、phase 为什么是这个"。
+                val runtimeMatches = claim.window != null &&
+                    LoopPlaybackPhaseRuntime.window == claim.window &&
+                    (claim.songId == null || LoopPlaybackPhaseRuntime.songId == claim.songId)
+                val runtimeTimelineUs = if (runtimeMatches) LoopPlaybackPhaseRuntime.timelineUs else null
+                val runtimeLocalTimelineUs = if (runtimeMatches) {
+                    LoopPlaybackPhaseRuntime.localTimelineUs()
+                } else {
+                    null
+                }
+                val runtimeDisplayUs = if (runtimeMatches) LoopPlaybackPhaseRuntime.displayUs else null
+                val timelinePhase = if (runtimeMatches) {
+                    LoopWholeTimeline.phaseOfTimelineUs(
+                        LoopPlaybackPhaseRuntime.timelineUs,
+                        claim.window,
+                        LoopPlaybackPhaseRuntime.fullDurationUs,
+                    )?.wire
+                } else {
+                    null
+                }
+                val runtimePhase = if (runtimeMatches) LoopPlaybackPhaseRuntime.phase?.wire else null
+                // T 与 display 必须一致；优先用 T 的 phase 做诊断（若两者不一致，
+                // timelinePhase 会暴露 T 落在哪个区间，runtimePhase 暴露 display 的判定）。
+                val effectivePhase = timelinePhase ?: phase
                 return linkedMapOf(
                     "engine" to engine,
                     "loopPath" to loopPath,
@@ -231,7 +258,12 @@ object LoopDebugServer {
                     "claimActive" to claimFields.claimActive,
                     "sourceActive" to claimFields.sourceActive,
                     "claimReason" to claimFields.claimReason,
-                    "phase" to phase,
+                    "phase" to effectivePhase,
+                    "timelineUs" to runtimeTimelineUs,
+                    "localTimelineUs" to runtimeLocalTimelineUs,
+                    "displayUs" to runtimeDisplayUs,
+                    "timelinePhase" to timelinePhase,
+                    "runtimePhase" to runtimePhase,
                     "window" to window?.let {
                         linkedMapOf(
                             "songId" to it.songId,

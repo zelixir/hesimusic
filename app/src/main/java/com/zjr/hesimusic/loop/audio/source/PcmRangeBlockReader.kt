@@ -245,6 +245,41 @@ class PcmRangeBlockReader(
             error = "decode block " + block + " [" + startUs + "," + endUs + ") failed: " +
                 (t.message ?: t.javaClass.simpleName)
         }
+        if (segment == null && block == blockCount - 1 && !released) {
+            // 真实 PcmDecoder 在"请求区间越过最后一个编码样本"时会抛
+            // "环缓冲解码不足: 需要 X 帧,实际 Y 帧"（而不是返回短段）。
+            // 对最后一个块逐步缩短请求终点重试，保留尽可能多的真实音频；
+            // 仍失败（整块都在文件尾之后）则按整块静音，交给下面的短块补齐逻辑。
+            for (trimUs in LAST_BLOCK_TRIM_STEPS_US) {
+                val candidateEnd = endUs - trimUs
+                if (candidateEnd <= startUs) break
+                try {
+                    val candidate = provider.decode(decodeStartUs, candidateEnd)
+                    if (candidate.frames > 0L) {
+                        segment = candidate
+                        error = null
+                        logger(
+                            "PcmRangeBlock last block trimmed request block=" + block +
+                                " trimUs=" + trimUs + " endUs=" + candidateEnd +
+                                " frames=" + candidate.frames,
+                        )
+                        break
+                    }
+                } catch (t: Throwable) {
+                    error = "decode last block " + block + " trimmed " + trimUs +
+                        "us failed: " + (t.message ?: t.javaClass.simpleName)
+                }
+            }
+            if (segment == null) {
+                // 最后一块完全落在真实音频之后：整块静音补齐，不能让 read 永久返回 null。
+                segment = Pcm16Segment(ByteArray(0), sampleRate, channels, 0L)
+                error = null
+                logger(
+                    "PcmRangeBlock last block unavailable -> pad silence block=" + block +
+                        " expectedFrames=" + expectedFrames,
+                )
+            }
+        }
         synchronized(lock) {
             if (released) {
                 cache.markFailed(block)
@@ -348,5 +383,15 @@ class PcmRangeBlockReader(
 
         /** 解码预热，裁掉后避免 MediaCodec priming 污染块首。 */
         const val DECODE_PREROLL_US: Long = 250_000L
+
+        /**
+         * 最后一个块解码"短于请求区间"时的回退终点缩减量。
+         * 真实 PcmDecoder 是抛异常而非返回短段，必须缩短请求才能拿到结尾前的真实音频。
+         */
+        val LAST_BLOCK_TRIM_STEPS_US: LongArray = longArrayOf(
+            1_000L, 5_000L, 10_000L, 20_000L, 50_000L, 100_000L,
+            200_000L, 300_000L, 400_000L, 500_000L, 600_000L,
+            700_000L, 800_000L, 900_000L,
+        )
     }
 }
