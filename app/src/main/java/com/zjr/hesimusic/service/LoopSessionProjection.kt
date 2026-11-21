@@ -56,6 +56,13 @@ object LoopSessionProjection {
     fun sourceDisplayMs(timelineMs: Long, window: LoopWindow?): Long =
         LoopSourceProjection.displayMs(timelineMs, window)
 
+    /** SOURCE 模式：展示位置 → 数据源时间轴 T（[seekTo] 的口径）。 */
+    fun sourceTimelineUsForDisplay(
+        displayUs: Long,
+        currentTimelineUs: Long,
+        window: LoopWindow?,
+    ): Long = LoopSourceProjection.timelineUsForDisplay(displayUs, currentTimelineUs, window)
+
     /**
      * 对外时长（µs）。返回 0 表示「不投影」，调用方要透传播放器原生时长。
      *

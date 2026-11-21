@@ -26,6 +26,15 @@ object InvariantCode {
 
     /** 会话/页面不投影循环，但当前 item 仍带 loop tag（循环源没有退出）。 */
     const val PROJECTION_PLAIN_SOURCE_LOOP: String = "projection-plain-source-loop"
+
+    /**
+     * 00027：声称循环（claimed）但循环源没有真正生效（sourceActive=false）。
+     *
+     * 与 projection-loop-source-plain 的区别：那条断言“投影说循环、音源是普通源”；
+     * 这条断言“**claim 本身**没有 source 背书”，覆盖五种回退原因（包括 build-failed
+     * 时 item 还带 tag、但 factory 已回退 delegate 的中间态）。
+     */
+    const val LOOP_CLAIM_WITHOUT_SOURCE: String = "loop-claim-without-source"
 }
 
 /** 一次不变量违规（纯数据，可直接序列化进 /state.invariants）。 */

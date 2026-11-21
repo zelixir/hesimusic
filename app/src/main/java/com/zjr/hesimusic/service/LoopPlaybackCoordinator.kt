@@ -313,6 +313,8 @@ class LoopPlaybackCoordinator @Inject constructor(
                 syncShape(window, player, sourceSong, reason)
             }
             ensureObservation(songId, player)                      // 3) 行变更订阅
+            // 00027：窗口/音频层/接管状态任一变化后，让 UI 的 claim 立即重算（消灭 1s 脏帧）。
+            LoopClaimStore.invalidate()
             val costMs = System.currentTimeMillis() - startedAtMs
             if (costMs >= SLOW_REFRESH_WARN_MS) {
                 // 真机排障：refresh 卡住会把主线程/事件链一起拖死（/state 只能读到旧缓存）。
@@ -556,6 +558,7 @@ class LoopPlaybackCoordinator @Inject constructor(
         LoopSourceFallback.reset()
         LoopSourceRuntime.reset()
         runtime.clear()
+        LoopClaimStore.invalidate()
     }
 
     // ------------------------------------------------------------------ 意图订阅

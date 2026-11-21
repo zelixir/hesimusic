@@ -27,6 +27,8 @@ import com.zjr.hesimusic.core.invariants.FrameUsRoundtripEvaluator
 import com.zjr.hesimusic.core.invariants.FrameUsRoundtripSample
 import com.zjr.hesimusic.core.invariants.InvariantEvent
 import com.zjr.hesimusic.core.invariants.InvariantRegistry
+import com.zjr.hesimusic.core.invariants.LoopClaimInvariantEvaluator
+import com.zjr.hesimusic.core.invariants.LoopClaimInvariantSample
 import com.zjr.hesimusic.core.invariants.LoopInvariantProbes
 import com.zjr.hesimusic.core.invariants.OutputInvariantEvaluator
 import com.zjr.hesimusic.core.invariants.OutputInvariantSample
@@ -48,6 +50,7 @@ import com.zjr.hesimusic.data.mapper.mediaIdToSongId
 import com.zjr.hesimusic.loop.audio.source.LoopAwareMediaSourceFactory
 import com.zjr.hesimusic.loop.audio.source.LoopSourceItemTag
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMainPlayer
+import com.zjr.hesimusic.service.LoopClaimStore
 import com.zjr.hesimusic.service.LoopSessionProjection
 import com.zjr.hesimusic.service.LoopSourceFallback
 import com.zjr.hesimusic.service.LoopSourceRuntime
@@ -143,6 +146,7 @@ internal object PlaybackInvariantMonitor {
     private val registry = InvariantRegistry()
     private val outputEvaluator = OutputInvariantEvaluator()
     private val sourceEvaluator = SourceInvariantEvaluator()
+    private val claimEvaluator = LoopClaimInvariantEvaluator()
     private val periodEvaluator = PeriodContinueLoadingEvaluator()
     private val extractorEvaluator = ExtractorTrackEvaluator()
     private val emptyBufferEvaluator = EmptyBufferEvaluator()
@@ -293,6 +297,7 @@ internal object PlaybackInvariantMonitor {
     }
 
     private fun resetAssumptionEvaluators() {
+        claimEvaluator.reset()
         periodEvaluator.reset()
         extractorEvaluator.reset()
         emptyBufferEvaluator.reset()
@@ -457,6 +462,18 @@ internal object PlaybackInvariantMonitor {
                 report(sourceEvent)
             }
         }
+
+        // ---- 00027 claim 真值：claimActive/claimed 不得脱离 sourceActive ----
+        val claim = LoopClaimStore.claimFor(songId)
+        val claimSample = LoopClaimInvariantSample(
+            atMs = now,
+            songId = songId,
+            claimed = claim.window != null,
+            claimActive = claim.claimActive,
+            sourceActive = claim.sourceActive,
+            reason = claim.fallbackReason?.logName,
+        )
+        reportIfAny(claimEvaluator.onSample(claimSample))
 
         // ---- §12.2 A-025：prepared 后 continueLoading 驱动 ----
         val period = LoopInvariantProbes.periodSnapshot()
@@ -762,6 +779,12 @@ internal object PlaybackInvariantMonitor {
             "itemHasLoopTag" to itemHasLoopTag,
             "lastSelect" to select?.kind,
             "sourceViolationPending" to sourcePendingSamples,
+            "loopClaim" to linkedMapOf(
+                "claimed" to (claim.window != null),
+                "claimActive" to claim.claimActive,
+                "sourceActive" to claim.sourceActive,
+                "reason" to claim.fallbackReason?.logName,
+            ),
             "faultInjection" to fault,
             "faultFrames" to faultFrames,
             "windowSplitCount" to windowSplitCount,

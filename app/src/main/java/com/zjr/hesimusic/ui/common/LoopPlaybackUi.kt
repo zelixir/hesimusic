@@ -1,16 +1,13 @@
 package com.zjr.hesimusic.ui.common
 
-import com.zjr.hesimusic.loop.LoopPosition
 import com.zjr.hesimusic.loop.LoopWindow
+import com.zjr.hesimusic.service.LoopClaim
 
 /**
  * 播放界面(底部播放条 / 正在播放页)与无缝循环窗口之间的**纯函数**。
  *
  * 只做算术:不查库、不碰播放器、不依赖 Android/Compose,便于单测。
  */
-
-/** 毫秒转微秒前的安全上限,避免 Long 乘法溢出。 */
-private const val MAX_FOLDABLE_POSITION_MS = Long.MAX_VALUE / 1000L
 
 /**
  * 播放位置的**展示折返**(幂等)。
@@ -37,18 +34,20 @@ fun foldDisplayPositionMs(
     window: LoopWindow?,
     currentSongId: Long?,
     sourceLoopActive: Boolean = true,
-): Long {
-    // 00027:源没真正循环时,窗口只代表"意图",不代表播放形态——绝不能按它折返。
-    if (!sourceLoopActive) return rawPositionMs
-    if (window == null || currentSongId == null) return rawPositionMs
-    // 窗口属于别的歌:不是当前这首的无缝播放,不折返
-    if (window.songId != currentSongId) return rawPositionMs
-    // 超长位置原样透传,避免 ×1000 溢出成负数
-    if (rawPositionMs > MAX_FOLDABLE_POSITION_MS || rawPositionMs < -MAX_FOLDABLE_POSITION_MS) {
-        return rawPositionMs
-    }
-    return LoopPosition.displayUs(rawPositionMs * 1000L, window) / 1000L
-}
+): Long = LoopClaim(
+    songId = currentSongId,
+    window = window,
+    sourceActive = sourceLoopActive,
+).displayPositionMs(rawPositionMs)
+
+/**
+ * 00027 单一事实源版本：折返只认 [LoopClaim]。
+ *
+ * 生产代码必须用这个重载；旧的 (window, songId, sourceLoopActive) 重载只为兼容既有单测，
+ * 它无法表达 fallbackReason / C2 回退，容易再次漏判。
+ */
+fun foldDisplayPositionMs(rawPositionMs: Long, claim: LoopClaim): Long =
+    claim.displayPositionMs(rawPositionMs)
 
 /**
  * 当前**真正生效**的无缝窗口(00027)。
@@ -68,12 +67,14 @@ fun effectiveLoopWindow(
     window: LoopWindow?,
     currentSongId: Long?,
     loopEngaged: Boolean,
-): LoopWindow? {
-    if (!loopEngaged) return null
-    if (window == null || !window.isValid() || currentSongId == null) return null
-    if (window.songId != currentSongId) return null
-    return window
-}
+): LoopWindow? = LoopClaim(
+    songId = currentSongId,
+    window = window,
+    sourceActive = loopEngaged,
+).effectiveWindow
+
+/** 00027 单一事实源版本：A/B 标记只认 [LoopClaim]。 */
+fun effectiveLoopWindow(claim: LoopClaim): LoopWindow? = claim.effectiveWindow
 
 /** A/B 在进度条上的比例(0..1,半开区间 [start, end))。 */
 data class LoopMarkerFractions(val start: Float, val end: Float)

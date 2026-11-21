@@ -130,6 +130,7 @@ object LoopSourceFallback {
         val failure = Failure(reason, window.loopStartUs, window.loopEndUs)
         failures[songId] = failure
         latest = failure
+        LoopClaimStore.invalidate()
         logW(
             "source unavailable -> fallback M3' reason=" + reason.logName +
                 " songId=" + songId + " window=" + window +
@@ -174,12 +175,14 @@ object LoopSourceFallback {
     fun clear(songId: Long) {
         failures.remove(songId)
         if (latest != null && !failures.containsKey(songId)) latest = failures.values.lastOrNull()
+        LoopClaimStore.invalidate()
     }
 
     @Synchronized
     fun reset() {
         failures.clear()
         latest = null
+        LoopClaimStore.invalidate()
     }
 
     /** 最近一次回退原因；About/日志用。 */

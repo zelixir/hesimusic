@@ -10,16 +10,17 @@ import androidx.media3.common.Player
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.model.SongLoop
 import com.zjr.hesimusic.data.mapper.toMediaItem
-import com.zjr.hesimusic.loop.LoopPosition
-import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.SeamBufferMode
 import com.zjr.hesimusic.loop.audio.source.LoopEngineInfo
 import com.zjr.hesimusic.loop.audio.source.LoopPreviewDebugBridge
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMainPlayer
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
 import com.zjr.hesimusic.loop.audio.source.RingBandSource
+import com.zjr.hesimusic.service.LoopClaim
+import com.zjr.hesimusic.service.LoopClaimResolver
+import com.zjr.hesimusic.service.LoopClaimStore
 import com.zjr.hesimusic.service.LoopSourceFallback
-import com.zjr.hesimusic.service.LoopSourceRuntime
+import com.zjr.hesimusic.service.MainPlayerRouting
 import com.zjr.hesimusic.loop.analysis.AnalysisState
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
 import com.zjr.hesimusic.loop.analysis.LoopCandidateKt
@@ -189,30 +190,27 @@ object LoopDebugServer {
                 val runtime = d.loopRuntime()
                 val controller = d.loopAudioController()
                 val audioWindow = controller.window
-                val sourceWindow = com.zjr.hesimusic.service.LoopSourceRuntime.installedWindow
-                val window = audioWindow ?: sourceWindow ?: runtime.window.value
                 val currentSongId = player?.cachedSongId()
-                // 冷启动时 Player.Listener 缓存可能还没拿到当前歌:此时 window 本身已由
-                // LoopPlaybackCoordinator 按当前歌算出,视为命中;缓存有值时严格比对。
-                val engine = com.zjr.hesimusic.service.LoopSourceRuntime.engineName(
-                    m3Window = audioWindow,
-                    sourceWindow = sourceWindow,
-                    currentSongId = currentSongId,
-                )
-                val loopPath = com.zjr.hesimusic.service.LoopSourceRuntime.loopPath(
-                    m3Window = audioWindow,
-                    sourceWindow = sourceWindow,
-                    currentSongId = currentSongId,
-                )
-                // 00027:窗口(意图)与源是否真的接管是两件事。这里把两侧一起吐出来,
-                // 现场用 bandBytes/budgetBytes/sourceAvailable 一眼区分
-                // "环带真在循环" 与 "窗口在、但已回退成普通整曲"。
-                val truthSongId = currentSongId ?: window?.songId
-                val sourceUnavailable = window != null &&
-                    LoopSourceFallback.isUnavailable(truthSongId, window)
+                // 00027：claim 是唯一真值。当前歌未知时用意图窗口的 songId（冷启动 debug）。
+                val truthSongId = currentSongId ?: runtime.window.value?.songId ?: audioWindow?.songId
+                val claim = claimFor(truthSongId)
+                val window = claim.window ?: audioWindow ?: runtime.window.value
+                val routeSource = MainPlayerRouting.current.coordinatorReplacesItem
+                val engine = if (claim.claimActive) "loop" else "exo"
+                val loopPath = when {
+                    claim.claimActive && routeSource -> "source"
+                    claim.claimActive -> "m3"
+                    else -> "none"
+                }
+                val sourceUnavailable = claim.window != null && !claim.sourceActive
                 return linkedMapOf(
                     "engine" to engine,
                     "loopPath" to loopPath,
+                    // 00027 一等字段：意图是否声称循环 / 源是否真的在环回 / 原因。
+                    "claimed" to (claim.window != null),
+                    "claimActive" to claim.claimActive,
+                    "sourceActive" to claim.sourceActive,
+                    "claimReason" to (if (claim.sourceActive) null else claim.fallbackReason?.logName),
                     "window" to window?.let {
                         linkedMapOf(
                             "songId" to it.songId,
@@ -220,10 +218,13 @@ object LoopDebugServer {
                             "loopEndUs" to it.loopEndUs,
                         )
                     },
-                    // 00027: display 是否应该折返,以这个字段为准(不是 window 非空)。
-                    "sourceAvailable" to (window != null && window.isValid() && !sourceUnavailable),
+                    // 兼容旧字段：display 是否应该折返，以 claim 真值为准（不是 window 非空）。
+                    "sourceAvailable" to claim.sourceActive,
                     "sourceUnavailable" to sourceUnavailable,
-                    "fallbackReason" to LoopSourceFallback.latestReason()?.logName,
+                    "fallbackReason" to (
+                        claim.fallbackReason?.logName
+                            ?: LoopSourceFallback.latestReason()?.logName
+                        ),
                     "bandBytes" to LoopEngineInfo.lastRecordedBandBytes(),
                     "budgetBytes" to RingBandSource.budgetBytes(
                         Runtime.getRuntime().maxMemory(),
@@ -1212,37 +1213,26 @@ object LoopDebugServer {
     }
 
     /**
-     * /state、/player 的 positionMs 展示口径折返(window.songId 必须等于当前歌)。
+     * /state、/player 的 positionMs **完全依赖 LoopClaim**（00027）。
      *
-     * 00027:**投影必须跟着源真值走**。窗口非空只代表"用户 armed 了无缝",SOURCE 可能因
-     * 预算/格式/构建失败被 [LoopSourceFallback] 判为不可用 / 根本没装上 tag:
-     * 此时播放的是普通整曲,位置必须原样透传,否则 /state 也会给出折返后的假位置,
-     * 把 E2E 判据一起骗过。
-     *
-     * 口径与 UI 的 MusicViewModel.loopEngaged 一致:只有 loopPath=source/m3 才折返。
+     * 回退（五种原因）时 claimActive=false → 原样媒体时间；源生效时折返是幂等的
+     * （MediaController 读到的已经是 session 投影后的值）。绝不再自己拼窗口/loopPath。
      */
-    private fun displayPositionMs(snapshot: PlayerSnapshot): Long {
-        val rawMs = snapshot.positionMs
-        val songId = snapshot.songId ?: return rawMs
-        val entry = entryPoint ?: return rawMs
-        val m3Window: LoopWindow?
-        val sourceWindow: LoopWindow?
-        try {
-            m3Window = entry.loopAudioController().window
-            sourceWindow = LoopSourceRuntime.installedWindow
-        } catch (t: Throwable) {
-            Log.w(TAG, "current loop window unavailable", t)
-            return rawMs
-        }
-        val window = m3Window ?: sourceWindow ?: return rawMs
-        if (window.songId != songId) return rawMs
-        val path = LoopSourceRuntime.loopPath(m3Window, sourceWindow, songId)
-        if (path == "none") return rawMs
+    private fun displayPositionMs(snapshot: PlayerSnapshot): Long =
+        claimFor(snapshot.songId).displayPositionMs(snapshot.positionMs)
+
+    /**
+     * claim 读取：provider 已安装时走 [LoopClaimStore]；未安装（debug 先于 MusicService /
+     * 纯 JVM 单测）时用同一个 [LoopClaimResolver] 直接算，绝不另写一套口径。
+     */
+    private fun claimFor(songId: Long?): LoopClaim {
+        if (LoopClaimStore.isInstalled()) return LoopClaimStore.claimFor(songId)
+        val entry = entryPoint ?: return LoopClaim.none(songId)
         return try {
-            LoopPosition.displayUs(rawMs * 1_000L, window) / 1_000L
+            LoopClaimResolver.fromProcess(songId, entry.loopRuntime(), entry.loopAudioController())
         } catch (t: Throwable) {
-            Log.w(TAG, "display position fold failed", t)
-            rawMs
+            Log.w(TAG, "loop claim unavailable", t)
+            LoopClaim.none(songId)
         }
     }
 

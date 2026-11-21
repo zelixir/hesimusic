@@ -156,6 +156,11 @@ class MusicService : MediaSessionService() {
         // 位置/时长投影层：只重写位置/时长/seek，其余全部透传给上面的 forwardingPlayer
         // （队列首尾绕回播放仍由 forwardingPlayer 的 seekToNext/Previous 负责）。
         sessionPlayer = LoopSessionPlayer(forwardingPlayer, loopRuntime, loopAudioController)
+        // 00027：安装唯一的 claim provider。UI / MediaSession / debug / About 都通过
+        // LoopClaimStore 读同一份真值（窗口 = 意图，sourceActive = 源真的在环回）。
+        LoopClaimStore.install { songId ->
+            LoopClaimResolver.fromProcess(songId, loopRuntime, loopAudioController)
+        }
 
         mediaSession = MediaSession.Builder(this, sessionPlayer)
             .setCallback(MusicSessionCallback())
@@ -477,6 +482,7 @@ class MusicService : MediaSessionService() {
         saveCurrentState() // Save one last time
         saveQueueState()   // Also save queue state
         loopPlaybackCoordinator.release()
+        LoopClaimStore.uninstall()
         serviceScope.cancel()
         mediaSession?.run {
             player.release()

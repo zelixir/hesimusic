@@ -32,11 +32,13 @@ object LoopSourceRuntime {
     fun onInstalled(window: LoopWindow, filePath: String) {
         installedWindow = window
         installedPath = filePath
+        LoopClaimStore.invalidate()
     }
 
     fun onReleased() {
         installedWindow = null
         installedPath = null
+        LoopClaimStore.invalidate()
     }
 
     fun reset() = onReleased()

@@ -25,9 +25,7 @@ import com.zjr.hesimusic.data.scanner.TagLibHelper
 import com.zjr.hesimusic.loop.LoopIntent
 import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.LoopWindow
-import com.zjr.hesimusic.service.LoopSourceFallback
-import com.zjr.hesimusic.service.LoopSourceRuntime
-import com.zjr.hesimusic.service.MainPlayerRouting
+import com.zjr.hesimusic.service.LoopClaimStore
 import com.zjr.hesimusic.service.MusicNavigationPolicy
 import com.zjr.hesimusic.service.MusicService
 import com.zjr.hesimusic.ui.player.state.PlayerPageShadow
@@ -114,33 +112,14 @@ class MusicViewModel @Inject constructor(
     /**
      * **命中当前播放歌、且源真的生效**的无缝窗口;否则 null。
      *
-     * 这是播放界面 A/B 标记与循环区间样式的唯一来源:命中才画标记,不命中时 UI 完全不绘制。
-     * 00027:SOURCE 因预算/格式/构建失败回退时窗口仍在(意图),但必须按"未生效"处理,
-     * 否则就是"进度条画着 A/B、声音在放整曲"。
-     * 位置折返在 [updateState] 里用同一条真值判断直接算,不依赖这条流(避免多一跳延迟)。
+     * 00027:唯一真值来自 [LoopClaimStore]（`LoopClaim.effectiveWindow`）。这里不再自己
+     * 读 `loopRuntime.window` 折算布尔；`revisionFlow` 让 registry/接管状态一变就重算，
+     * 避免“回退已登记但 A/B 标记要等下一次 1s 位置刷新才消失”的脏帧。
      */
-    val activeLoopWindow: StateFlow<LoopWindow?> = combine(loopRuntime.window, _uiState) { window, state ->
+    val activeLoopWindow: StateFlow<LoopWindow?> = combine(_uiState, LoopClaimStore.revisionFlow) { state, _ ->
         val currentSongId = state.currentPlayingSongId?.toLongOrNull()
-        // 00027:窗口只代表意图;SOURCE 回退/未装上时它不是真正生效的循环形态。
-        effectiveLoopWindow(window, currentSongId, loopEngaged(window, currentSongId))
+        LoopClaimStore.claimFor(currentSongId).effectiveWindow
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
-
-    /**
-     * 00027:**播放管线真的在环回吗**——UI 投影/标记的唯一真值。
-     *
-     * - M3′ 路线:环回发生在音频 sink,window 生效即真(保持旧行为);
-     * - SOURCE 路线:必须"源已安装 + 该窗口没被 LoopSourceFallback 判为不可用",
-     *   否则播放的是普通整曲,任何折返/标记都是谎言。
-     *
-     * 为什么不能只看 [loopRuntime] 的窗口:窗口由显式意图 + song_loop 行算出,
-     * 预算/格式/构建失败时它仍然在(用户以为在循环),但源根本没接管(00027)。
-     */
-    private fun loopEngaged(window: LoopWindow?, currentSongId: Long?): Boolean {
-        if (window == null || currentSongId == null || window.songId != currentSongId) return false
-        if (!MainPlayerRouting.current.useSourceForMainPlayer) return true
-        if (LoopSourceFallback.isUnavailable(currentSongId, window)) return false
-        return LoopSourceRuntime.isInstalledFor(window)
-    }
 
     // Queue entries carry their own unique mediaId so they stay distinguishable from
     // base-playlist copies of the same song while they sit in the player timeline.
@@ -343,14 +322,11 @@ class MusicViewModel @Inject constructor(
             //
             // 00027:窗口可能只是"用户意图"——预算/格式/构建失败时 SOURCE 根本没生效,
             // 实际播放的是普通整曲。此时必须原样透传,否则进度条折回 A、耳朵却在尾奏。
-            val loopWindow = loopRuntime.window.value
             val currentSongIdLong = currentPlayingSongId?.toLongOrNull()
-            val sourceLoopActive = loopEngaged(loopWindow, currentSongIdLong)
+            val loopClaim = LoopClaimStore.claimFor(currentSongIdLong)
             val safePosition = foldDisplayPositionMs(
                 rawPositionMs = controller.currentPosition.coerceAtLeast(0L),
-                window = loopWindow,
-                currentSongId = currentSongIdLong,
-                sourceLoopActive = sourceLoopActive,
+                claim = loopClaim,
             )
             
             // Capture all controller state before any async operation
