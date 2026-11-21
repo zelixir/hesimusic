@@ -179,6 +179,51 @@ class LoopSessionPlayerTest {
         assertEquals(0L, LoopSessionProjection.durationUs(null, 225_000_000L))
     }
 
+    @Test
+    fun `session duration reports the full song for every source fallback reason`() {
+        // 00027/P0-2：五种回退原因都令 sourceUnavailable=true，但对外时长仍必须是整曲，
+        // 不能把 SOURCE 时间轴的 TIME_UNSET(-1) 透传给通知/锁屏/车机。
+        val fullUs = 225_000_000L
+        for (reason in LoopSourceFallback.Reason.values()) {
+            val ms = LoopSessionProjection.sessionDurationMs(
+                sourceUnavailable = true,
+                window = window,
+                fullDurationUs = fullUs,
+                nativeDurationMs = -1L,
+            )
+            assertEquals("reason=" + reason, 225_000L, ms)
+        }
+        // 源生效时同样报整曲（整曲时长与循环窗口无关）。
+        assertEquals(
+            225_000L,
+            LoopSessionProjection.sessionDurationMs(
+                sourceUnavailable = false,
+                window = window,
+                fullDurationUs = fullUs,
+                nativeDurationMs = -1L,
+            ),
+        )
+        // 整曲未知（无窗口 / duration=0）才透传原生值。
+        assertEquals(
+            -1L,
+            LoopSessionProjection.sessionDurationMs(
+                sourceUnavailable = true,
+                window = null,
+                fullDurationUs = 0L,
+                nativeDurationMs = -1L,
+            ),
+        )
+        assertEquals(
+            300_000L,
+            LoopSessionProjection.sessionDurationMs(
+                sourceUnavailable = false,
+                window = null,
+                fullDurationUs = 0L,
+                nativeDurationMs = 300_000L,
+            ),
+        )
+    }
+
     // ---------------------------------------------------------------- 6. 重放期 vs 非重放期
 
     @Test

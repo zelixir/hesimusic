@@ -65,6 +65,28 @@ object LoopSessionProjection {
         if (window != null && fullDurationUs > 0L) fullDurationUs else 0L
 
     /**
+     * MediaSession / 通知 / 锁屏看到的对外时长（ms）。
+     *
+     * 00027/P0-2：SOURCE 回退（预检五因或 build-failed）时原生 duration 可能是
+     * `C.TIME_UNSET`（SOURCE 时间轴故意不声明时长），直接透传会让通知/车机显示 -1。
+     * 只要整曲时长已知就一律报整曲——**不因 sourceUnavailable 短路**；只有整曲未知
+     * （window=null 或 fullDurationUs<=0）才透传原生值。
+     *
+     * @param nativeDurationMs `super.getDuration()` 的值（可为负 = TIME_UNSET）
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun sessionDurationMs(
+        sourceUnavailable: Boolean,
+        window: LoopWindow?,
+        fullDurationUs: Long,
+        nativeDurationMs: Long,
+    ): Long {
+        // sourceUnavailable 在这里**不参与短路**：回退时反而更需要整曲时长。
+        val projectedUs = durationUs(window, fullDurationUs)
+        return if (projectedUs > 0L) projectedUs / US_PER_MS else nativeDurationMs
+    }
+
+    /**
      * 展示位置 → 引擎原始 seek 位置（µs）。
      *
      * 只做**位置映射**(见 [LoopPosition.rawSeekUs]),不再叠加任何"降级预卷":

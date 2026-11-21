@@ -101,16 +101,15 @@ class LoopSessionPlayer(
 
     override fun getDuration(): Long {
         val snapshot = snapshot()
-        if (snapshot.sourceUnavailable) return super.getDuration()
-        val window = snapshot.window ?: return super.getDuration()
-        val projectedUs = projectedDurationUs(window)
-        // SOURCE 播放器原生 duration 是 TIME_UNSET；对外仍返回整曲时长。
-        if (isSourceItem(snapshot) && projectedUs > 0L) {
-            return projectedUs / LoopSessionProjection.US_PER_MS
-        }
-        // 防御性覆盖：不裁剪时播放器原生时长本来就等于整曲时长，这里只是保证「窗口生效期间
-        // 对外时长恒为整曲」（整曲时长未知时返回 0 → 透传原生值）
-        return if (projectedUs > 0L) projectedUs / LoopSessionProjection.US_PER_MS else super.getDuration()
+        // 00027/P0-2：回退时也要报整曲时长。SOURCE 时间轴的原生 duration 恒为 TIME_UNSET，
+        // 若在这里按 sourceUnavailable 提前 return，通知/锁屏/车机会拿到 -1。
+        // 只要 coordinator 已写入整曲时长，就一律用整曲覆盖原生值。
+        return LoopSessionProjection.sessionDurationMs(
+            sourceUnavailable = snapshot.sourceUnavailable,
+            window = snapshot.window,
+            fullDurationUs = audio.fullDurationUs,
+            nativeDurationMs = super.getDuration(),
+        )
     }
 
     override fun seekTo(positionMs: Long) {
