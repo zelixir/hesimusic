@@ -41,13 +41,42 @@ object LoopSourceRuntime {
 
     fun reset() = onReleased()
 
-    /** 该窗口是否正被 SOURCE 接管（窗口 A/B 必须一致）。 */
+    /**
+     * 该窗口是否正被 SOURCE 接管（窗口 A/B 必须一致）。
+     *
+     * 00027：**接管登记不等于源真的建成**。factory 在 createMediaSource 内回退 delegate 时
+     * 仍会走到协调器的 onInstalled；所以这里必须再查一次失败登记，否则 build-failed 会被
+     * 当成 source 生效，UI/调试口继续折返。窗口 A/B 相同且未登记不可用才算接管。
+     */
     fun isInstalledFor(window: LoopWindow?): Boolean {
         val installed = installedWindow ?: return false
-        if (window == null) return false
-        return installed.songId == window.songId &&
-            installed.loopStartUs == window.loopStartUs &&
-            installed.loopEndUs == window.loopEndUs
+        if (window == null || !window.isValid()) return false
+        if (installed.songId != window.songId ||
+            installed.loopStartUs != window.loopStartUs ||
+            installed.loopEndUs != window.loopEndUs
+        ) {
+            return false
+        }
+        return !LoopSourceFallback.isUnavailable(window.songId, window)
+    }
+
+    /**
+     * 只有工厂**确实建成**循环源时才登记接管（P0-1）。
+     *
+     * @param buildUnavailable 工厂/预检已经判定该窗口不可用（`LoopSourceFallback.isUnavailable`）
+     * @return true = 已登记接管；false = 保持未接管，调用方必须按普通播放处理
+     */
+    fun onInstalledIfBuilt(
+        window: LoopWindow,
+        filePath: String,
+        buildUnavailable: Boolean,
+    ): Boolean {
+        if (buildUnavailable || LoopSourceFallback.isUnavailable(window.songId, window)) {
+            onReleased()
+            return false
+        }
+        onInstalled(window, filePath)
+        return true
     }
 
     /**
@@ -78,6 +107,10 @@ object LoopSourceRuntime {
 
     private fun matches(window: LoopWindow?, currentSongId: Long?): Boolean {
         if (window == null || !window.isValid()) return false
+        // build-failed 的窗口仍可能留在 installedWindow：engine/loopPath 绝不能报 loop。
+        if (window == installedWindow && LoopSourceFallback.isUnavailable(window.songId, window)) {
+            return false
+        }
         // 冷启动时 debug 的 Player.Listener 缓存可能还没拿到当前歌：窗口本身已由协调器按当前歌算出。
         return currentSongId == null || currentSongId == window.songId
     }

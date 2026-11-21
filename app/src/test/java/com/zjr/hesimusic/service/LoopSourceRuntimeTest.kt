@@ -25,6 +25,7 @@ class LoopSourceRuntimeTest {
     @After
     fun tearDown() {
         LoopSourceRuntime.reset()
+        LoopSourceFallback.reset()
     }
 
     // ---------------------------------------------------------------- 接管状态
@@ -51,6 +52,57 @@ class LoopSourceRuntimeTest {
         LoopSourceRuntime.onReleased()
         assertNull(LoopSourceRuntime.installedWindow)
         assertNull(LoopSourceRuntime.installedPath)
+    }
+
+    @Test
+    fun `build failure makes an installed window unusable`() {
+        // 00027/P0-1：factory 回退 delegate 后协调器即使调用过 onInstalled，
+        // 也不能再把该窗口当作 SOURCE 生效。
+        LoopSourceRuntime.onInstalled(window, "/music/40169.flac")
+        assertTrue(LoopSourceRuntime.isInstalledFor(window))
+
+        LoopSourceFallback.reportBuildFailure(
+            songId = window.songId,
+            window = window,
+            throwable = IllegalStateException("decoder init failed"),
+        )
+
+        assertFalse(LoopSourceRuntime.isInstalledFor(window))
+        // 默认 sourceWindow = installedWindow：engine/loopPath 必须立刻退回普通播放。
+        assertEquals("exo", LoopSourceRuntime.engineName(null, currentSongId = window.songId))
+        assertEquals("none", LoopSourceRuntime.loopPath(null, currentSongId = window.songId))
+    }
+
+    @Test
+    fun `onInstalledIfBuilt refuses a window the factory already failed`() {
+        LoopSourceFallback.reportBuildFailure(
+            songId = window.songId,
+            window = window,
+            throwable = IllegalStateException("decoder init failed"),
+        )
+
+        assertFalse(
+            LoopSourceRuntime.onInstalledIfBuilt(
+                window = window,
+                filePath = "/music/40169.flac",
+                buildUnavailable = false,
+            ),
+        )
+        assertNull(LoopSourceRuntime.installedWindow)
+        assertFalse(LoopSourceRuntime.isInstalledFor(window))
+    }
+
+    @Test
+    fun `onInstalledIfBuilt registers a genuinely built window`() {
+        assertTrue(
+            LoopSourceRuntime.onInstalledIfBuilt(
+                window = window,
+                filePath = "/music/40169.flac",
+                buildUnavailable = false,
+            ),
+        )
+        assertEquals(window, LoopSourceRuntime.installedWindow)
+        assertTrue(LoopSourceRuntime.isInstalledFor(window))
     }
 
     // ---------------------------------------------------------------- engine 口径

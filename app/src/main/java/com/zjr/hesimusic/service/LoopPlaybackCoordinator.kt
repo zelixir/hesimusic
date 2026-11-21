@@ -795,12 +795,29 @@ class LoopPlaybackCoordinator @Inject constructor(
             " " + describeItem(current) + " -> " + describeItem(tagged))
         rebuildQueueItem(player, plan.index, tagged, plan.seekTimelineMs)
         val loopCountAfter = LoopAwareMediaSourceFactory.loopSourcesCreated()
+        val builtByFactory = loopCountAfter > loopCountBefore
         Log.i(TAG_PERF, "source rebuild after index=" + player.currentMediaItemIndex +
             " item=" + describeItem(player.currentMediaItem) +
             " loopSources=" + loopCountAfter + " delta=" + (loopCountAfter - loopCountBefore))
-        if (loopCountAfter == loopCountBefore) {
-            // 整表重建一定走 createMediaSources；这里只留一条可检索的诊断（工厂没被命中）。
-            Log.w(TAG_PERF, "source rebuild did not create a loop source index=" + plan.index)
+        // 00027/P0-1：只有工厂**确实建成**循环源、且该窗口没有被登记为不可用，才宣布接管。
+        // 工厂在 createMediaSource 内发现格式/构建失败时会回退 delegate 并登记 BUILD_FAILED；
+        // 此时 item 虽然仍带 tag，实际播放的是普通文件源——绝不能 onInstalled。
+        val buildUnavailable = LoopSourceFallback.isUnavailable(w.songId, w)
+        if (!builtByFactory || buildUnavailable) {
+            LoopSourceRuntime.onReleased()
+            audio.tapWindow = null
+            Log.w(
+                TAG_PERF,
+                "source install skipped built=" + builtByFactory +
+                    " unavailable=" + buildUnavailable +
+                    " reason=" + (LoopSourceFallback.reasonOf(w.songId)?.logName ?: "none") +
+                    " songId=" + w.songId + " window=" + w +
+                    " index=" + plan.index + " reasonEvt=" + reason,
+            )
+            // 当前 item 是 tagged 但实际为普通文件源（或根本没建源）：立即把 T 折回媒体时间
+            // 并恢复原 item，消灭“tag 在、声音普通、UI 仍可能折返”的中间态。
+            restoreSourceItem(player, plan.index, plan.tag, reason + "-source-not-built")
+            return
         }
         // 整表重建把播放器复位成 IDLE：必须 prepare 才会加载新源；play 只在进入前就要求播放时补
         // （pwr=false 时绝不偷播）。
