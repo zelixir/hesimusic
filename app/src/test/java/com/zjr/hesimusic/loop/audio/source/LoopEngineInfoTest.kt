@@ -67,6 +67,23 @@ class LoopEngineInfoTest {
     }
 
     @Test
+    fun `every fallback reason reports plain playback`() {
+        for (reason in LoopSourceFallback.Reason.values()) {
+            val info = LoopEngineInfo.of(
+                sourceMode = true,
+                mainEnabled = true,
+                bandBytes = 7_680_000L,
+                fallbackReason = reason.logName,
+                claimActive = false,
+            )
+            assertEquals("reason=" + reason, LoopEngineInfo.ENGINE_NONE, info.engine)
+            assertEquals("reason=" + reason, "none", info.loopPath)
+            assertEquals("reason=" + reason, 0L, info.bandBytes)
+            assertEquals("reason=" + reason, reason.logName, info.fallbackReason)
+        }
+    }
+
+    @Test
     fun `runtime fallback reason is visible through current`() {
         LoopSourceMode.current = LoopSourceMode.SOURCE
         LoopSourceMainPlayer.setEnabledForTest(true)
