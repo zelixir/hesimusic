@@ -73,7 +73,7 @@
 
 import { check, measureMainFrames, msToSamples, pendingCheck, round, sleep, waitFor } from "./harness";
 import type { Check, FrameMeasurement, SongInfo, State } from "./harness";
-import { circularDelta, createProber, defaultWorkDir, PEAK_MATCH, PEAK_SUSPECT } from "./content-probe";
+import { circularDelta, createProber, defaultWorkDir, PEAK_SUSPECT } from "./content-probe";
 import type { ProbeResult, ProbeStack, TapCapture } from "./content-probe";
 import type { Scenario, ScenarioCtx, ScenarioRunResult } from "./scenarios";
 
@@ -990,6 +990,9 @@ const s60: Scenario = {
         "s 尾=" + round((ml.durationMs - ml.bMs) / 1000, 1) + "s",
     );
 
+    // 先退出循环并离开结果页：预览页的 tap 与主播放器共用同一个 WAV，
+    // 不挪走预览会把两路 PCM 混在一起，内容真值直接失效。
+    await ctx.resetForMain();
     const play = await ensureSongPlaying(ctx, song.id);
     checks.push(check("前置:开始播放", play.ok, play.detail));
     if (!play.ok) return { checks, summary: "前置失败: " + play.detail, pendingDecision: pending };
@@ -1116,6 +1119,9 @@ const s61: Scenario = {
     ctx.evidence.step("setup", { covers: "lead 断言 2/7 + 批次需求 1/8", songId: song.id, aMs: ml.aMs, bMs: ml.bMs, L: ml.L, durationMs: ml.durationMs, songPath: ml.songPath });
     ctx.log("前奏->loop #" + song.id + " A=" + ml.aMs + " B=" + ml.bMs + " L=" + round(ml.L / 1000, 1) + "s");
 
+    // 先退出循环并离开结果页：预览页的 tap 与主播放器共用同一个 WAV，
+    // 不挪走预览会把两路 PCM 混在一起，内容真值直接失效。
+    await ctx.resetForMain();
     const play = await ensureSongPlaying(ctx, song.id);
     checks.push(check("前置:开始播放", play.ok, play.detail));
     if (!play.ok) return { checks, summary: "前置失败: " + play.detail, pendingDecision: pending };
@@ -1248,6 +1254,9 @@ const s62: Scenario = {
     ctx.evidence.step("setup", { covers: "lead 断言 3/7 + 批次需求 3/4/8", songId: song.id, aMs: ml.aMs, bMs: ml.bMs, L: ml.L, durationMs: ml.durationMs, songPath: ml.songPath });
     ctx.log("B 处折返 #" + song.id + " A=" + ml.aMs + " B=" + ml.bMs + " L=" + round(ml.L / 1000, 1) + "s");
 
+    // 先退出循环并离开结果页：预览页的 tap 与主播放器共用同一个 WAV，
+    // 不挪走预览会把两路 PCM 混在一起，内容真值直接失效。
+    await ctx.resetForMain();
     const play = await ensureSongPlaying(ctx, song.id);
     checks.push(check("前置:开始播放", play.ok, play.detail));
     if (!play.ok) return { checks, summary: "前置失败: " + play.detail, pendingDecision: pending };
@@ -1350,6 +1359,9 @@ const s63: Scenario = {
     ctx.evidence.step("setup", { covers: "lead 断言 4/7 + 批次需求 2/8", songId: song.id, aMs: ml.aMs, bMs: ml.bMs, L: ml.L, durationMs: ml.durationMs, songPath: ml.songPath });
     ctx.log("seek 到 A 之前 #" + song.id + " A=" + ml.aMs + " B=" + ml.bMs);
 
+    // 先退出循环并离开结果页：预览页的 tap 与主播放器共用同一个 WAV，
+    // 不挪走预览会把两路 PCM 混在一起，内容真值直接失效。
+    await ctx.resetForMain();
     const play = await ensureSongPlaying(ctx, song.id);
     checks.push(check("前置:开始播放", play.ok, play.detail));
     if (!play.ok) return { checks, summary: "前置失败: " + play.detail, pendingDecision: pending };
@@ -1443,6 +1455,9 @@ const s64: Scenario = {
     ctx.evidence.step("setup", { covers: "lead 断言 5/7 + 批次需求 3/8", songId: song.id, aMs: ml.aMs, bMs: ml.bMs, L: ml.L, durationMs: ml.durationMs, songPath: ml.songPath });
     ctx.log("seek 到尾奏 #" + song.id + " A=" + ml.aMs + " B=" + ml.bMs + " 尾=" + round((ml.durationMs - ml.bMs) / 1000, 1) + "s");
 
+    // 先退出循环并离开结果页：预览页的 tap 与主播放器共用同一个 WAV，
+    // 不挪走预览会把两路 PCM 混在一起，内容真值直接失效。
+    await ctx.resetForMain();
     const play = await ensureSongPlaying(ctx, song.id);
     checks.push(check("前置:开始播放", play.ok, play.detail));
     if (!play.ok) return { checks, summary: "前置失败: " + play.detail, pendingDecision: pending };
@@ -1548,6 +1563,9 @@ const s65: Scenario = {
     ctx.evidence.step("setup", { covers: "lead 断言 5/7 + 批次需求 4/8", songId: song.id, aMs: ml.aMs, bMs: ml.bMs, L: ml.L, durationMs: ml.durationMs, songPath: ml.songPath });
     ctx.log("尾奏到曲末 #" + song.id + " A=" + ml.aMs + " B=" + ml.bMs + " duration=" + Math.round(ml.durationMs / 1000) + "s");
 
+    // 先退出循环并离开结果页：预览页的 tap 与主播放器共用同一个 WAV，
+    // 不挪走预览会把两路 PCM 混在一起，内容真值直接失效。
+    await ctx.resetForMain();
     const play = await ensureSongPlaying(ctx, song.id);
     checks.push(check("前置:开始播放", play.ok, play.detail));
     if (!play.ok) return { checks, summary: "前置失败: " + play.detail, pendingDecision: pending };
@@ -1684,6 +1702,9 @@ const s66: Scenario = {
     ctx.evidence.step("setup", { covers: "lead 断言 6/7 + 批次需求 3/8", songId: song.id, aMs: ml.aMs, bMs: ml.bMs, L: ml.L, durationMs: ml.durationMs, songPath: ml.songPath });
     ctx.log("tail->loop #" + song.id + " A=" + ml.aMs + " B=" + ml.bMs + " L=" + round(ml.L / 1000, 1) + "s");
 
+    // 先退出循环并离开结果页：预览页的 tap 与主播放器共用同一个 WAV，
+    // 不挪走预览会把两路 PCM 混在一起，内容真值直接失效。
+    await ctx.resetForMain();
     const play = await ensureSongPlaying(ctx, song.id);
     checks.push(check("前置:开始播放", play.ok, play.detail));
     if (!play.ok) return { checks, summary: "前置失败: " + play.detail, pendingDecision: pending };
@@ -1813,6 +1834,9 @@ const s67: Scenario = {
     ctx.evidence.step("setup", { covers: "批次需求 5/8", songId: song.id, aMs: ml.aMs, bMs: ml.bMs, L: ml.L, durationMs: ml.durationMs, songPath: ml.songPath });
     ctx.log("退出循环 #" + song.id + " A=" + ml.aMs + " B=" + ml.bMs + " L=" + round(ml.L / 1000, 1) + "s");
 
+    // 先退出循环并离开结果页：预览页的 tap 与主播放器共用同一个 WAV，
+    // 不挪走预览会把两路 PCM 混在一起，内容真值直接失效。
+    await ctx.resetForMain();
     const play = await ensureSongPlaying(ctx, song.id);
     checks.push(check("前置:开始播放", play.ok, play.detail));
     if (!play.ok) return { checks, summary: "前置失败: " + play.detail, pendingDecision: pending };
@@ -1825,10 +1849,6 @@ const s67: Scenario = {
     const seekMid = await seekMain(ctx, mid, { tolMs: 1200 });
     checks.push(check("循环中 seek 到环带中段落点=请求值", seekMid.ok, seekMid.detail));
     await sleep(700);
-    const stBefore = await ctx.api.state();
-    const displayBefore = Number(stBefore.playback.positionMs);
-    const prBefore = phaseOf(stBefore, ml);
-    checks.push(phaseCheck("退出前 phase=loop", prBefore, "loop", displayBefore));
     const audioBefore = await measureMainFrames(ctx.api, 1200, ml.sampleRate);
     checks.push(audioCheck("退出前出声", audioBefore, 0.8));
 
@@ -1839,6 +1859,12 @@ const s67: Scenario = {
     const probeBand = await probeMain(ctx, stack, ml, { label: "退出前环带内容", offsets: resolvedOffsets(off) });
     checks.push(probeBand.check);
 
+    // 退出前最后一眼：displayBefore 必须紧贴 /loop/exit（中间隔着几秒的探测会让"位置≈退出前 display"失真）。
+    const stBefore = await ctx.api.state();
+    const displayBefore = Number(stBefore.playback.positionMs);
+    const prBefore = phaseOf(stBefore, ml);
+    checks.push(phaseCheck("退出前 phase=loop", prBefore, "loop", displayBefore));
+
     const exit = await exitLoopHard(ctx, 10000);
     checks.push(check("退出循环(engine≠loop,window=null)", exit.ok && exit.attempted, exit.detail));
     await sleep(700);
@@ -1846,7 +1872,15 @@ const s67: Scenario = {
     const posAfter = Number(stAfter.playback.positionMs);
     const prAfter = phaseOf(stAfter, ml);
     const tEquivalent = displayBefore - ml.aMs;
-    checks.push(check("退出后不再声称循环(phase=null)", prAfter.phase === null, "phase=" + (prAfter.phase ?? "null") + " 口径=" + prAfter.source + " window=" + (loopWindowOf(stAfter) ? "still" : "null")));
+    checks.push(
+      check(
+        "退出后不再声称循环(window=null, claimActive=false)",
+        loopWindowOf(stAfter) === null && !claimActiveOf(stAfter),
+        "window=" + (loopWindowOf(stAfter) ? "still" : "null") + " claimActive=" + claimActiveOf(stAfter) +
+          " phase=" + (prAfter.phase ?? "null") + " 口径=" + prAfter.source,
+        loopWindowOf(stAfter) !== null || claimActiveOf(stAfter) ? "退出后仍声称在循环：窗口/claim 没有清干净" : undefined,
+      ),
+    );
     checks.push(
       check(
         "退出后位置=媒体时间轴(≈退出前 display)",
@@ -1880,7 +1914,16 @@ const s67: Scenario = {
         Number.isFinite(posMedia) && Math.abs(posMedia - beforeATarget) > 1500 ? "退出后仍到不了 A 之前：媒体时间轴没恢复" : undefined,
       ),
     );
-    checks.push(phaseCheck("A 之前(退出循环后)没有循环相位", { phase: phaseOf(stMedia, ml).phase, source: phaseOf(stMedia, ml).source, raw: phaseOf(stMedia, ml).raw }, "prelude", posMedia));
+    const prMedia = phaseOf(stMedia, ml);
+    checks.push(
+      check(
+        "A 之前(退出循环后)按媒体时间解释位置",
+        loopWindowOf(stMedia) === null && !claimActiveOf(stMedia),
+        "window=" + (loopWindowOf(stMedia) ? "still" : "null") + " claimActive=" + claimActiveOf(stMedia) +
+          " phase=" + (prMedia.phase ?? "null") + " pos=" + Math.round(posMedia) + "ms",
+        loopWindowOf(stMedia) !== null || claimActiveOf(stMedia) ? "退出循环后窗口仍在：位置会被再次折返" : undefined,
+      ),
+    );
     const probeMedia = await probeMain(ctx, stack, ml, { label: "A 之前内容(媒体时间轴)", offsets: resolvedOffsets(off), wide: true });
     checks.push(probeMedia.check);
     checks.push(contentAtRequestCheck("A 之前内容=请求位置的内容(±2s)", probeMedia, beforeATarget, seekBefore.landing, ml));
@@ -1938,6 +1981,9 @@ const s68: Scenario = {
     const off: Offsets = { band: null, file: null };
     ctx.evidence.step("setup", { covers: "批次需求 6/8", songId: song.id, aMs: base.aMs, bMs: base.bMs, L: base.L, durationMs: base.durationMs, songPath: base.songPath });
     try {
+      // 先退出循环并离开结果页：预览页的 tap 与主播放器共用同一个 WAV，
+      // 不挪走预览会把两路 PCM 混在一起，内容真值直接失效。
+      await ctx.resetForMain();
       const play = await ensureSongPlaying(ctx, song.id);
       checks.push(check("前置:开始播放", play.ok, play.detail));
       if (!play.ok) return { checks, summary: "前置失败: " + play.detail, pendingDecision: pending };
@@ -2085,6 +2131,9 @@ const s69: Scenario = {
     const off: Offsets = { band: null, file: null };
     ctx.evidence.step("setup", { covers: "批次需求 7/8", songId: song.id, aMs: base.aMs, bMs: base.bMs, L: base.L, durationMs: base.durationMs, songPath: base.songPath });
     try {
+      // 先退出循环并离开结果页：预览页的 tap 与主播放器共用同一个 WAV，
+      // 不挪走预览会把两路 PCM 混在一起，内容真值直接失效。
+      await ctx.resetForMain();
       const play = await ensureSongPlaying(ctx, song.id);
       checks.push(check("前置:开始播放", play.ok, play.detail));
       if (!play.ok) return { checks, summary: "前置失败: " + play.detail, pendingDecision: pending };
@@ -2259,6 +2308,9 @@ const s70: Scenario = {
     ctx.evidence.step("setup", { covers: "lead 断言 1/7 + 批次需求 1/8", songId: song.id, aMs: ml.aMs, bMs: ml.bMs, L: ml.L, durationMs: ml.durationMs, songPath: ml.songPath });
     ctx.log("进循环瞬间 #" + song.id + " A=" + ml.aMs + " B=" + ml.bMs);
 
+    // 先退出循环并离开结果页：预览页的 tap 与主播放器共用同一个 WAV，
+    // 不挪走预览会把两路 PCM 混在一起，内容真值直接失效。
+    await ctx.resetForMain();
     const play = await ensureSongPlaying(ctx, song.id);
     checks.push(check("前置:开始播放", play.ok, play.detail));
     if (!play.ok) return { checks, summary: "前置失败: " + play.detail, pendingDecision: pending };
@@ -2280,11 +2332,11 @@ const s70: Scenario = {
     const st = await ctx.api.state();
     const pos = Number(st.playback.positionMs);
     const pr = phaseOf(st, ml);
-    const nearA = monitor.samplesNear(ml.aMs, 1000);
-    const maxPosAfter = Math.max(
-      0,
-      ...monitor.series.filter((s) => s.posMs != null).map((s) => Number(s.posMs)),
-    );
+    // 只统计"进循环之后"的采样：进循环前播放头本来就在环带中段，不能拿来判"进循环后越过环带"。
+    const afterEnter = monitor.series.filter((s) => s.engine === "loop");
+    const nearA = afterEnter.filter((s) => s.posMs != null && Math.abs(Number(s.posMs) - ml.aMs) <= 1000);
+    const maxPosAfter = Math.max(0, ...afterEnter.filter((s) => s.posMs != null).map((s) => Number(s.posMs)));
+    const seriesForEvidence = afterEnter.filter((_, i) => i % 5 === 0);
     checks.push(
       check(
         "进循环后位置=前奏起点(0..5s)",
@@ -2297,7 +2349,7 @@ const s70: Scenario = {
       check(
         "监控窗内从未跳到 A(±1s)",
         nearA.length === 0,
-        "落在 A±1s 的采样 " + nearA.length + "/" + monitor.series.length + " 个 (A=" + ml.aMs + "ms, 采样 80ms)",
+        "落在 A±1s 的采样 " + nearA.length + "/" + afterEnter.length + " 个（进循环后） (A=" + ml.aMs + "ms, 采样 80ms)",
         nearA.length > 0 ? "00028 现场：进循环瞬间播放头跳到 A（瞬时跳变，低频轮询抓不到）" : undefined,
       ),
     );
@@ -2324,9 +2376,10 @@ const s70: Scenario = {
       phaseAfter: pr.phase,
       phaseSource: pr.source,
       samples: monitor.series.length,
+      samplesAfterEnter: afterEnter.length,
       samplesNearA: nearA.map((s) => ({ atMs: s.atMs, posMs: s.posMs })),
       maxPosAfter,
-      series: monitor.series.filter((_, i) => i % 5 === 0),
+      series: seriesForEvidence,
       facts: factsOf(st, ml),
       verdict: probe.result?.verdict ?? "unavailable",
       peak: probe.result?.peak ?? null,
@@ -2336,7 +2389,7 @@ const s70: Scenario = {
       checks,
       summary:
         "进循环: pos " + Math.round(posBefore) + " -> " + Math.round(pos) + "ms; A±1s 采样=" + nearA.length +
-        "/" + monitor.series.length + "; phase=" + (pr.phase ?? "?") + "; 内容=" + (probe.result?.verdict ?? "?"),
+        "/" + afterEnter.length + "; phase=" + (pr.phase ?? "?") + "; 内容=" + (probe.result?.verdict ?? "?"),
       pendingDecision: pending,
     };
   },

@@ -25,6 +25,7 @@ import { ENV_SCENARIOS } from "./scenarios-env";
 import { INTERACTION_SCENARIOS } from "./scenarios-interaction";
 import { CONTENT_SCENARIOS } from "./scenarios-content";
 import { GAP_SCENARIOS } from "./scenarios-gaps";
+import { PRELUDE_SCENARIOS } from "./scenarios-prelude";
 import type {
   Adb,
   Api,
@@ -1826,7 +1827,9 @@ export const SCENARIOS: Scenario[] = [
   ...INTERACTION_SCENARIOS,
   ...CONTENT_SCENARIOS,
   ...GAP_SCENARIOS,
+  ...PRELUDE_SCENARIOS,
 ];
+
 
 
 

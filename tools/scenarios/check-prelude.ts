@@ -25,7 +25,13 @@ import { readFileSync } from "node:fs";
 import * as path from "node:path";
 
 import { SCENARIOS } from "./scenarios";
-import { PRELUDE_META, PRELUDE_SCENARIOS, PRELUDE_SCENARIO_IDS, PRELUDE_UI_SCENARIO_IDS } from "./scenarios-prelude";
+import {
+  PRELUDE_META,
+  PRELUDE_SCENARIOS,
+  PRELUDE_SCENARIO_IDS,
+  PRELUDE_UI_SCENARIO_IDS,
+  setPreludePullForTest,
+} from "./scenarios-prelude";
 import type { PreludeScenarioMeta } from "./scenarios-prelude";
 import type { Scenario } from "./scenarios";
 
@@ -573,12 +579,448 @@ function selftest(): boolean {
   return ok;
 }
 
+
+// ---------------------------------------------------------------------------
+// 离线干跑：用内存里的"模拟世界"把 11 条场景真跑一遍（不碰设备、不发真 HTTP）
+//
+// 目的：静态检查抓不到运行时问题（字段名、控制流、等待条件、finally 还原）。
+// 两个世界：
+//   fixed —— lead 定稿语义（prelude/loop/tail 三段、进循环从 0、seek 区外可达、曲末回 0）
+//   old   —— 00028 未修（进循环/改窗口落到 A、区外 seek 夹回 [A,B)、tail 不可达、无 phase 字段）
+// 断言：
+//   fixed：所有非 PENDING 判据必须全部 PASS（证明判据不误杀正确行为）；
+//   old  ：meta.expectedFailBeforeFix=true 的场景必须至少 1 条非 PENDING FAIL（证明判据抓得到 00028），
+//          其余场景必须 0 条 FAIL（证明判据不误伤正常路径）。
+// 内容真值探针在干跑里走 PENDING（tap 取回函数返回 null）：内容判据由 content-probe.ts 的
+// --selftest 单独自证；干跑负责证明"每条场景都真的走到了内容真值调用点"。
+// ---------------------------------------------------------------------------
+
+type WorldMode = "fixed" | "old";
+
+interface MockSong {
+  id: number;
+  title: string;
+  artist: string;
+  path: string;
+  durationMs: number;
+  sampleRate: number;
+  hasLoop: boolean;
+  loopConfirmed: boolean;
+  loopStartMs: number;
+  loopEndMs: number;
+}
+
+class MockWorld {
+  readonly songId = 900001;
+  readonly title = "Mock Prelude Song";
+  readonly path = "/sdcard/Music/mock-prelude.mp3";
+  readonly sampleRate = 44100;
+  durationMs = 38000;
+  aMs = 12000;
+  bMs = 29000;
+
+  mode: "free" | "loop" = "free";
+  pos = 0;
+  playing = false;
+  repeatOne = false;
+  frames = 0;
+  private lastTick = Date.now();
+
+  constructor(private worldMode: WorldMode) {}
+
+  private tick(): void {
+    const now = Date.now();
+    if (!this.playing) {
+      this.lastTick = now;
+      return;
+    }
+    const dt = now - this.lastTick;
+    this.lastTick = now;
+    if (dt <= 0) return;
+    this.frames += Math.round((dt * this.sampleRate) / 1000);
+    const before = this.pos;
+    let p = before + dt;
+    if (this.mode === "loop") {
+      // 环带内到 B 折回 A（新旧实现都有这条）
+      if (before >= this.aMs && before < this.bMs && p >= this.bMs) {
+        p = this.aMs + (p - this.bMs);
+      } else if (before > this.bMs && p >= this.durationMs) {
+        // tail 播到曲末回 0（只有定稿语义可达）
+        p = p - this.durationMs;
+      }
+    } else if (p >= this.durationMs) {
+      p = this.repeatOne ? p - this.durationMs : this.durationMs;
+      if (!this.repeatOne) this.playing = false;
+    }
+    this.pos = p;
+  }
+
+  phase(): "prelude" | "loop" | "tail" {
+    if (this.pos < this.aMs) return "prelude";
+    if (this.pos <= this.bMs) return "loop";
+    return "tail";
+  }
+
+  loopJson(): any {
+    if (this.mode !== "loop") {
+      return {
+        engine: "exo",
+        loopPath: "none",
+        window: null,
+        claimed: false,
+        claimActive: false,
+        sourceActive: false,
+        isReplaying: false,
+        seamCount: 0,
+        degradeCount: 0,
+      };
+    }
+    const base: any = {
+      engine: "loop",
+      loopPath: "source",
+      window: { songId: this.songId, loopStartUs: this.aMs * 1000, loopEndUs: this.bMs * 1000 },
+      claimed: true,
+      claimActive: true,
+      sourceActive: true,
+      isReplaying: false,
+      seamCount: 0,
+      degradeCount: 0,
+      intent: { songId: this.songId },
+    };
+    // old 世界模拟"实现尚未提供 phase 字段"：phaseOf 会退回按 display 推断。
+    if (this.worldMode === "fixed") base.phase = this.phase();
+    return base;
+  }
+
+  stateJson(): any {
+    return {
+      screen: "about",
+      analysis: { phase: "idle", analyzing: false, songId: null },
+      playback: {
+        songId: this.songId,
+        title: this.title,
+        artist: "mock",
+        repeatMode: this.repeatOne ? "one" : "off",
+        shuffle: false,
+        playing: this.playing,
+        playWhenReady: this.playing,
+        // old 世界：显示层永远折返进 [A,B)（00028 现场）
+        positionMs:
+          this.mode === "loop" && this.worldMode === "old"
+            ? this.aMs + (((Math.round(this.pos) - this.aMs) % (this.bMs - this.aMs)) + (this.bMs - this.aMs)) % (this.bMs - this.aMs)
+            : Math.round(this.pos),
+        durationMs: this.durationMs,
+        buffering: false,
+        playbackState: this.playing ? "ready" : "paused",
+        queueSize: 1,
+        currentIndex: 0,
+        engine: this.mode === "loop" ? "loop" : "exo",
+        connected: true,
+      },
+      loop: this.loopJson(),
+      invariants: [],
+      invariantProbe: {
+        atMs: Date.now(),
+        writtenFrames: this.frames,
+        routeSource: true,
+        playWhenReady: this.playing,
+      },
+      library: { songs: 1 },
+      server: { version: "mock", connected: true },
+      at: Date.now(),
+    };
+  }
+
+  songJson(): any {
+    return {
+      id: this.songId,
+      title: this.title,
+      artist: "mock",
+      durationMs: this.durationMs,
+      path: this.path,
+      sampleRate: this.sampleRate,
+      hasLoop: true,
+      loopConfirmed: true,
+      loopStartMs: this.aMs,
+      loopEndMs: this.bMs,
+      loopStartSamples: Math.round((this.aMs * this.sampleRate) / 1000),
+      loopEndSamples: Math.round((this.bMs * this.sampleRate) / 1000),
+    };
+  }
+
+  songCard(): MockSong {
+    return {
+      id: this.songId,
+      title: this.title,
+      artist: "mock",
+      path: this.path,
+      durationMs: this.durationMs,
+      sampleRate: this.sampleRate,
+      hasLoop: true,
+      loopConfirmed: true,
+      loopStartMs: this.aMs,
+      loopEndMs: this.bMs,
+    };
+  }
+
+  private clampTarget(ms: number): number {
+    return Math.max(0, Math.min(this.durationMs - 200, Math.round(ms)));
+  }
+
+  seek(ms: number): number {
+    const target = this.clampTarget(ms);
+    if (this.mode === "loop" && this.worldMode === "old") {
+      // 旧实现：sourceTimelineUsForDisplay 把目标 clamp 进 [A, B-1]
+      const clamped = Math.max(this.aMs, Math.min(this.bMs - 1, target));
+      this.pos = clamped;
+      return clamped;
+    }
+    this.pos = target;
+    return target;
+  }
+
+  enterLoop(): void {
+    this.mode = "loop";
+    this.repeatOne = true;
+    // 旧实现：进循环落点 = A（前奏不参与）；定稿语义：从曲首 0 起播前奏
+    this.pos = this.worldMode === "old" ? this.aMs : 0;
+    this.playing = true;
+  }
+
+  confirm(aSamples: number, bSamples: number): void {
+    this.aMs = Math.max(0, Math.round((aSamples * 1000) / this.sampleRate));
+    this.bMs = Math.round((bSamples * 1000) / this.sampleRate);
+    this.mode = "loop";
+    this.repeatOne = true;
+    this.playing = true;
+    this.pos = this.worldMode === "old" ? this.aMs : 0;
+  }
+}
+
+class MockApi {
+  constructor(private w: MockWorld) {}
+
+  async get(apiPath: string): Promise<{ status: number; json: any; text: string }> {
+    if (apiPath === "/state") {
+      this.w["tick"]();
+      return { status: 200, json: this.w.stateJson(), text: "" };
+    }
+    if (apiPath.startsWith("/song/")) return { status: 200, json: this.w.songJson(), text: "" };
+    if (apiPath.startsWith("/library/songs")) {
+      return { status: 200, json: { songs: [this.w.songCard()], total: 1 }, text: "" };
+    }
+    if (apiPath === "/debug/preview") return { status: 409, json: { error: "preview-not-attached" }, text: "" };
+    return { status: 404, json: null, text: "not found: " + apiPath };
+  }
+
+  async post(apiPath: string, body?: any): Promise<{ status: number; json: any; text: string }> {
+    const b = body ?? {};
+    this.w["tick"]();
+    switch (apiPath) {
+      case "/player/play": {
+        this.w.mode = "free";
+        this.w.pos = 0;
+        this.w.playing = true;
+        this.w.repeatOne = b.repeatOne === true;
+        return { status: 200, json: { playing: true, songId: this.w.songId }, text: "" };
+      }
+      case "/player/seek": {
+        const applied = this.w.seek(Number(b.positionMs ?? 0));
+        return { status: 200, json: { positionMs: applied, requestedMs: Number(b.positionMs ?? 0) }, text: "" };
+      }
+      case "/loop/enter": {
+        this.w.enterLoop();
+        return {
+          status: 200,
+          json: { entered: true, songId: this.w.songId, previousRepeatMode: 0, playing: true },
+          text: "",
+        };
+      }
+      case "/loop/exit": {
+        this.w.mode = "free";
+        return { status: 200, json: { exited: true }, text: "" };
+      }
+      case "/confirm": {
+        this.w.confirm(Number(b.aSamples ?? 0), Number(b.bSamples ?? 0));
+        return {
+          status: 200,
+          json: { saved: true, changed: true, confirmed: true, songId: this.w.songId, autoPlay: true },
+          text: "",
+        };
+      }
+      case "/debug/tap": {
+        return b.path
+          ? { status: 200, json: { tapping: true, path: String(b.path) }, text: "" }
+          : { status: 200, json: { tapping: false, path: null }, text: "" };
+      }
+      case "/player/repeat": {
+        this.w.repeatOne = String(b.mode ?? "") === "one";
+        return { status: 200, json: { repeatMode: this.w.repeatOne ? "one" : "off" }, text: "" };
+      }
+      default:
+        return { status: 404, json: null, text: "not found: " + apiPath };
+    }
+  }
+
+  async state(): Promise<any> {
+    this.w["tick"]();
+    return this.w.stateJson();
+  }
+
+  async songsAll(): Promise<MockSong[]> {
+    return [this.w.songCard()];
+  }
+
+  async song(_songId: number): Promise<any> {
+    return this.w.songJson();
+  }
+}
+
+interface DryRow {
+  id: number;
+  name: string;
+  ms: number;
+  checks: number;
+  fails: string[];
+  pending: number;
+  error: string | null;
+}
+
+function mockCtx(world: MockWorld, api: MockApi, tmpDir: string): any {
+  const card = world.songCard();
+  return {
+    cfg: {
+      device: "mock",
+      base: "http://mock",
+      forwardLocal: 1,
+      forwardRemote: 2,
+      outDir: tmpDir,
+      adbExe: "adb",
+      pkg: "com.zjr.hesimusic.mock",
+      scenarioTimeoutMs: 600000,
+    },
+    api,
+    adb: { fileExists: async () => true },
+    songs: { primary: card, short: card, unconfirmed: card, long: null },
+    evidence: { step: () => undefined, note: () => undefined },
+    log: () => undefined,
+    sampleRateFor: () => world.sampleRate,
+    resetForMain: async () => undefined,
+    ensureLoopPage: async () => {
+      throw new Error("mock: UI 不可用（本组不应依赖 UI）");
+    },
+    previewReady: async () => {
+      throw new Error("mock: 预览不可用（本组不应依赖预览页）");
+    },
+    previewSeek: async () => {
+      throw new Error("mock: 预览 seek 不可用（本组不应依赖预览页）");
+    },
+    uiTap: async () => {
+      throw new Error("mock: UI tap 不可用（本组不应依赖 UI）");
+    },
+    uiLabels: () => [],
+    foregroundForeground: async () => true,
+  };
+}
+
+async function dryRun(worldMode: WorldMode): Promise<number> {
+  const { rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const tmpDir = path.join(os.tmpdir(), "dsh-prelude-dry-" + worldMode + "-" + process.pid);
+  setPreludePullForTest(async () => null);
+
+  const rows: DryRow[] = [];
+  console.log("");
+  console.log("== 离线干跑（模拟世界：" + worldMode + "）==");
+  console.log("语义: " + (worldMode === "fixed" ? "定稿(prelude/loop/tail,进循环从 0,tail 曲末回 0)" : "00028 未修(进循环/改窗口落 A,区外 seek 夹回,tail 不可达,无 phase 字段)"));
+  console.log("");
+
+  for (const s of PRELUDE_SCENARIOS) {
+    const world = new MockWorld(worldMode);
+    const api = new MockApi(world);
+    const ctx = mockCtx(world, api, tmpDir);
+    const t0 = Date.now();
+    let checks: any[] = [];
+    let error: string | null = null;
+    try {
+      const res: any = await Promise.race([
+        s.run(ctx),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("dry-run 超时 " + (s.timeoutMs ?? 600000) + "ms")), s.timeoutMs ?? 600000),
+        ),
+      ]);
+      checks = res?.checks ?? [];
+    } catch (e: any) {
+      error = String(e?.message ?? e);
+    }
+    const ms = Date.now() - t0;
+    const fails = checks.filter((c: any) => c && c.pass === false && c.pending !== true).map((c: any) => c.name);
+    const pending = checks.filter((c: any) => c && c.pending === true).length;
+    rows.push({ id: s.id, name: s.name, ms, checks: checks.length, fails, pending, error });
+    console.log(
+      "  #" + String(s.id).padEnd(3) + " " + String(Math.round(ms / 1000)).padStart(3) + "s  " +
+        "判据 " + String(checks.length).padStart(2) + " / PENDING " + String(pending).padStart(2) +
+        " / 非pending失败 " + fails.length +
+        (error ? "  [异常] " + error : ""),
+    );
+    if (fails.length > 0) console.log("       FAIL: " + fails.slice(0, 6).join(" | ") + (fails.length > 6 ? " …" : ""));
+  }
+
+  let problems = 0;
+  console.log("");
+  for (const r of rows) {
+    const meta = PRELUDE_META[r.id];
+    if (r.error) {
+      console.log("x #" + r.id + " 执行异常: " + r.error);
+      problems += 1;
+      continue;
+    }
+    if (worldMode === "fixed") {
+      if (r.fails.length > 0) {
+        console.log("x #" + r.id + " 定稿语义下不应有非 PENDING 失败: " + r.fails.slice(0, 8).join(" | "));
+        problems += 1;
+      }
+      if (r.pending === 0) {
+        console.log("x #" + r.id + " 没有产生任何内容真值 PENDING：说明没走到 probeMain 调用点");
+        problems += 1;
+      }
+    } else {
+      const expectFail = meta?.expectedFailBeforeFix === true;
+      if (expectFail && r.fails.length === 0) {
+        console.log("x #" + r.id + " 在 00028 未修世界下没有 FAIL：判据抓不到这个 bug（meta.expectedFailBeforeFix=true）");
+        problems += 1;
+      }
+      if (!expectFail && r.fails.length > 0) {
+        console.log("x #" + r.id + " 在 00028 未修世界下不应 FAIL（判据误伤正常路径）: " + r.fails.slice(0, 8).join(" | "));
+        problems += 1;
+      }
+    }
+  }
+
+  try {
+    rmSync(tmpDir, { recursive: true, force: true });
+  } catch {
+    // 临时目录清理失败不影响结论
+  }
+  console.log("");
+  console.log(
+    (problems === 0 ? "干跑通过" : "干跑失败") + "（" + worldMode + "，世界 " + rows.length + " 条场景，" +
+      (worldMode === "fixed" ? "要求非 PENDING 全 PASS + 每条都走到内容真值" : "要求预期场景 FAIL、其余 PASS") + "）",
+  );
+  return problems === 0 ? 0 : 1;
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
-function main(): number {
+async function main(): Promise<number> {
   const argv = process.argv.slice(2);
+  if (argv.includes("--dry-run") || argv.includes("--dry-run-broken")) {
+    const fixedCode = argv.includes("--dry-run") ? await dryRun("fixed") : 0;
+    const brokenCode = argv.includes("--dry-run-broken") ? await dryRun("old") : 0;
+    return Math.max(fixedCode, brokenCode);
+  }
   if (argv.includes("--selftest")) {
     const ok = selftest();
     if (!ok) {
@@ -622,10 +1064,10 @@ function main(): number {
   return issues.some((i) => i.level === "FAIL") ? 1 : 0;
 }
 
-try {
-  process.exit(main());
-} catch (e: any) {
-  console.error("自检脚本异常: " + (e?.message ?? e));
-  if (e?.stack) console.error(String(e.stack).split("\n").slice(0, 6).join("\n"));
-  process.exit(2);
-}
+main()
+  .then((code) => process.exit(code))
+  .catch((e: any) => {
+    console.error("自检脚本异常: " + (e?.message ?? e));
+    if (e?.stack) console.error(String(e.stack).split("\n").slice(0, 6).join("\n"));
+    process.exit(2);
+  });
