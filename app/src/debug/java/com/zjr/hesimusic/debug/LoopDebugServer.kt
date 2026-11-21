@@ -196,21 +196,22 @@ object LoopDebugServer {
                 val claim = claimFor(truthSongId)
                 val window = claim.window ?: audioWindow ?: runtime.window.value
                 val routeSource = MainPlayerRouting.current.coordinatorReplacesItem
-                val engine = if (claim.claimActive) "loop" else "exo"
+                val claimFields = claim.debugFields()
+                val engine = if (claimFields.claimActive) "loop" else "exo"
                 val loopPath = when {
-                    claim.claimActive && routeSource -> "source"
-                    claim.claimActive -> "m3"
+                    claimFields.claimActive && routeSource -> "source"
+                    claimFields.claimActive -> "m3"
                     else -> "none"
                 }
-                val sourceUnavailable = claim.window != null && !claim.sourceActive
+                val sourceUnavailable = claim.window != null && !claimFields.sourceActive
                 return linkedMapOf(
                     "engine" to engine,
                     "loopPath" to loopPath,
                     // 00027 一等字段：意图是否声称循环 / 源是否真的在环回 / 原因。
-                    "claimed" to (claim.window != null),
-                    "claimActive" to claim.claimActive,
-                    "sourceActive" to claim.sourceActive,
-                    "claimReason" to (if (claim.sourceActive) null else claim.fallbackReason?.logName),
+                    "claimed" to claimFields.claimed,
+                    "claimActive" to claimFields.claimActive,
+                    "sourceActive" to claimFields.sourceActive,
+                    "claimReason" to claimFields.claimReason,
                     "window" to window?.let {
                         linkedMapOf(
                             "songId" to it.songId,
@@ -219,10 +220,10 @@ object LoopDebugServer {
                         )
                     },
                     // 兼容旧字段：display 是否应该折返，以 claim 真值为准（不是 window 非空）。
-                    "sourceAvailable" to claim.sourceActive,
+                    "sourceAvailable" to claimFields.sourceActive,
                     "sourceUnavailable" to sourceUnavailable,
                     "fallbackReason" to (
-                        claim.fallbackReason?.logName
+                        claimFields.claimReason
                             ?: LoopSourceFallback.latestReason()?.logName
                         ),
                     "bandBytes" to LoopEngineInfo.lastRecordedBandBytes(),

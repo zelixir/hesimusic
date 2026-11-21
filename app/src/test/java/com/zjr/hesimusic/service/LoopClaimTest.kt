@@ -190,6 +190,27 @@ class LoopClaimTest {
     }
 
     @Test
+    fun `debug fields expose the claim truth for every fallback reason`() {
+        for (reason in LoopSourceFallback.Reason.values()) {
+            val fields = LoopClaim(
+                songId = songId,
+                window = window,
+                sourceActive = false,
+                fallbackReason = reason,
+            ).debugFields()
+            assertTrue("reason=" + reason, fields.claimed)
+            assertFalse("reason=" + reason, fields.claimActive)
+            assertFalse("reason=" + reason, fields.sourceActive)
+            assertEquals("reason=" + reason, reason.logName, fields.claimReason)
+        }
+        val active = LoopClaim(songId, window, sourceActive = true).debugFields()
+        assertTrue(active.claimed)
+        assertTrue(active.claimActive)
+        assertTrue(active.sourceActive)
+        assertNull(active.claimReason)
+    }
+
+    @Test
     fun `store serves the installed provider and invalidates on demand`() {
         assertFalse(LoopClaimStore.isInstalled())
         assertFalse(LoopClaimStore.claimFor(songId).claimActive)

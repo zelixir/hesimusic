@@ -69,6 +69,17 @@ data class LoopClaim(
      */
     fun durationUs(fullDurationUs: Long): Long = fullDurationUs.coerceAtLeast(0L)
 
+    /**
+     * /state.loop 的一等字段契约（claim 真值）。claimed = “有意图窗口”，
+     * claimActive = 对用户生效，sourceActive = 源真的在环回，claimReason = 未生效原因。
+     */
+    fun debugFields(): LoopClaimDebugFields = LoopClaimDebugFields(
+        claimed = window != null,
+        claimActive = claimActive,
+        sourceActive = sourceActive,
+        claimReason = if (sourceActive) null else fallbackReason?.logName,
+    )
+
     companion object {
         /** 毫秒转微秒前的安全上限，避免 Long 乘法溢出（与旧 foldDisplayPositionMs 同口径）。 */
         private const val MAX_FOLDABLE_POSITION_MS: Long = Long.MAX_VALUE / 1_000L
@@ -78,6 +89,14 @@ data class LoopClaim(
             LoopClaim(songId = songId, window = null, sourceActive = false)
     }
 }
+
+/** /state.loop 的 claim 字段（纯数据，便于单测与序列化）。 */
+data class LoopClaimDebugFields(
+    val claimed: Boolean,
+    val claimActive: Boolean,
+    val sourceActive: Boolean,
+    val claimReason: String?,
+)
 
 /**
  * 唯一的 claim 解析器：输入“意图窗口 + 音频窗口 + 已安装窗口 + 路线 + 回退登记”，
