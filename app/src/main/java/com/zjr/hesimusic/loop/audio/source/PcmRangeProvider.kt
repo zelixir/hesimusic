@@ -17,6 +17,16 @@ fun interface PcmRangeProvider {
     fun decode(startUs: Long, endUs: Long): Pcm16Segment
 }
 
+/**
+ * 可选能力：请求越过真实音频末尾时返回短段而不是抛异常。
+ *
+ * 只有 [PcmDecoderRangeProvider] 实现；尾奏/前奏的最后一块用它避免"逐级缩短终点"的
+ * 试错解码（那会在曲末冻结数百毫秒）。其它测试/合成 provider 不实现时走旧的严格解码。
+ */
+interface PcmShortRangeProvider : PcmRangeProvider {
+    fun decodeAllowShort(startUs: Long, endUs: Long): Pcm16Segment
+}
+
 /** 音轨格式（循环数据源只需要采样率与声道数）。 */
 data class PcmTrackFormat(
     val sampleRate: Int,

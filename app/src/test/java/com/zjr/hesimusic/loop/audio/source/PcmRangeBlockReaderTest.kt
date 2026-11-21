@@ -192,6 +192,58 @@ class PcmRangeBlockReaderTest {
         reader.release()
     }
 
+    /** 模拟 PcmDecoderRangeProvider 的 allowShort 能力；统计每类解码调用次数。 */
+    private class CountingShortProvider(
+        private val sr: Int,
+        private val ch: Int,
+        private val realEndUs: Long,
+    ) : PcmShortRangeProvider {
+        var strictCalls = 0
+        var shortCalls = 0
+
+        override fun decode(startUs: Long, endUs: Long): Pcm16Segment {
+            strictCalls += 1
+            if (endUs > realEndUs) throw IllegalStateException("short")
+            return slice(startUs, minOf(endUs, realEndUs))
+        }
+
+        override fun decodeAllowShort(startUs: Long, endUs: Long): Pcm16Segment {
+            shortCalls += 1
+            return slice(startUs, minOf(endUs, realEndUs))
+        }
+
+        private fun slice(startUs: Long, endUs: Long): Pcm16Segment {
+            val startFrame = Pcm16Frames.frameAtOrAfterUs(startUs, sr)
+            val frames = Pcm16Frames.framesForUsCeil((endUs - startUs).coerceAtLeast(0L), sr)
+            val data = ByteArray((frames * ch * 2).toInt())
+            var offset = 0
+            for (i in 0 until frames.toInt()) {
+                val value = (startFrame + i).toShort()
+                repeat(ch) {
+                    data[offset++] = (value.toInt() and 0xff).toByte()
+                    data[offset++] = ((value.toInt() shr 8) and 0xff).toByte()
+                }
+            }
+            return Pcm16Segment(data, sr, ch, frames)
+        }
+    }
+
+    @Test
+    fun lastBlockUsesOneAllowShortDecodeAndStaysWithinBudget() {
+        val provider = CountingShortProvider(sr, ch, realEndUs = 3_900_000L)
+        val reader = PcmRangeBlockReader(provider, 0L, 4_000L, sr, ch)
+        val started = System.nanoTime()
+        val data = readExactly(reader, 4_000)
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+        assertEquals("only the last block may use allowShort", 1, provider.shortCalls)
+        assertEquals("last block must not fall back to trial decodes", 3, provider.strictCalls)
+        assertTrue("last block budget must be <100ms, was " + elapsedMs + "ms", elapsedMs < 100L)
+        assertEquals(3_899, sampleAt(data, 3_899))
+        for (i in 3_900 until 4_000) assertEquals(0, sampleAt(data, i))
+        assertTrue(reader.error() == null)
+        reader.release()
+    }
+
     @Test
     fun decodeErrorsDoNotHangAndExposeLastError() {
         // 非最后块的真失败必须暴露；最后块的"越过媒体结尾"才允许静音补齐。

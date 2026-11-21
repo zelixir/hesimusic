@@ -239,8 +239,21 @@ class PcmRangeBlockReader(
         val startedMs = System.currentTimeMillis()
         var segment: Pcm16Segment? = null
         var error: String? = null
+        val isLastBlock = block == blockCount - 1
+        val shortProvider = if (isLastBlock) provider as? PcmShortRangeProvider else null
         try {
-            segment = provider.decode(decodeStartUs, endUs)
+            segment = if (shortProvider != null) {
+                // 一次解码拿到真实可用帧（越过编码末尾不再抛异常）；不足部分下面静音补齐。
+                val short = shortProvider.decodeAllowShort(decodeStartUs, endUs)
+                logger(
+                    "PcmRangeBlock last block allowShort block=" + block +
+                        " frames=" + short.frames + " expected=" + expectedFrames +
+                        " ms=" + (System.currentTimeMillis() - startedMs),
+                )
+                short
+            } else {
+                provider.decode(decodeStartUs, endUs)
+            }
         } catch (t: Throwable) {
             error = "decode block " + block + " [" + startUs + "," + endUs + ") failed: " +
                 (t.message ?: t.javaClass.simpleName)

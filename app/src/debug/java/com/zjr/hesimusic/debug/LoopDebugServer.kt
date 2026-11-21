@@ -227,26 +227,23 @@ object LoopDebugServer {
                 }
                 // 同一份权威快照同时输出 T / 本地偏移 / display / phase，方便真机一眼定位
                 // "T 在哪个区间、display 折到哪、phase 为什么是这个"。
-                val runtimeMatches = claim.window != null &&
-                    LoopPlaybackPhaseRuntime.window == claim.window &&
-                    (claim.songId == null || LoopPlaybackPhaseRuntime.songId == claim.songId)
-                val runtimeTimelineUs = if (runtimeMatches) LoopPlaybackPhaseRuntime.timelineUs else null
-                val runtimeLocalTimelineUs = if (runtimeMatches) {
-                    LoopPlaybackPhaseRuntime.localTimelineUs()
-                } else {
-                    null
-                }
-                val runtimeDisplayUs = if (runtimeMatches) LoopPlaybackPhaseRuntime.displayUs else null
+                val phaseSnapshot = LoopPlaybackPhaseRuntime.current
+                val runtimeMatches = phaseSnapshot != null && claim.window != null &&
+                    phaseSnapshot.window == claim.window &&
+                    (claim.songId == null || phaseSnapshot.songId == claim.songId)
+                val runtimeTimelineUs = if (runtimeMatches) phaseSnapshot!!.timelineUs else null
+                val runtimeLocalTimelineUs = if (runtimeMatches) phaseSnapshot!!.localTimelineUs else null
+                val runtimeDisplayUs = if (runtimeMatches) phaseSnapshot!!.displayUs else null
                 val timelinePhase = if (runtimeMatches) {
                     LoopWholeTimeline.phaseOfTimelineUs(
-                        LoopPlaybackPhaseRuntime.timelineUs,
+                        phaseSnapshot!!.timelineUs,
                         claim.window,
-                        LoopPlaybackPhaseRuntime.fullDurationUs,
+                        phaseSnapshot.fullDurationUs,
                     )?.wire
                 } else {
                     null
                 }
-                val runtimePhase = if (runtimeMatches) LoopPlaybackPhaseRuntime.phase?.wire else null
+                val runtimePhase = if (runtimeMatches) phaseSnapshot!!.phase?.wire else null
                 // T 与 display 必须一致；优先用 T 的 phase 做诊断（若两者不一致，
                 // timelinePhase 会暴露 T 落在哪个区间，runtimePhase 暴露 display 的判定）。
                 val effectivePhase = timelinePhase ?: phase

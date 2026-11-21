@@ -100,6 +100,7 @@ object RingBandSource {
                 endFrameExclusive = timeline.durationFrames,
                 sampleRate = timeline.sampleRate,
                 channels = timeline.channels,
+                prefetchBlocks = 4,
                 prefetchOnInit = false,
                 logger = logger,
             )

@@ -274,6 +274,28 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
             }
         }
 
+    /**
+     * 同 [decodePcm16Range]，但允许返回"短于请求区间"的段（到尾/最后一个编码样本为止）。
+     *
+     * 播放链的尾奏/前奏按需块读取用：容器时长可能比实际音频晚几十~几百毫秒，
+     * 若按严格帧数抛异常，调用方只能靠试错缩短区间，尾块会冻结数百毫秒。
+     * 这里一次解码就返回真实可用帧，调用方按需静音补齐。
+     *
+     * 只在 **区间终点越过真实音频末尾** 时允许短；正常区间仍与严格版完全一致。
+     */
+    suspend fun decodePcm16RangeAllowShort(
+        path: String,
+        startUs: Long,
+        endUs: Long,
+    ): Pcm16Segment = withContext(Dispatchers.Default) {
+        if (startUs < 0L) throw LoopException("区间起点非法")
+        if (endUs <= startUs) throw LoopException("区间长度非法")
+        if (endUs - startUs > MAX_PCM16_RANGE_US) throw LoopException("区间过长")
+        withBackgroundPriority {
+            decodePcm16Internal(path, startUs, endUs = endUs, allowShort = true)
+        }
+    }
+
     /** 兼容入口：整段解码 = 一次范围解码（[decodePcm16Range]）。 */
     suspend fun decodePcm16(path: String, startUs: Long, endUs: Long): Pcm16Segment =
         decodePcm16Range(path, startUs, endUs)
@@ -410,6 +432,7 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
         keepFromStart: Boolean = false,
         alignToNearest: Boolean = false,
         keepStartAdjust: Long = 0L,
+        allowShort: Boolean = false,
     ): Pcm16Segment {
         val decodeStartMs = System.currentTimeMillis()
         val extractor = MediaExtractor()
@@ -609,6 +632,16 @@ class PcmDecoder @Inject constructor(@ApplicationContext private val context: Co
             }
             if (targetFrames <= 0L) throw LoopException("解码结果为空")
             if (keptFrames < targetFrames) {
+                if (allowShort) {
+                    // 尾/前奏块：返回真实可用帧（可能为 0），由调用方静音补齐。
+                    val bytes = (keptFrames * bytesPerFrame).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                    return Pcm16Segment(
+                        data = if (bytes > 0) out!!.copyOf(bytes) else ByteArray(0),
+                        sampleRate = sampleRate,
+                        channels = channels,
+                        frames = keptFrames,
+                    )
+                }
                 throw LoopException(
                     "环缓冲解码不足: 需要 " + targetFrames + " 帧,实际 " + keptFrames + " 帧",
                 )

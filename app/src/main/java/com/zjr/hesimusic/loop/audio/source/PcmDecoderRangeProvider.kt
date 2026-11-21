@@ -14,9 +14,14 @@ import kotlinx.coroutines.runBlocking
 class PcmDecoderRangeProvider(
     private val decoder: PcmDecoder,
     val path: String,
-) : PcmRangeProvider {
+) : PcmShortRangeProvider {
 
     override fun decode(startUs: Long, endUs: Long): Pcm16Segment = runBlocking {
         decoder.decodePcm16Range(path, startUs, endUs)
+    }
+
+    /** 尾/前奏最后一块：一次解码拿真实可用帧，不因越过编码末尾抛异常。 */
+    override fun decodeAllowShort(startUs: Long, endUs: Long): Pcm16Segment = runBlocking {
+        decoder.decodePcm16RangeAllowShort(path, startUs, endUs)
     }
 }

@@ -53,6 +53,9 @@ class RingBandExtractor(
     private var activeElapsedMs = 0L
     private var lastActiveClockMs = -1L
 
+    /** 上一次 read 因"源没数据"返回 null 的时刻；用于量曲末冻结（尾块解码/补齐）。 */
+    private var noDataSinceMs = -1L
+
     /** 当前数据源时间轴位置（下一帧的 T，µs）；整曲口径下驱动阶段选择。 */
     @Volatile
     private var positionUs = 0L
@@ -207,6 +210,7 @@ class RingBandExtractor(
         queueGuard = false
         var result = readNext(request)
         if (result == null) {
+            if (noDataSinceMs < 0L) noDataSinceMs = clock()
             lastEmitClockMs = -1L
             return Extractor.RESULT_CONTINUE
         }
@@ -307,6 +311,7 @@ class RingBandExtractor(
         if (samples == 1L || samples % 100L == 0L) {
             logger("RingBand read n=" + samples + " frames=" + result.frames)
         }
+        noDataSinceMs = -1L
         return Extractor.RESULT_CONTINUE
     }
 
@@ -398,11 +403,10 @@ class RingBandExtractor(
         val frame = timeline.frameAtTimeline(positionUs)
         if (frame >= timeline.durationFrames) {
             // 已经站在曲末（例如 seek 到 duration）：直接回绕到下一个 epoch 的 0。
+            val frozenMs = freezeMsNow()
             positionUs = timeline.nextEpochStartUs(positionUs)
             loopReaderSynced = false
-            RingBandLog.i(
-                "RingBand tail end -> next epoch prelude positionUs=" + positionUs,
-            )
+            logTailWrap("already-at-end", frozenMs)
             return readPrelude(request)
         }
         if (tail.currentFrame() != frame) tail.seekToFrame(frame)
@@ -421,12 +425,10 @@ class RingBandExtractor(
         if (atEnd) {
             // 源内回绕：T 连续推进到下一个 epoch 起点（display 回到 0），不依赖 EOS/repeat，
             // 因此不会出现 buffering/播放失败，也不会让 claim 掉成 false。
+            val frozenMs = freezeMsNow()
             positionUs = timeline.nextEpochStartUs(positionUs)
             loopReaderSynced = false
-            RingBandLog.i(
-                "RingBand tail end -> next epoch prelude positionUs=" + positionUs +
-                    " durationUs=" + timeline.fullDurationUs,
-            )
+            logTailWrap("last-frame", frozenMs)
         }
         return Next(result.data, result.frames, pts, Long.MIN_VALUE)
     }
@@ -447,6 +449,37 @@ class RingBandExtractor(
     }
 
     private fun framesToUs(frames: Long): Long = frames * 1_000_000L / timeline.sampleRate
+
+    /** 自上次 read 返回"源没数据"以来的毫秒数（曲末冻结观测）。 */
+    private fun freezeMsNow(): Long =
+        if (noDataSinceMs < 0L) 0L else (clock() - noDataSinceMs).coerceAtLeast(0L)
+
+    /**
+     * 回绕瞬间的现场日志：display/timeline/local 三个值 + 冻结毫秒。
+     *
+     * - positionUs 是回绕后的新 epoch 起点（display 应为 0）；
+     * - localUs 是 epoch 内偏移（回绕后≈0）；
+     * - epochStartUs 是新 epoch 的绝对起点。
+     */
+    private fun logTailWrap(reason: String, frozenMs: Long) {
+        val window = com.zjr.hesimusic.loop.LoopWindow(
+            timeline.songId,
+            timeline.loopStartUs,
+            timeline.loopEndUs,
+        )
+        val displayUs = LoopWholeTimeline.displayUs(positionUs, window, timeline.fullDurationUs)
+        val localUs = timeline.localTimelineUs(positionUs)
+        val epochStartUs = timeline.epochStartUs(positionUs)
+        RingBandLog.i(
+            "RingBand tail wrap reason=" + reason +
+                " timelineUs=" + positionUs +
+                " localUs=" + localUs +
+                " epochStartUs=" + epochStartUs +
+                " displayUs=" + displayUs +
+                " frozenMs=" + frozenMs +
+                " durationUs=" + timeline.fullDurationUs,
+        )
+    }
 
     override fun seek(position: Long, timeUs: Long) {
         // 00023 后续的分段计时：请求 → media3 真正调到这里（loading 线程）。
