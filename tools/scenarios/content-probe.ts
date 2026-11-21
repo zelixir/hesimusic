@@ -98,6 +98,12 @@ export interface TapCapture {
   totalFrames: number;
   /** 窗口（末尾 samplesMs）单声道 PCM，已去直流前的原始幅度 [-1,1]。 */
   window: Float32Array;
+  /**
+   * 末尾 samplesMs + 700ms 的 PCM：多窗口搜索用（窗口跨接缝时换一个位置再比一次）。
+   * tail 的最后 samplesMs 就是 window。
+   */
+  tail: Float32Array;
+  tailStartFrame: number;
   windowStartFrame: number;
   windowEndFrame: number;
   windowMs: number;
@@ -166,6 +172,8 @@ export interface ProbeResult {
   driftMs: number | null;
   prominence: number;
   chunks: number;
+  /** 多窗口重试时选中的窗口前移量（0/250/500ms）；非 0 说明原窗口跨了接缝。 */
+  windowShiftMs: number;
   wide: WideMatch[] | null;
   capture: {
     sampleRate: number;
@@ -667,6 +675,33 @@ export function makeAdbPull(cfg: Cfg): (remoteName: string) => Promise<Buffer | 
   };
 }
 
+/**
+ * 挑一个不跨接缝的 tap 窗口起点。
+ *
+ * tap 里的 PCM 是**连续写入**的：环回那一帧之后立刻是 A 的内容。若 300ms 窗口正好跨过
+ * 接缝，窗口里就是「B 末尾 + A 开头」，而参考是按窗口起点切的一段连续内容 —— 峰值会掉到
+ * 0.5~0.9 的 suspect 带里（离线干跑实测 0.789），造成误判。
+ * 这里把窗口挪到接缝之后（优先）或之前，并让调用方据此重算「窗口起点的 display」。
+ */
+export function chooseWindowStart(
+  totalFrames: number,
+  wanted: number,
+  seamFrames: number[],
+  marginFrames = 60,
+): { startFrame: number; avoidedSeam: number | null } {
+  const lastStart = totalFrames - wanted;
+  if (lastStart <= 0) return { startFrame: 0, avoidedSeam: null };
+  const hit = seamFrames
+    .filter((x) => Number.isFinite(x) && x > 0)
+    .find((x) => x > lastStart - marginFrames && x < totalFrames + marginFrames);
+  if (hit == null) return { startFrame: lastStart, avoidedSeam: null };
+  // 接缝在末尾窗口内 -> 窗口整体挪到接缝之前（接缝之后放不下一个完整窗口）。
+  const beforeStart = Math.floor(hit - marginFrames - wanted);
+  if (beforeStart >= 0) return { startFrame: beforeStart, avoidedSeam: hit };
+  // 接缝太靠前（窗口前放不下一个完整窗口）：只能接受跨接缝，由调用方告警。
+  return { startFrame: lastStart, avoidedSeam: hit };
+}
+
 export class ContentProber {
   private seq = 0;
 
@@ -762,9 +797,6 @@ export class ContentProber {
         "tap 只写出 " + info.frames + " 帧(< 需要的 " + wanted + " 帧/" + samplesMs + "ms)：引擎没走 SOURCE 路线或处于暂停",
       );
     }
-    const windowStartFrame = info.frames - wanted;
-    const window = readWavMono(wavBuf, info, windowStartFrame, wanted);
-
     const events: TapEvent[] = [];
     if (jsonlBuf) {
       for (const line of jsonlBuf.toString("utf8").split(/\r?\n/)) {
@@ -780,13 +812,25 @@ export class ContentProber {
       warnings.push("没有 tap 侧车 jsonl(拿不到 seam/flush 事件)");
     }
     const seams = events.filter((e) => e.ev === "seam");
+    const seamFrames = seams.map((e) => Number(e.outFrames)).filter((x) => Number.isFinite(x));
+    const chosen = chooseWindowStart(info.frames, wanted, seamFrames);
+    const windowStartFrame = chosen.startFrame;
+    if (chosen.avoidedSeam != null) {
+      warnings.push("窗口跨接缝(outFrames=" + chosen.avoidedSeam + ")，已挪到 startFrame=" + windowStartFrame);
+    }
+    const window = readWavMono(wavBuf, info, windowStartFrame, wanted);
+    const tailWanted = Math.min(info.frames, wanted + Math.round((0.7 * info.sampleRate)));
+    const tailStartFrame = Math.max(0, info.frames - tailWanted);
+    const tail = readWavMono(wavBuf, info, tailStartFrame, tailWanted);
+
     const flushCount = events.filter((e) => e.ev === "flush").length;
     const configureCount = events.filter((e) => e.ev === "configure").length;
     if (configureCount > 1) {
       warnings.push("tap 期间 configure 出现 " + configureCount + " 次（两个引擎同时写同一文件？结果可能不可信）");
     }
 
-    const windowStartAtMs = t1 - samplesMs;
+    // 窗口起点对应的墙钟：tap 帧按 1x 连续写入，所以「还剩多少帧」≈「距今多少毫秒」。
+    const windowStartAtMs = t1 - ((info.frames - windowStartFrame) * 1000) / info.sampleRate;
     const displayRef = nearestDisplay(displaySamples, windowStartAtMs);
     const displayAtStop = nearestDisplay(displaySamples, t1);
     return {
@@ -797,6 +841,8 @@ export class ContentProber {
       bytesPerFrame: info.bytesPerFrame,
       totalFrames: info.frames,
       window,
+      tail,
+      tailStartFrame,
       windowStartFrame,
       windowEndFrame: info.frames,
       windowMs: (wanted * 1000) / info.sampleRate,
@@ -976,11 +1022,30 @@ export class ContentTruth {
         driftMs: null,
         prominence: 0,
         chunks: 0,
+        windowShiftMs: 0,
         wide: null,
         searched: { fromMs: expected - half, toMs: expected + half, mode },
       };
     }
-    const located = searchChunks(chunks, capture.window, capture.sampleRate, mode, aMs, bMs, expected);
+    // 多窗口搜索：窗口若正好跨接缝（tap 里 B 之后立刻是 A），单窗口峰值会掉进 suspect 带；
+    // 把窗口沿 tap 尾巴往前挪 250/500ms 再比一次（期望位置同步前移），取峰值最高的那个。
+    const shiftsMs = [0, 250, 500];
+    let best: { located: Located; shiftMs: number } | null = null;
+    for (const shiftMs of shiftsMs) {
+      const shiftFrames = Math.round((shiftMs * capture.sampleRate) / 1000);
+      const need = capture.window.length + shiftFrames;
+      if (capture.tail.length < need) continue;
+      const win = capture.tail.subarray(capture.tail.length - need, capture.tail.length - shiftFrames);
+      const loc = searchChunks(chunks, win, capture.sampleRate, mode, aMs, bMs, expected - shiftMs);
+      if (!best || loc.peak > best.located.peak + 1e-6) best = { located: loc, shiftMs };
+    }
+    if (!best) best = { located: searchChunks(chunks, capture.window, capture.sampleRate, mode, aMs, bMs, expected), shiftMs: 0 };
+    const raw = best.located;
+    // 换窗口会让定位结果整体前移 shiftMs：加回去，统一按「原窗口起点」的口径报位置。
+    const located: Located = {
+      ...raw,
+      contentMs: raw.contentMs == null ? null : raw.contentMs + best.shiftMs,
+    };
     const drift =
       located.contentMs == null
         ? null
@@ -1024,6 +1089,7 @@ export class ContentTruth {
       driftMs: drift,
       prominence: located.prominence,
       chunks: located.chunks,
+      windowShiftMs: best.shiftMs,
       wide,
       searched: { fromMs: expected - half, toMs: expected + half, mode },
     };
@@ -1386,6 +1452,8 @@ function makeCapture(
     bytesPerFrame: 2,
     totalFrames: a + n,
     window,
+    tail: window,
+    tailStartFrame: a,
     windowStartFrame: a,
     windowEndFrame: a + n,
     windowMs: samplesMs,
@@ -1465,6 +1533,27 @@ async function selfTest(): Promise<number> {
     const back = resampleLinear(winHigh, 48000, sr);
     const m = nccBest(back, ref, sr);
     ok("重采样往返后仍能定位（峰 > 0.9）", m.peak > 0.9, "peak=" + m.peak.toFixed(4));
+  }
+
+  // ---- 3.5 窗口跨接缝时自动挪开 ----
+  {
+    const wanted = 13230;
+    const total = 44100;
+    const noSeam = chooseWindowStart(total, wanted, []);
+    ok("窗口无接缝:起点=末尾-窗口", noSeam.startFrame === total - wanted && noSeam.avoidedSeam == null, "start=" + noSeam.startFrame);
+    const tailSeam = total - 5000;
+    const midSeam = chooseWindowStart(total, wanted, [tailSeam]);
+    ok(
+      "接缝在末尾窗口内:窗口整体挪到接缝之前",
+      midSeam.avoidedSeam === tailSeam && midSeam.startFrame + wanted <= tailSeam - 60,
+      "start=" + midSeam.startFrame + " end=" + (midSeam.startFrame + wanted) + " seam=" + tailSeam,
+    );
+    const earlySeam = chooseWindowStart(total, wanted, [2000]);
+    ok(
+      "接缝远离末尾窗口:不动窗口(不误挪)",
+      earlySeam.avoidedSeam == null && earlySeam.startFrame === total - wanted,
+      "start=" + earlySeam.startFrame,
+    );
   }
 
   // ---- 4. decode-range 分片：区间过长必须报错（防止 tail 静默截断） ----
@@ -1603,6 +1692,76 @@ async function selfTest(): Promise<number> {
       "环带边界展开（B-200 内容、期望在 A+100）：match 且圆周差 ≈ -300ms",
       res.verdict === "match" && res.peak > 0.95 && Math.abs(Number(res.driftMs) + 300) <= 120,
       "verdict=" + res.verdict + " peak=" + res.peak.toFixed(4) + " drift=" + (res.driftMs == null ? "null" : Math.round(res.driftMs)),
+    );
+  }
+
+  // ---- 8.5 窗口跨接缝：多窗口搜索应换一个不跨接缝的窗口并恢复峰值 ----
+  {
+    const sr2 = sr;
+    const w2: MockWorld = {
+      sr: sr2,
+      file: song,
+      aMs: 10000,
+      bMs: 40000,
+      startWall: Date.now(),
+      startRawMs: 20000,
+      writeAheadMs: 0,
+      behavior: "loop",
+      offsetExtraMs: 0,
+      previewAttached: true,
+    };
+    const monoAt = (u: number, ms: number): Float32Array => {
+      const a = Math.round((u * sr2) / 1000);
+      const n = Math.round((ms * sr2) / 1000);
+      const out = new Float32Array(n);
+      for (let i = 0; i < n; i++) out[i] = song[Math.min(song.length - 1, a + i)] / 32768;
+      return out;
+    };
+    // tail = 800ms(接缝前) + 200ms(接缝后 A 起)；末尾 300ms 窗口 = 100ms 前 + 200ms 后 -> 跨接缝
+    const pre = monoAt(w2.bMs - 800, 800);
+    const post = monoAt(w2.aMs, 200);
+    const tail = new Float32Array(pre.length + post.length);
+    tail.set(pre, 0);
+    tail.set(post, pre.length);
+    const wanted = Math.round((300 * sr2) / 1000);
+    const window = tail.slice(tail.length - wanted);
+    const cap: TapCapture = {
+      wavPath: "(memory-seam)",
+      jsonlPath: null,
+      sampleRate: sr2,
+      channels: 1,
+      bytesPerFrame: 2,
+      totalFrames: tail.length,
+      window,
+      tail,
+      tailStartFrame: 0,
+      windowStartFrame: tail.length - wanted,
+      windowEndFrame: tail.length,
+      windowMs: 300,
+      events: [],
+      seams: [{ t: 0, seq: 1, ev: "seam", outFrames: pre.length }],
+      flushCount: 0,
+      configureCount: 1,
+      displaySamples: [],
+      displayRef: { atMs: Date.now(), displayMs: w2.bMs - 100, playing: true, engine: "SOURCE", state: "READY" },
+      displayAtStop: null,
+      displaySource: "mock",
+      startedAtMs: Date.now(),
+      stoppedAtMs: Date.now(),
+      warnings: [],
+    };
+    const expected = w2.bMs - 100;
+    const res = await stack.truth.probeCapture(cap, {
+      songPath: "/song.mp3",
+      aMs: w2.aMs,
+      bMs: w2.bMs,
+      expectedContentMs: expected,
+      mode: "band",
+    });
+    ok(
+      "窗口跨接缝:多窗口搜索换窗口后峰值恢复(>=0.95)",
+      res.peak >= 0.95 && res.windowShiftMs > 0 && Math.abs(Number(res.driftMs)) <= 120,
+      "peak=" + res.peak.toFixed(3) + " shift=" + res.windowShiftMs + "ms drift=" + (res.driftMs == null ? "null" : Math.round(res.driftMs)),
     );
   }
 

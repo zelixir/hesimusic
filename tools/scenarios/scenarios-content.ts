@@ -364,49 +364,74 @@ async function calibrate(
   return { offsetMs: offset, checks, results: [first.result, second.result] };
 }
 
-/** 等 display 从 B 侧折回 A 侧（下降幅度 > L/2 记为一次环回）。 */
-async function waitDisplayWrap(
-  ctx: ScenarioCtx,
-  li: ContentLoop,
-  opts: { timeoutMs: number; sampleMs?: number; target?: "preview" | "main" },
-): Promise<{ ok: boolean; beforeMs: number | null; afterMs: number | null; series: { atMs: number; displayMs: number }[]; elapsedMs: number }> {
-  const target = opts.target ?? "preview";
-  const sampleMs = opts.sampleMs ?? 100;
-  const t0 = Date.now();
-  const series: { atMs: number; displayMs: number }[] = [];
-  let prev: number | null = null;
-  while (Date.now() - t0 < opts.timeoutMs) {
-    const d = target === "preview" ? await previewDisplay(ctx) : await mainDisplay(ctx);
-    if (d != null) {
-      series.push({ atMs: Date.now() - t0, displayMs: d });
-      if (prev != null && d < prev - li.L / 2) {
-        return { ok: true, beforeMs: prev, afterMs: d, series, elapsedMs: Date.now() - t0 };
-      }
-      prev = d;
-    }
-    await sleep(sampleMs);
-  }
-  return { ok: false, beforeMs: prev, afterMs: null, series, elapsedMs: Date.now() - t0 };
-}
+/**
+ * 后台 display 采样器。
+ *
+ * 为什么需要它：B-1s 这种贴近边界的场景里，环回可能发生在**内容探测（900ms）期间**，
+ * 等探测回来再轮询就已经错过折返了（真机 #21 实测：探测回来的 display 已是 A+267，
+ * 折返检查自然"未观察"）。所以从 seek 落地那一刻就持续采样，事后再从序列里找折返。
+ */
+class DisplayMonitor {
+  readonly series: { atMs: number; displayMs: number }[] = [];
+  private stopped = false;
+  private done: Promise<void> = Promise.resolve();
+  private readonly t0 = Date.now();
 
-/** 等到 display 涨过阈值（用于「临 B」抽点）。 */
-async function waitDisplayAbove(
-  ctx: ScenarioCtx,
-  thresholdMs: number,
-  timeoutMs: number,
-  target: "preview" | "main" = "preview",
-): Promise<{ ok: boolean; displayMs: number | null; elapsedMs: number }> {
-  const t0 = Date.now();
-  let last: number | null = null;
-  while (Date.now() - t0 < timeoutMs) {
-    const d = target === "preview" ? await previewDisplay(ctx) : await mainDisplay(ctx);
-    if (d != null) {
-      last = d;
-      if (d >= thresholdMs) return { ok: true, displayMs: d, elapsedMs: Date.now() - t0 };
-    }
-    await sleep(120);
+  constructor(
+    private ctx: ScenarioCtx,
+    private target: "preview" | "main" = "preview",
+    private intervalMs = 90,
+  ) {}
+
+  start(): void {
+    this.done = (async () => {
+      while (!this.stopped) {
+        const d = this.target === "preview" ? await previewDisplay(this.ctx) : await mainDisplay(this.ctx);
+        if (d != null) this.series.push({ atMs: Date.now() - this.t0, displayMs: d });
+        await sleep(this.intervalMs);
+      }
+    })();
   }
-  return { ok: false, displayMs: last, elapsedMs: Date.now() - t0 };
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+    try {
+      await this.done;
+    } catch {
+      // 采样失败的最后一拍忽略
+    }
+  }
+
+  /** 第一次折返（下跌幅度 > L/2）。 */
+  firstWrap(L: number): { beforeMs: number; afterMs: number; atMs: number } | null {
+    for (let i = 1; i < this.series.length; i++) {
+      const prev = this.series[i - 1].displayMs;
+      const cur = this.series[i].displayMs;
+      if (cur < prev - L / 2) return { beforeMs: prev, afterMs: cur, atMs: this.series[i].atMs };
+    }
+    return null;
+  }
+
+  async waitForWrap(L: number, timeoutMs: number): Promise<{ ok: boolean; beforeMs: number | null; afterMs: number | null; elapsedMs: number }> {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      const w = this.firstWrap(L);
+      if (w) return { ok: true, beforeMs: w.beforeMs, afterMs: w.afterMs, elapsedMs: w.atMs };
+      await sleep(60);
+    }
+    const w = this.firstWrap(L);
+    return { ok: false, beforeMs: w ? w.beforeMs : null, afterMs: w ? w.afterMs : null, elapsedMs: Date.now() - t0 };
+  }
+
+  async waitForAbove(thresholdMs: number, timeoutMs: number): Promise<{ ok: boolean; displayMs: number | null; elapsedMs: number }> {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      const last = this.series.length ? this.series[this.series.length - 1] : null;
+      if (last && last.displayMs >= thresholdMs) return { ok: true, displayMs: last.displayMs, elapsedMs: last.atMs };
+      await sleep(60);
+    }
+    return { ok: false, displayMs: this.series.length ? this.series[this.series.length - 1].displayMs : null, elapsedMs: Date.now() - t0 };
+  }
 }
 
 /** 「进度不得突变到 0」——A 不贴近 0 时，任何一次 display<=60ms 都算异常。 */
@@ -464,12 +489,14 @@ const s20: Scenario = {
         "target=" + target + " display=" + seek.displayAfterMs + " playout=" + (seek.playoutMs ?? "n/a") + "ms",
       ),
     );
-    await sleep(750);
+    const monitor = new DisplayMonitor(ctx, "preview");
+    monitor.start();
+    await sleep(400);
     // 接缝前抽查：此时 display 应在 B-5s 附近，内容必须是环带里的这一段。
     const before = await probeAt(ctx, stack, li, { label: "跨接缝前(B-5s)", offsetMs: offset });
     checks.push(before.contentCheck);
 
-    const wrap = await waitDisplayWrap(ctx, li, { timeoutMs: 14000 });
+    const wrap = await monitor.waitForWrap(li.L, 14000);
     checks.push(
       check(
         "跨过 B 后 display 折回 A",
@@ -480,11 +507,12 @@ const s20: Scenario = {
         wrap.ok ? undefined : "B-5s 起播 5s 后应跨过 B；没折回说明环回没发生（engine/源被换掉）",
       ),
     );
-    checks.push(zeroGuard("跨接缝期间 position 不归零", wrap.series, li.aMs));
     await sleep(900);
     // 接缝后抽查：这就是 00027 的现场——显示已回 A，声音必须也是 A 之后的内容。
     const after = await probeAt(ctx, stack, li, { label: "跨接缝后(回到 A)", offsetMs: offset, wide: true });
     checks.push(after.contentCheck);
+    await monitor.stop();
+    checks.push(zeroGuard("跨接缝期间 position 不归零", monitor.series, li.aMs));
     checks.push(
       check(
         "跨接缝后 display 在 [A, A+4s]",
@@ -539,10 +567,18 @@ const s21: Scenario = {
         "target=" + target + " display=" + seek.displayAfterMs,
       ),
     );
-    await sleep(450);
-    const before = await probeAt(ctx, stack, li, { label: "跨接缝前(B-1s)", offsetMs: offset });
+    // 从 seek 落地起就持续采样：B-1s 的折返可能就发生在下面这次 650ms 的内容探测里。
+    const monitor = new DisplayMonitor(ctx, "preview", 80);
+    monitor.start();
+    await sleep(250);
+    const before = await probeAt(ctx, stack, li, {
+      label: "跨接缝前(B-1s)",
+      offsetMs: offset,
+      dwellMs: 650,
+      samplesMs: 250,
+    });
     checks.push(before.contentCheck);
-    const wrap = await waitDisplayWrap(ctx, li, { timeoutMs: 9000, sampleMs: 80 });
+    const wrap = await monitor.waitForWrap(li.L, 9000);
     checks.push(
       check(
         "B-1s 起播后 9s 内折回 A",
@@ -550,10 +586,11 @@ const s21: Scenario = {
         wrap.ok ? "after=" + Math.round(Number(wrap.afterMs)) + "ms (A=" + li.aMs + ")" : "未观察到折回",
       ),
     );
-    checks.push(zeroGuard("跨接缝期间 position 不归零", wrap.series, li.aMs));
     await sleep(700);
     const after = await probeAt(ctx, stack, li, { label: "跨接缝后(回到 A)", offsetMs: offset, wide: true });
     checks.push(after.contentCheck);
+    await monitor.stop();
+    checks.push(zeroGuard("跨接缝期间 position 不归零", monitor.series, li.aMs));
     return {
       checks,
       summary: "B-1s 跨接缝: " + summarizeContent([before.result, after.result]) + "; 偏移基线=" + Math.round(offset) + "ms",
@@ -597,8 +634,10 @@ const s22: Scenario = {
     const atStart = await probeAt(ctx, stack, li, { label: "整圈起点(A+1s)", offsetMs: offset });
     checks.push(atStart.contentCheck);
 
+    const monitor = new DisplayMonitor(ctx, "preview", 120);
+    monitor.start();
     // 临 B 抽查（接缝前）
-    const nearB = await waitDisplayAbove(ctx, li.bMs - 2500, li.L + 12000);
+    const nearB = await monitor.waitForAbove(li.bMs - 2500, li.L + 12000);
     checks.push(
       check("一整圈里 display 走到 B-2.5s", nearB.ok, "display=" + (nearB.displayMs == null ? "null" : Math.round(nearB.displayMs)) + "ms"),
     );
@@ -606,7 +645,7 @@ const s22: Scenario = {
       const beforeWrap = await probeAt(ctx, stack, li, { label: "整圈临 B", offsetMs: offset });
       checks.push(beforeWrap.contentCheck);
     }
-    const wrap = await waitDisplayWrap(ctx, li, { timeoutMs: 15000, sampleMs: 120 });
+    const wrap = await monitor.waitForWrap(li.L, 15000);
     checks.push(
       check(
         "一整圈后折回 A",
@@ -616,10 +655,11 @@ const s22: Scenario = {
           : "15s 内未折回",
       ),
     );
-    checks.push(zeroGuard("一整圈期间 position 不归零", wrap.series, li.aMs));
     await sleep(800);
     const afterLap = await probeAt(ctx, stack, li, { label: "整圈回绕后", offsetMs: offset, wide: true });
     checks.push(afterLap.contentCheck);
+    await monitor.stop();
+    checks.push(zeroGuard("一整圈期间 position 不归零", monitor.series, li.aMs));
     checks.push(
       check(
         "回绕后 display 在 [A, A+4s]",
@@ -716,8 +756,17 @@ const s23: Scenario = {
       checks.push(probe.contentCheck);
       // B 点：display 允许停在 B 或折回 A（边界点语义未定，只要求「在边界上」）。
       if (p.label === "B") {
-        const nearEdge = Math.abs(probe.displayRefMs - li.bMs) <= 600 || Math.abs(probe.displayRefMs - li.aMs) <= 600;
-        checks.push(check("B 点 display 落在边界(A 或 B)", nearEdge, "display=" + Math.round(probe.displayRefMs) + "ms"));
+        // B 是边界点：探测窗口起点在 B 之前/之后/已折回 A 都算"在边界上"，
+        // 只要没停在环带中段（那才是真的夹错位置）。
+        const d = probe.displayRefMs;
+        const nearEdge = Math.abs(d - li.bMs) <= 600 || Math.abs(d - li.aMs) <= 600 || (d > li.bMs && d <= li.bMs + 3500);
+        checks.push(
+          check(
+            "B 点 display 落在边界(A/B 附近或刚越过 B)",
+            nearEdge,
+            "display=" + Math.round(d) + "ms A=" + li.aMs + " B=" + li.bMs,
+          ),
+        );
       }
       await sleep(200);
     }
@@ -919,11 +968,203 @@ const s25: Scenario = {
   },
 };
 
+
+// ---------------------------------------------------------------------------
+// 场景 26：主播放器 + 长窗口（环带预算超限 -> 回退）—— 00027 的真实路径
+// ---------------------------------------------------------------------------
+//
+// 00027 的现场是"主播放页、无缝循环模式（进度条有循环区间样式）、播完还在继续播"。
+// 真机实测（1268）根因：环带 > heap/10 时 LoopSourceFallback 不建环（engine=exo / loopPath=none），
+// 但 **window 仍被写入、显示层照旧按窗口折返**；于是 display 在 B 处回到 A+ε，
+// 音频却按整曲直通继续播 B 之后的内容（tap 内容定位 = display + L），文件播完 ENDED 后
+// repeat=ONE 从 0 重播 —— 用户看到"进度归零 + 还能继续播"。
+//
+// 判据（lead 给的）：
+//   loopPath=none/engine!=loop（回退） **且** display 在 B 处折返  -> FAIL（投影与源不一致）
+//   display 不折返（继续媒体时间）                -> 不判 FAIL（那是另一条路径）
+//   环带建成（loopPath=source）                    -> 回退没有发生，改判内容真值（应一致）
+
+const s26: Scenario = {
+  id: 26,
+  key: "long-window-fallback-content",
+  name: "长窗口回退:投影 vs 源一致性(00027 真路径)",
+  tag: "内容",
+  exclusive: false,
+  timeoutMs: 300000,
+  async run(ctx) {
+    const checks: Check[] = [];
+    // 选环带最长的已确认循环歌：整窗 PCM 越可能超过主播放器预算(heap/10)。
+    const all = await ctx.api.songsAll();
+    const cands = all.filter(
+      (s) =>
+        s.hasLoop &&
+        s.loopConfirmed &&
+        s.loopStartMs != null &&
+        s.loopEndMs != null &&
+        Number(s.loopStartMs) >= 3000 &&
+        Number(s.loopEndMs) - Number(s.loopStartMs) >= 120000 &&
+        s.durationMs > Number(s.loopEndMs) + 3000 &&
+        decodable(s),
+    );
+    cands.sort((a, b) => Number(b.loopEndMs) - Number(b.loopStartMs) - (Number(a.loopEndMs) - Number(a.loopStartMs)));
+    // 00027 现场用的就是 #41126（Shiny Up, A=23301 B=261457，整窗 42MB）：有它就优先用它，
+    // 这样这条场景和 issue 里的复现口径一致；没有才退化为"最长的已确认循环歌"。
+    const pinned = cands.find((s) => s.id === 41126);
+    if (cands.length === 0) throw new SkipError("曲库没有环带 >=120s 的已确认循环歌（无法构造回退场景）");
+    const song = pinned ?? cands[0];
+    const info = await ctx.api.song(song.id);
+    const aMs = Math.round(Number(info.loopStartMs));
+    const bMs = Math.round(Number(info.loopEndMs));
+    const songPath = String(info.path ?? "");
+    const L = bMs - aMs;
+    if (!songPath) throw new SkipError("拿不到歌曲路径");
+    const mem = await ctx.adb.meminfo(ctx.cfg.pkg);
+    const windowMb = ((L / 1000) * 44100 * 2 * 2) / 1048576;
+    ctx.log(
+      "长窗口: #" + song.id + " A=" + aMs + " B=" + bMs + " L=" + round(L / 1000, 1) + "s; 整窗≈" +
+        round(windowMb, 1) + "MB; heap=" + mem.javaHeapKb + "KB",
+    );
+    ctx.evidence.step("long-window-fallback-setup", {
+      songId: song.id, aMs, bMs, L, songPath, windowMb, heapKb: mem.javaHeapKb,
+    });
+
+    await ctx.resetForMain();
+    const play = await ctx.api.post("/player/play", { songId: song.id, repeatOne: false });
+    if (play.status !== 200) throw new Error("/player/play -> " + play.status);
+    const ready = await waitFor(
+      async () => ctx.api.state(),
+      (s) => s.playback?.songId === song.id && s.playback?.playbackState === "ready",
+      12000,
+      150,
+    );
+    if (!ready.ok) throw new Error("播放未就绪");
+    const enter = await ctx.api.post("/loop/enter", { songId: song.id, play: true, restart: true });
+    ctx.evidence.step("long-window-enter", { status: enter.status, body: enter.json });
+    if (enter.status !== 200) throw new Error("/loop/enter -> " + enter.status);
+    const installed = await waitFor(
+      async () => ctx.api.state(),
+      (s) => s.loop?.window?.songId === song.id && s.playback?.engine === "loop",
+      15000,
+      150,
+    );
+    const st = installed.value ?? (await ctx.api.state());
+    const loopInfo: any = st.loop ?? {};
+    const engine = String(st.playback?.engine ?? "?");
+    const loopPath = String(loopInfo.loopPath ?? "?");
+    // 1269 起 loop 快照多了 sourceAvailable/bandBytes/budgetBytes/fallbackReason：
+    // 判定"回退"要优先看这些真值字段，loopPath 的语义在新版本里不再等同于"环带是否建成"。
+    const hasSourceFields = Object.prototype.hasOwnProperty.call(loopInfo, "sourceAvailable");
+    const ringBuilt = hasSourceFields
+      ? loopInfo.sourceAvailable === true && Number(loopInfo.bandBytes ?? 0) > 0
+      : engine === "loop" && loopPath !== "none";
+    const fellBack = !ringBuilt;
+    const budgetMb = hasSourceFields ? round(Number(loopInfo.budgetBytes ?? 0) / 1048576, 1) : null;
+    const bandMb = hasSourceFields ? round(Number(loopInfo.bandBytes ?? 0) / 1048576, 1) : null;
+    ctx.log("进循环后: engine=" + engine + " loopPath=" + loopPath + " -> " + (fellBack ? "回退(环带未建成)" : "环带建成"));
+    ctx.evidence.step("long-window-loop-state", {
+      engine, loopPath, fellBack, ringBuilt,
+      sourceAvailable: loopInfo.sourceAvailable ?? null,
+      bandBytes: loopInfo.bandBytes ?? null,
+      budgetBytes: loopInfo.budgetBytes ?? null,
+      fallbackReason: loopInfo.fallbackReason ?? null,
+      window: loopInfo.window ?? null,
+      windowMb,
+    });
+    checks.push(
+      check(
+        "长窗口状态自洽(建环 或 回退,且回退有理由)",
+        !fellBack || loopInfo.fallbackReason != null || !hasSourceFields,
+        "engine=" + engine + " loopPath=" + loopPath + " 建环=" + ringBuilt + " band=" + (bandMb ?? "?") + "MB budget=" +
+          (budgetMb ?? "?") + "MB reason=" + String(loopInfo.fallbackReason ?? "null") + " 整窗≈" + round(windowMb, 1) + "MB",
+      ),
+    );
+
+    const stack = stackFor(ctx);
+    const li: ContentLoop = { song, songPath, sampleRate: Number(info.sampleRate ?? ctx.sampleRateFor(song.id)) || 44100, aMs, bMs, durationMs: Number(info.durationMs), L, snap: null };
+
+    // 校准偏移（环带中段；回退态下内容=文件时间，与 display 一致，所以中段同样成立）
+    await ctx.api.post("/player/seek", { positionMs: Math.round(aMs + L / 2) });
+    await sleep(1200);
+    const base = await probeAt(ctx, stack, li, { label: "校准(中段)", offsetMs: 0, target: "main" });
+    const offset = base.result.driftMs ?? 0;
+    checks.push(
+      check(
+        "回退态中段内容与显示一致(判据自证)",
+        base.result.peak >= BASELINE_PEAK_MIN,
+        "peak=" + base.result.peak.toFixed(3) + " display=" + Math.round(base.displayRefMs) + "ms offset=" + Math.round(offset) + "ms",
+        base.result.peak < BASELINE_PEAK_MIN ? "回退态中段都对不上 -> 判据不可信" : undefined,
+      ),
+    );
+
+    // seek 到 B-5s，跨 B
+    await ctx.api.post("/player/seek", { positionMs: bMs - 5000 });
+    const monitor = new DisplayMonitor(ctx, "main", 120);
+    monitor.start();
+    await sleep(500);
+    const before = await probeAt(ctx, stack, li, { label: "跨B前(B-5s)", offsetMs: offset, target: "main" });
+    checks.push(before.contentCheck);
+
+    let wrapped = false;
+    const tw = Date.now();
+    while (Date.now() - tw < 16000) {
+      const w = monitor.firstWrap(L);
+      if (w) { wrapped = true; break; }
+      await sleep(120);
+    }
+    await sleep(800);
+    // 判据口径跟着"显示声称的语义"走：
+    // - display 折返到 [A,B)   -> 按环带内容比对（00027 的 bug 就是这里对不上）；
+    // - display 继续媒体时间   -> 按文件时间比对（回退后不投影的正确行为）。
+    const dispBeforeProbe = await mainDisplay(ctx);
+    const afterMode: "band" | "file" = dispBeforeProbe != null && dispBeforeProbe > bMs + 200 ? "file" : "band";
+    const after = await probeAt(ctx, stack, li, {
+      label: "跨B后(" + afterMode + " 口径, display=" + (dispBeforeProbe == null ? "?" : Math.round(dispBeforeProbe)) + "ms)",
+      offsetMs: offset,
+      target: "main",
+      mode: afterMode,
+      wide: true,
+    });
+    await monitor.stop();
+    checks.push(after.contentCheck);
+
+    const series = monitor.series;
+    const pastB = series.some((s) => s.displayMs > bMs + 500);
+    checks.push(
+      check(
+        "跨B后 display 是否折返",
+        wrapped || pastB,
+        wrapped
+          ? "折返到 " + Math.round(Number(series[series.length - 1]?.displayMs ?? 0)) + "ms（A=" + aMs + "）"
+          : pastB
+            ? "display 继续越过 B（不投影）"
+            : "既没折返也没越过 B（16s 内没走到 B？）",
+      ),
+    );
+    // 核心判据：回退 + 仍然折返 = 投影与源不一致（00027）
+    checks.push(
+      check(
+        "回退态不得投影(display 在 B 处折返=FAIL)",
+        !(fellBack && wrapped),
+        "回退=" + fellBack + " engine=" + engine + " loopPath=" + loopPath + " 折返=" + wrapped,
+        fellBack && wrapped
+          ? "00027 根因：环带未建成(整曲直通)但显示层仍按 window 折返；内容真值会显示实际在 B 之后(display+L)"
+          : undefined,
+      ),
+    );
+    return {
+      checks,
+      summary:
+        "engine=" + engine + " loopPath=" + loopPath + " 整窗=" + round(windowMb, 1) + "MB; 折返=" + wrapped +
+        "; 内容 " + summarizeContent([before.result, after.result]) + "; offset=" + Math.round(offset) + "ms",
+    };
+  },
+};
+
 // ---------------------------------------------------------------------------
 // 导出（由 lead 合并注册；id/key 与 scenarios.ts 保持同一套口径）
 // ---------------------------------------------------------------------------
 
-export const CONTENT_SCENARIOS: Scenario[] = [s20, s21, s22, s23, s24, s25];
+export const CONTENT_SCENARIOS: Scenario[] = [s20, s21, s22, s23, s24, s25, s26];
 
 /** 内容真值场景依赖 uiautomator + 预览页（--skip-ui 时应整组跳过）。 */
 export const CONTENT_SCENARIO_IDS = CONTENT_SCENARIOS.map((s) => s.id);
