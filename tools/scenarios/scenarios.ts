@@ -757,6 +757,16 @@ const s7: Scenario = {
         checks.push(audioCheck(item.label + " 出声", audible, 0.8, "模式=" + item.mode + " 但输出帧未按预期增长"));
       }
       checks.push(check(item.label + " 位置对", posOk, "display=" + snap.displayMs + " 期望 " + expect));
+      if (item.mode === "LOOP_ONLY" || item.mode === "SEAM") {
+        checks.push(
+          check(
+            item.label + " 走 SOURCE 路线",
+            snap.engine === "SOURCE",
+            "engine=" + snap.engine + " sourceActive=" + snap.sourceActive,
+            snap.engine !== "SOURCE" ? "预览引擎不是 SOURCE:先切引擎并重启,否则出声判据不可信" : undefined,
+          ),
+        );
+      }
       summaries.push(item.mode + ":" + round(audible.ratio * 100, 0) + "%");
     }
     return { checks, summary: summaries.join(" ") };
@@ -888,6 +898,14 @@ const s9: Scenario = {
     const after = (await ctx.api.preview()).snapshot;
     if (!after) throw new Error("点接缝检查后预览快照丢失");
     checks.push(check("模式=接缝检查", after.mode === "SEAM", "mode=" + after.mode));
+    checks.push(
+      check(
+        "接缝检查走 SOURCE 路线",
+        after.engine === "SOURCE",
+        "engine=" + after.engine + " sourceActive=" + after.sourceActive,
+        after.engine !== "SOURCE" ? "预览引擎不是 SOURCE:切回引擎并重启后再判接缝延迟" : undefined,
+      ),
+    );
     const posOk = within(Number(after.displayMs), expected - 1200, expected + 3000);
     checks.push(check("位置=B-5s", posOk, "display=" + after.displayMs + " 期望 " + expected));
     const delta = Number(after.outputFrames ?? 0) - framesBefore;

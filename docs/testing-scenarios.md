@@ -33,12 +33,13 @@ bun run tools/scenarios/run-scenarios.ts
 | ~~~--only 1,2,9~~~ | 只跑指定场景 |
 | ~~~--list~~~ | 列出场景编号 |
 | ~~~--skip-ui~~~ | 跳过依赖 uiautomator 的场景（6/7/9/10/11/15/16） |
-| ~~~--exclusive~~~ | 只跑独占组（6/7/9/10/11/15，见 §1.4） |
+| ~~~--exclusive~~~ | 只跑独占组（6/7/9/10/11/15/18，见 §1.5） |
 | ~~~--non-exclusive~~~ | 只跑其余场景（可在有人用的设备上先跑） |
 | ~~~--timeout 150000~~~ | 单场景硬超时（默认 150s） |
 | ~~~--song / --song-short / --song-unconfirmed / --song-long~~~ | 覆盖自动选歌 |
 | ~~~--long~~~ | 只跑长窗口 10 分钟稳定性（场景 19，默认不跑；见 §9） |
 | ~~~--allow-invariant <code>~~~ | 临时允许某个不变量 code（也可写进 allow-invariants.json） |
+| ~~~--allow-non-source~~~ | 跳过 SOURCE 路线前置检查（仅用于显式研究 M3；出声判据会报不可用） |
 
 ### 前置条件
 
@@ -46,6 +47,8 @@ bun run tools/scenarios/run-scenarios.ts
 2. 屏幕亮、已解锁、应用在前台（执行器会尝试拉起；ROM 拒绝时需手动点一下）。
 3. 主播放器走 **SOURCE 路线**（默认）。出声判据依赖 ~~~/state.invariantProbe.writtenFrames~~~，
    该计数只在 SOURCE 路线上更新；M3′ 路线下相关判据会报"探针不可用"而不是假装 PASS。
+   **执行器开跑前会自检**：读 ~~~/state.invariantProbe.routeSource~~~，false 直接中止（exit 2）并打印
+   切回 SOURCE 的命令，不会浪费几分钟跑到一半才发现；确要在 M3 上跑位置/UI 场景可加 ~~~--allow-non-source~~~。
 4. 独占设备：本套件会切页面、改 A/B、暂停/播放。与其它 agent / 手工操作并发时结果不可信
    （进程重装会直接杀掉 app；对方切歌会让"暂停后出声"等判据失真）。
 5. 首次运行前至少有一首"已确认循环"的歌；场景 14 需要一首"未确认循环"的歌；
@@ -76,7 +79,25 @@ e2e-artifacts/scenarios/<yyyyMMdd-HHmmss>/
 | CONTAMINATED | 场景执行期间检测到外部改动（另一个 agent / 手工 / 重装 APK），结果不可信 | 独占窗口重跑；不计入 FAIL |
 | PENDING | 已知依赖未落地（如 jump-fill / media3 原生 seek 成本），当前数值超出目标但不算 FAIL | 依赖落地后自动按严格判据复核 |
 
-### 1.4 如何独占跑（推荐流程）
+### 1.4 SOURCE 路线前置自检
+
+开跑前（拉歌曲列表之前）会检查主播放器路线：
+
+- ~~~routeSource=true~~~ → 打印 ~~~routeSource: true (主播放器 SOURCE)~~~ 后继续。
+- ~~~routeSource=false~~~ → **直接中止，exit 2**，并打印：
+  - 当前 versionCode/versionName；
+  - ~~~shared_prefs/loop_settings.xml~~~ 里的 ~~~loop_engine_main/loop_engine~~~；
+  - 修复命令（~~~POST /debug/source-mode {"on":true}~~~ → force-stop → am start → 再验证 routeSource）；
+  - 提醒：M3′ 下 writtenFrames 不更新、预览也没有 SOURCE seek 桥。
+- 3s 内采样器还没产出 invariantProbe（冷启动）→ 警告后继续（出声判据可能不可用）。
+- 显式研究 M3 时可加 ~~~--allow-non-source~~~，但场景 1–5/8/17 的出声判据会报“探针不可用”，
+  场景 6/10/11/18 会 SKIP（预览 seek 桥不存在），不要把这种运行当成回归结果。
+
+运行中还有二次闸门：~~~/debug/preview~~~ 返回的预览引擎不是 SOURCE 时，
+预览 seek 直接 SKIP；场景 7 的 LOOP_ONLY/SEAM、场景 9 的接缝检查会显式记一条“走 SOURCE 路线”判据，
+避免 M3 下用位置推进代理误判 PASS。
+
+### 1.5 如何独占跑（推荐流程）
 
 本套件会切页面、改窗口、暂停播放；与其它 agent/手工操作并发时：
 

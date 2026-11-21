@@ -66,6 +66,7 @@ interface Opts {
   songUnconfirmed: number;
   songLong: number;
   longOnly: boolean;
+  allowNonSource: boolean;
   allow: string[];
 }
 
@@ -85,6 +86,7 @@ function parseArgs(argv: string[]): Opts {
     songUnconfirmed: 0,
     songLong: 0,
     longOnly: false,
+    allowNonSource: false,
     allow: [],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -107,6 +109,7 @@ function parseArgs(argv: string[]): Opts {
     else if (a === "--song-unconfirmed") opts.songUnconfirmed = Number(next()) || 0;
     else if (a === "--song-long") opts.songLong = Number(next()) || 0;
     else if (a === "--long") opts.longOnly = true;
+    else if (a === "--allow-non-source") opts.allowNonSource = true;
     else if (a === "--allow-invariant") opts.allow.push(next());
     else if (a === "--help" || a === "-h") {
       printHelp();
@@ -125,6 +128,7 @@ function printHelp(): void {
       "场景矩阵执行器",
       "  bun run tools/scenarios/run-scenarios.ts [--device b1e84dad] [--only 1,2,9] [--skip-ui]",
       "  bun run tools/scenarios/run-scenarios.ts --long   # 长窗口(>200s) 10 分钟稳定性(不放进常规 18 条)",
+      "  --allow-non-source  跳过 SOURCE 路线前置检查(仅用于显式研究 M3;出声判据会报不可用)",
       "  powershell -NoProfile -File tools/scenarios/run-scenarios.ps1 ...",
       "产物: e2e-artifacts/scenarios/<时间戳>/report.md + report.json + evidence/*.json",
     ].join("\n"),
@@ -388,7 +392,51 @@ async function main(): Promise<number> {
     }
   }
   const version = await adb.versionInfo(cfg.pkg);
-  const pid0 = await adb.pidof(cfg.pkg);
+const pid0 = await adb.pidof(cfg.pkg);
+
+  // ---- 前置检查：主播放器必须是 SOURCE 路线 ----
+  // 否则 writtenFrames 不更新、预览也没有 SOURCE seek 桥，跑 4 分钟才发现全是“探针不可用”。
+  let routeSource: boolean | null = initial!.invariantProbe
+    ? initial!.invariantProbe.routeSource === true
+    : null;
+  if (routeSource === null) {
+    for (let i = 0; i < 6 && routeSource === null; i++) {
+      await sleep(500);
+      try {
+        const s = await api.state();
+        if (s.invariantProbe) routeSource = s.invariantProbe.routeSource === true;
+      } catch {
+        // 继续等采样器
+      }
+    }
+  }
+  if (routeSource === false) {
+    let prefs = "";
+    try {
+      prefs = (await adb.shell("run-as " + cfg.pkg + " cat shared_prefs/loop_settings.xml")).trim();
+    } catch {
+      // 非 debuggable 读不到 prefs 不影响结论
+    }
+    console.error("");
+    console.error("!! 前置检查失败: 主播放器不在 SOURCE 路线 (/state.invariantProbe.routeSource=false)");
+    console.error("   pkg=" + cfg.pkg + " versionCode=" + version.versionCode + " versionName=" + version.versionName);
+    if (prefs) console.error("   持久化偏好: " + prefs.replace(/\s+/g, " ").slice(0, 320));
+    console.error("   M3′ 路线下 writtenFrames 不更新、预览也没有 SOURCE seek 桥，出声判据无法判定。");
+    console.error("   修复(确认构建包含 SOURCE 后):");
+    console.error("     1) Invoke-RestMethod -Method Post -Uri http://127.0.0.1:" + cfg.forwardLocal + "/debug/source-mode -ContentType application/json -Body '{\"on\":true}'");
+    console.error("     2) adb -s " + cfg.device + " shell am force-stop " + cfg.pkg);
+    console.error("     3) adb -s " + cfg.device + " shell am start -W -n " + cfg.pkg + "/.MainActivity");
+    console.error("     4) GET /state 验证 invariantProbe.routeSource=true;打开结果页后 /debug/preview.snapshot.engine=SOURCE");
+    if (!opts.allowNonSource) {
+      console.error("   仅做位置/UI 类场景可在 M3 上跑: 加 --allow-non-source(出声判据会报“探针不可用”)");
+      return 2;
+    }
+    console.error("   --allow-non-source: 继续,但出声判据会报“探针不可用”。");
+  } else if (routeSource === null) {
+    console.warn("警告: 3s 内没采到 invariantProbe.routeSource,无法确认 SOURCE;继续(出声判据可能不可用)。");
+  } else {
+    console.log("routeSource: true (主播放器 SOURCE)");
+  }
   const runStartEpochSec = Math.floor(Date.now() / 1000) - 5;
   const startedAt = new Date();
   const runDir = path.join(opts.out, stamp());
@@ -469,6 +517,13 @@ async function main(): Promise<number> {
         throw new SkipError("结果页预览未打开: " + (before.reason ?? "unknown"));
       }
       const snapBefore = before.snapshot;
+      // 预览也必须在 SOURCE 路线，否则 seek 桥不存在（或 M3 上位置口径不同）。
+      if (snapBefore.engine !== "SOURCE" || snapBefore.sourceActive !== true) {
+        throw new SkipError(
+          "预览引擎不是 SOURCE(engine=" + snapBefore.engine + " sourceActive=" + snapBefore.sourceActive +
+            ");用 /debug/source-mode {on:true} + force-stop/start 切回后重跑",
+        );
+      }
       const r = await api.post("/debug/preview-seek", { positionMs }, 10000);
       if (r.status === 404) throw new SkipError("当前 build 没有 POST /debug/preview-seek");
       if (r.status === 409) throw new SkipError("预览 seek 桥未注册: " + (r.json?.error ?? ""));
