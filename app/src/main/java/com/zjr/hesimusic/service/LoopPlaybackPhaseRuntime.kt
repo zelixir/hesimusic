@@ -1,5 +1,6 @@
 package com.zjr.hesimusic.service
 
+import android.util.Log
 import com.zjr.hesimusic.loop.LoopPhase
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.source.LoopWholeTimeline
@@ -44,7 +45,8 @@ object LoopPlaybackPhaseRuntime {
         fullDurationUs: Long,
     ) {
         val display = displayUs.coerceAtLeast(0L)
-        current = Snapshot(
+        val previous = current
+        val next = Snapshot(
             songId = songId,
             timelineUs = timelineUs.coerceAtLeast(0L),
             displayUs = display,
@@ -52,6 +54,30 @@ object LoopPlaybackPhaseRuntime {
             window = window,
             phase = LoopPhase.ofDisplayUs(display, window),
         )
+        current = next
+        if (previous?.phase != next.phase || previous?.songId != next.songId ||
+            previous?.window != next.window
+        ) {
+            logPhaseTransition(previous, next)
+        }
+    }
+
+    /** #61 可直接观测的判断点：phase 变化时打出 display/T/local。 */
+    private fun logPhaseTransition(previous: Snapshot?, next: Snapshot) {
+        try {
+            Log.i(
+                "LoopPhase",
+                "phase " + (previous?.phase?.wire ?: "none") + " -> " +
+                    (next.phase?.wire ?: "none") +
+                    " songId=" + next.songId +
+                    " displayUs=" + next.displayUs +
+                    " timelineUs=" + next.timelineUs +
+                    " localUs=" + next.localTimelineUs +
+                    " window=" + next.window,
+            )
+        } catch (_: Throwable) {
+            // JVM 单测无 android.util.Log 实现。
+        }
     }
 
     fun phaseFor(songId: Long?, window: LoopWindow?): LoopPhase? {

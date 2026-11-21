@@ -110,6 +110,27 @@ class LoopWholeTimelineTest {
     }
 
     @Test
+    fun phaseFlipsExactlyAtAForDisplayAndTimeline() {
+        // #61：display 从 A-1ms 到 A+1ms 必须 prelude -> loop，不能停在 prelude。
+        assertEquals(LoopPhase.PRELUDE, LoopPhase.ofDisplayUs(aUs - 1_000L, window))
+        assertEquals(LoopPhase.LOOP, LoopPhase.ofDisplayUs(aUs, window))
+        assertEquals(LoopPhase.LOOP, LoopPhase.ofDisplayUs(aUs + 1_000L, window))
+        assertEquals(LoopPhase.LOOP, LoopPhase.ofDisplayUs(18_042_000L, window))
+        assertEquals(
+            LoopPhase.PRELUDE,
+            LoopWholeTimeline.phaseOfTimelineUs(aUs - 1_000L, window, durUs),
+        )
+        assertEquals(
+            LoopPhase.LOOP,
+            LoopWholeTimeline.phaseOfTimelineUs(aUs, window, durUs),
+        )
+        assertEquals(
+            LoopPhase.LOOP,
+            LoopWholeTimeline.phaseOfTimelineUs(aUs + 1_000L, window, durUs),
+        )
+    }
+
+    @Test
     fun phaseFollowsDisplayPosition() {
         assertEquals(LoopPhase.PRELUDE, LoopPhase.ofDisplayUs(0L, window))
         assertEquals(LoopPhase.PRELUDE, LoopPhase.ofDisplayUs(aUs - 1L, window))

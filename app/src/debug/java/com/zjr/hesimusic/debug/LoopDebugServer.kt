@@ -244,9 +244,11 @@ object LoopDebugServer {
                     null
                 }
                 val runtimePhase = if (runtimeMatches) phaseSnapshot!!.phase?.wire else null
-                // T 与 display 必须一致；优先用 T 的 phase 做诊断（若两者不一致，
-                // timelinePhase 会暴露 T 落在哪个区间，runtimePhase 暴露 display 的判定）。
-                val effectivePhase = timelinePhase ?: phase
+                // #61：phase 必须跟**当前展示位置**翻转。runtime 的 timelinePhase 只是诊断，
+                // 不能用它覆盖 fresh display 的判定（MediaSession 事件之间 runtime 可能落后
+                // 几百毫秒，display 已越过 A 而 timeline 还停在 A 之前）。
+                // tail 的歧义已由 claim.phaseHint（同为 runtime 的权威值）在 display 折叠时处理。
+                val effectivePhase = phase
                 return linkedMapOf(
                     "engine" to engine,
                     "loopPath" to loopPath,
