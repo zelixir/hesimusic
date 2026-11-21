@@ -170,7 +170,10 @@ object LoopClaimResolver {
         audio: LoopAudioController,
     ): LoopClaim {
         val runtimeWindow = runtime.window.value
-        val effectiveSongId = songId ?: runtimeWindow?.songId
+        val effectiveSongId = songId
+            ?: runtimeWindow?.songId
+            ?: audio.window?.songId
+            ?: LoopSourceRuntime.installedWindow?.songId
         val selected = selectWindow(effectiveSongId, runtimeWindow, audio.window, audio.isReplaying)
         val sourceRoute = MainPlayerRouting.current.coordinatorReplacesItem
         val unavailable = selected != null &&
