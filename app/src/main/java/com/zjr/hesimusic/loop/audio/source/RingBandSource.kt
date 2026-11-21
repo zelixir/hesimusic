@@ -16,21 +16,28 @@ import androidx.media3.exoplayer.source.ProgressiveMediaSource
 object RingBandSource {
 
     /**
-     * **主播放器**的环预算分母：窗口 PCM 字节数 <= heap/10 才建环。
+     * **主播放器**的环预算分母：窗口 PCM 字节数 <= heap/6 才建环。
      *
-     * 与 [com.zjr.hesimusic.service.LoopSourceFallback.RING_BUDGET_DIVISOR] 同口径：
-     * 正式播放还要同时扛整曲窗口预填/解码，环带只能占堆的一小份。
+     * 00027：原为 heap/10（402MB -> 40.27MB），Shiny Up 这类 238s 窗口（42.0MB）刚好超出
+     * 1.7MB，主播放器回退成普通整曲播放；但 UI 仍按窗口折返进度条 -> "显示 A、声音在尾奏"。
+     * 主播放器 SOURCE 路线没有整曲预填/解码的额外大对象（环就是唯一大对象），与预览对齐到
+     * heap/6（402MB -> 67MB）后，42MB 能真正建环。
+     *
+     * 与 [com.zjr.hesimusic.service.LoopSourceFallback.RING_BUDGET_DIVISOR] **必须同口径**；
+     * 改这里时两处一起改（见 RingBandPreviewBudgetTest）。
      */
-    const val BUDGET_DIVISOR_MAIN: Long = 10L
+    const val BUDGET_DIVISOR_MAIN: Long = 6L
 
     /**
      * **预览（分析页试听）** 的环预算分母：heap/6。
      *
      * 00022：Shiny Up 这类长窗口（A=23.301s B=261.457s，L=238.156s@44.1kHz = 42,010,716B）
-     * 在 heap/10（402MB -> 40.27MB）下判超预算，回退到分块实现（1 秒块 + 块缓存重建），
+     * 曾在 heap/10（402MB -> 40.27MB）下判超预算，回退到分块实现（1 秒块 + 块缓存重建），
      * 点接缝检查要 1~2 秒才出声。预览路径没有整曲解码/正式播放的预填开销，环带就是唯一大对象：
      * 42MB 仍不到堆的 11%，放宽到 1/6（402MB -> 67MB）留足余量；超过 1/6 的窗口依旧回退，
      * 保证"环带永远不是 OOM 的来源"。
+     *
+     * 00027 起主播放器也统一为 heap/6（[BUDGET_DIVISOR_MAIN]），两档一致。
      */
     const val BUDGET_DIVISOR_PREVIEW: Long = 6L
 

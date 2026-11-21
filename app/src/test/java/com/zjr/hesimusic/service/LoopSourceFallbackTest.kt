@@ -12,7 +12,7 @@ import org.junit.Test
 /**
  * SOURCE 构建失败的预检/回退单测（纯 JVM，不构造 MediaSource）。
  *
- * 失败面：格式不支持（probe 抛异常）、文件缺失、窗口非法、环超预算（L×192KB/s > heap/10）。
+ * 失败面：格式不支持（probe 抛异常）、文件缺失、窗口非法、环超预算（L×192KB/s > heap/6）。
  * 回退语义：不进入 SOURCE（协调器不替换 item / 会话层不投影），并登记该窗口不可用，
  * 同一窗口只回退一次；换窗口或复位后可以重试。
  */
@@ -21,7 +21,7 @@ class LoopSourceFallbackTest {
     /** 40s 窗口：48k/16bit/立体声 = 192000 B/s → 7_680_000 B。 */
     private val window = LoopWindow(songId = 7L, loopStartUs = 10_000_000L, loopEndUs = 50_000_000L)
     private val format = PcmTrackFormat(sampleRate = 48_000, channels = 2)
-    private val heapBytes = 402_653_184L // 402MB 堆 → 预算 40_265_318 B
+    private val heapBytes = 402_653_184L // 402MB 堆 → 预算 67_108_864 B(heap/6)
 
     @After
     fun tearDown() {
@@ -87,13 +87,13 @@ class LoopSourceFallbackTest {
 
     @Test
     fun `oversized ring falls back to M3 prime`() {
-        // 300s 窗口 = 57_600_000 B > 40_265_318 B 预算。
-        val huge = LoopWindow(7L, loopStartUs = 0L, loopEndUs = 300_000_000L)
+        // 400s 窗口 = 76_800_000 B > 67_108_864 B 预算(heap/6)。
+        val huge = LoopWindow(7L, loopStartUs = 0L, loopEndUs = 400_000_000L)
         val decision = LoopSourceFallback.evaluate(huge, 7L, "/music/a.mp3", { format }, heapBytes)
         val fallback = decision as LoopSourceFallback.Decision.UseM3Prime
         assertEquals(LoopSourceFallback.Reason.RING_TOO_LARGE, fallback.reason)
         assertTrue(fallback.detail.contains("budget=" + (heapBytes / LoopSourceFallback.RING_BUDGET_DIVISOR)))
-        // 刚好卡在预算内：仍走 SOURCE（预算 = heap/10，与 RingBandSource.canUse 同口径）。
+        // 刚好卡在预算内：仍走 SOURCE（预算 = heap/6，与 RingBandSource.canUse 同口径）。
         val budget = heapBytes / LoopSourceFallback.RING_BUDGET_DIVISOR
         val frames = budget / format.bytesPerFrame
         val justFitsUs = frames * 1_000_000L / format.sampleRate

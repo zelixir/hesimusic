@@ -28,12 +28,18 @@ private const val MAX_FOLDABLE_POSITION_MS = Long.MAX_VALUE / 1000L
  * @param rawPositionMs 控制器给出的原始位置(毫秒)
  * @param window 当前无缝窗口;null = 普通播放
  * @param currentSongId 当前播放项对应的 songId(由 mediaId 映射而来);null = 无当前歌
+ * @param sourceLoopActive 循环**数据源真的生效**了吗(00027)。
+ *   false = 窗口被判定不可用 / SOURCE 构建失败 / 当前窗口没有真正接管:
+ *   此时播放的是普通整曲,位置必须原样透传,否则会出现"进度条折回 A、耳朵在尾奏"。
  */
 fun foldDisplayPositionMs(
     rawPositionMs: Long,
     window: LoopWindow?,
     currentSongId: Long?,
+    sourceLoopActive: Boolean = true,
 ): Long {
+    // 00027:源没真正循环时,窗口只代表"意图",不代表播放形态——绝不能按它折返。
+    if (!sourceLoopActive) return rawPositionMs
     if (window == null || currentSongId == null) return rawPositionMs
     // 窗口属于别的歌:不是当前这首的无缝播放,不折返
     if (window.songId != currentSongId) return rawPositionMs
@@ -42,6 +48,31 @@ fun foldDisplayPositionMs(
         return rawPositionMs
     }
     return LoopPosition.displayUs(rawPositionMs * 1000L, window) / 1000L
+}
+
+/**
+ * 当前**真正生效**的无缝窗口(00027)。
+ *
+ * 窗口本身由 LoopRuntime 按显式意图 + song_loop 行算出,它只代表"用户想要循环";
+ * SOURCE 路线可能因为预算/格式/构建失败回退成普通整曲。UI 的 A/B 标记、循环区间样式、
+ * 位置折返都必须看这个函数,而不是直接看 LoopRuntime.window,否则又会画出
+ * "A 点进度 + 尾奏声音"。
+ *
+ * @param loopEngaged 播放管线真的在环回吗:
+ *   - SOURCE 路线:= 源已安装且该窗口未被判为不可用;
+ *   - M3′ 路线:= 窗口已写入音频层(环回在 sink 层,window 生效即真)。
+ *   调用方负责把路线/源真值折算成这一个布尔(见 MusicViewModel)。
+ * @return 真正生效的窗口;null = 不按循环形态展示
+ */
+fun effectiveLoopWindow(
+    window: LoopWindow?,
+    currentSongId: Long?,
+    loopEngaged: Boolean,
+): LoopWindow? {
+    if (!loopEngaged) return null
+    if (window == null || !window.isValid() || currentSongId == null) return null
+    if (window.songId != currentSongId) return null
+    return window
 }
 
 /** A/B 在进度条上的比例(0..1,半开区间 [start, end))。 */

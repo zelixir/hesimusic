@@ -188,7 +188,8 @@ class RingBandReaderTest {
             format = PcmTrackFormat(48_000, 2),
         )
         val bytes = timeline.loopFrames * timeline.bytesPerFrame
-        assertTrue(RingBandSource.canUse(timeline, bytes * 10L))
-        assertFalse(RingBandSource.canUse(timeline, bytes * 10L - 1L))
+        // 00027:主/预览统一 heap/6;边界仍是"刚好等于预算通过,少 1 字节拒绝"。
+        assertTrue(RingBandSource.canUse(timeline, bytes * 6L))
+        assertFalse(RingBandSource.canUse(timeline, bytes * 6L - 1L))
     }
 }

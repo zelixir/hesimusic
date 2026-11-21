@@ -53,7 +53,7 @@ object LoopingPcmExtractorMediaSource {
 
     /**
      * @param ringBudgetDivisor 环预算分母（窗口 PCM <= heap/divisor 才建环）。
-     *   默认 [RingBandSource.BUDGET_DIVISOR_MAIN]（heap/10，主播放器口径）；
+     *   默认 [RingBandSource.BUDGET_DIVISOR_MAIN]（heap/6，主播放器口径；00027 起与预览一致）；
      *   预览（分析页试听）传 [RingBandSource.BUDGET_DIVISOR_PREVIEW]（heap/6），
      *   让 Shiny Up 这类 ~42MB 的长窗口也能走环带而不是回退 1 秒块实现（00022）。
      */

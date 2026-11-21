@@ -13,9 +13,13 @@ import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.loop.LoopPosition
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.SeamBufferMode
+import com.zjr.hesimusic.loop.audio.source.LoopEngineInfo
 import com.zjr.hesimusic.loop.audio.source.LoopPreviewDebugBridge
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMainPlayer
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
+import com.zjr.hesimusic.loop.audio.source.RingBandSource
+import com.zjr.hesimusic.service.LoopSourceFallback
+import com.zjr.hesimusic.service.LoopSourceRuntime
 import com.zjr.hesimusic.loop.analysis.AnalysisState
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
 import com.zjr.hesimusic.loop.analysis.LoopCandidateKt
@@ -200,6 +204,12 @@ object LoopDebugServer {
                     sourceWindow = sourceWindow,
                     currentSongId = currentSongId,
                 )
+                // 00027:窗口(意图)与源是否真的接管是两件事。这里把两侧一起吐出来,
+                // 现场用 bandBytes/budgetBytes/sourceAvailable 一眼区分
+                // "环带真在循环" 与 "窗口在、但已回退成普通整曲"。
+                val truthSongId = currentSongId ?: window?.songId
+                val sourceUnavailable = window != null &&
+                    LoopSourceFallback.isUnavailable(truthSongId, window)
                 return linkedMapOf(
                     "engine" to engine,
                     "loopPath" to loopPath,
@@ -210,6 +220,15 @@ object LoopDebugServer {
                             "loopEndUs" to it.loopEndUs,
                         )
                     },
+                    // 00027: display 是否应该折返,以这个字段为准(不是 window 非空)。
+                    "sourceAvailable" to (window != null && window.isValid() && !sourceUnavailable),
+                    "sourceUnavailable" to sourceUnavailable,
+                    "fallbackReason" to LoopSourceFallback.latestReason()?.logName,
+                    "bandBytes" to LoopEngineInfo.lastRecordedBandBytes(),
+                    "budgetBytes" to RingBandSource.budgetBytes(
+                        Runtime.getRuntime().maxMemory(),
+                        RingBandSource.BUDGET_DIVISOR_MAIN,
+                    ),
                     "positionUs" to controller.positionUs,
                     "isReplaying" to controller.isReplaying,
                     "seamCount" to controller.seamCount,
@@ -1192,23 +1211,33 @@ object LoopDebugServer {
         return map
     }
 
-    /** 当前无缝窗口:audio 实际窗口优先,runtime 为唯一窗口来源作回退;Hilt 未解析时为 null。 */
-    private fun currentLoopWindow(): LoopWindow? {
-        val entry = entryPoint ?: return null
-        return try {
-            entry.loopAudioController().window ?: entry.loopRuntime().window.value
-        } catch (t: Throwable) {
-            Log.w(TAG, "current loop window unavailable", t)
-            null
-        }
-    }
-
-    /** /state、/player 的 positionMs 展示口径折返(window.songId 必须等于当前歌)。 */
+    /**
+     * /state、/player 的 positionMs 展示口径折返(window.songId 必须等于当前歌)。
+     *
+     * 00027:**投影必须跟着源真值走**。窗口非空只代表"用户 armed 了无缝",SOURCE 可能因
+     * 预算/格式/构建失败被 [LoopSourceFallback] 判为不可用 / 根本没装上 tag:
+     * 此时播放的是普通整曲,位置必须原样透传,否则 /state 也会给出折返后的假位置,
+     * 把 E2E 判据一起骗过。
+     *
+     * 口径与 UI 的 MusicViewModel.loopEngaged 一致:只有 loopPath=source/m3 才折返。
+     */
     private fun displayPositionMs(snapshot: PlayerSnapshot): Long {
         val rawMs = snapshot.positionMs
-        val window = currentLoopWindow() ?: return rawMs
         val songId = snapshot.songId ?: return rawMs
+        val entry = entryPoint ?: return rawMs
+        val m3Window: LoopWindow?
+        val sourceWindow: LoopWindow?
+        try {
+            m3Window = entry.loopAudioController().window
+            sourceWindow = LoopSourceRuntime.installedWindow
+        } catch (t: Throwable) {
+            Log.w(TAG, "current loop window unavailable", t)
+            return rawMs
+        }
+        val window = m3Window ?: sourceWindow ?: return rawMs
         if (window.songId != songId) return rawMs
+        val path = LoopSourceRuntime.loopPath(m3Window, sourceWindow, songId)
+        if (path == "none") return rawMs
         return try {
             LoopPosition.displayUs(rawMs * 1_000L, window) / 1_000L
         } catch (t: Throwable) {

@@ -73,6 +73,32 @@ class LoopPlaybackUiTest {
     }
 
     @Test
+    fun `源未真正循环时位置原样透传_00027`() {
+        // 00027:窗口还在(用户 armed),但 SOURCE 因预算/格式/构建失败回退成普通整曲播放。
+        // 此时播放位置是真实媒体时间,越过 B 也绝不能折回 A,否则就是"进度条在 A、耳朵在尾奏"。
+        assertEquals("越过 B 也不折返", 110_000L, foldDisplayPositionMs(110_000L, window, songId, sourceLoopActive = false))
+        assertEquals("B 后 1s 原样", 81_000L, foldDisplayPositionMs(81_000L, window, songId, sourceLoopActive = false))
+        assertEquals("区间内原样", 65_000L, foldDisplayPositionMs(65_000L, window, songId, sourceLoopActive = false))
+        assertEquals("前奏原样", 0L, foldDisplayPositionMs(0L, window, songId, sourceLoopActive = false))
+        // 源真的生效时仍按老口径折返(默认参数也保持 true,避免调用方漏传时行为漂移)。
+        assertEquals("源生效时 B 点折回 A", 50_000L, foldDisplayPositionMs(80_000L, window, songId, sourceLoopActive = true))
+        assertEquals("默认参数 = 源生效", 50_000L, foldDisplayPositionMs(80_000L, window, songId))
+    }
+
+    @Test
+    fun `effectiveLoopWindow_只有循环真正生效且窗口命中当前歌才返回`() {
+        assertEquals("循环生效+窗口命中", window, effectiveLoopWindow(window, songId, loopEngaged = true))
+        assertNull("SOURCE 回退/未装上源时必须视为未生效", effectiveLoopWindow(window, songId, loopEngaged = false))
+        assertNull("窗口属于别的歌", effectiveLoopWindow(window, songId + 1, loopEngaged = true))
+        assertNull("没有当前歌", effectiveLoopWindow(window, null, loopEngaged = true))
+        assertNull("没有窗口", effectiveLoopWindow(null, songId, loopEngaged = true))
+        assertNull(
+            "非法窗口",
+            effectiveLoopWindow(LoopWindow(songId, 50_000_000L, 50_000_000L), songId, loopEngaged = true),
+        )
+    }
+
+    @Test
     fun `折返幂等`() {
         val once = fold(110_000L)
         assertEquals("已折返的位置再折一次不变", once, fold(once))

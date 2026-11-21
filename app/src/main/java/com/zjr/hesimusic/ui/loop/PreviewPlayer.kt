@@ -1102,7 +1102,7 @@ class PreviewPlayer @Inject constructor(
                     provider = provider,
                     logger = { message -> Log.d("LoopPcmSource", message) },
                     onSeamOutputFrames = { outFrames -> controller.tapSeam(outFrames) },
-                    // 00022：预览放宽到 heap/6（主播放器仍 heap/10）。Shiny Up 的窗口 PCM 是
+                    // 00022：预览为 heap/6（00027 起主播放器也统一到 heap/6）。Shiny Up 的窗口 PCM 是
                     // 42.0MB，heap/10 只有 40.3MB -> 回退 1 秒块，点接缝检查要等 1~2 秒；
                     // heap/6(67MB) 能装下，长窗口也能走环带的跳填，首声回到与普通窗口同档。
                     ringBudgetDivisor = RingBandSource.BUDGET_DIVISOR_PREVIEW,

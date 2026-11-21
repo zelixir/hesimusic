@@ -40,6 +40,14 @@ data class LoopEngineInfo(
             lastBandBytes = bytes.coerceAtLeast(0L)
         }
 
+        /**
+         * 最近一次安装请求记录的环带字节数(与"当前是否真的接管"无关)。
+         *
+         * 00027 现场排查用:debug /state.loop 同时输出 bandBytes / budgetBytes /
+         * sourceAvailable,就能一眼看出"窗口在、但环没建成"。
+         */
+        fun lastRecordedBandBytes(): Long = lastBandBytes
+
         /** About/日志可直接用的单行文本。 */
         fun display(context: Context? = null): String = current(context).label()
 

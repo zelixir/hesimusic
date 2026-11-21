@@ -25,8 +25,14 @@ object LoopSourceFallback {
 
     private const val TAG = "LoopPerf"
 
-    /** 环预算分母：窗口 PCM 字节数 <= heap / 10 才建环（与 RingBandSource.canUse 同口径）。 */
-    const val RING_BUDGET_DIVISOR: Long = 10L
+    /**
+     * 环预算分母：窗口 PCM 字节数 <= heap / 6 才建环（与 RingBandSource.BUDGET_DIVISOR_MAIN 同口径）。
+     *
+     * 00027：原为 heap/10，Shiny Up（238s，42.0MB）超出 40.27MB 被判 RING_TOO_LARGE，
+     * 主播放器回退成普通整曲播放但 UI 仍折返进度条 -> "显示 A、声音在尾奏"。
+     * 主播放器 SOURCE 路线没有整曲预填/解码的额外大对象，与预览统一到 heap/6。
+     */
+    const val RING_BUDGET_DIVISOR: Long = 6L
 
     /** 判定/回退原因（日志里用 [logName]，避免被日志过滤干扰）。 */
     enum class Reason(val logName: String) {

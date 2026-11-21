@@ -13,14 +13,14 @@ import org.junit.Test
  * 环带启用的尺寸守卫(`RingBandSource.canUse`,纯 JVM,无设备)。
  *
  * 契约:[LoopingPcmExtractorMediaSource.create] 只有在
- * `loopFrames * bytesPerFrame <= heap/10` 时才启用环带;超出预算必须**降级**
- * (回退旧分块实现),并把可读原因(`reason=SIZE|PROVIDER`、bandBytes、budget)交给 logger,
- * 供 UI/日志明确提示"这首歌太长,无法用环带"而不是静默换实现。
+ * `loopFrames * bytesPerFrame <= heap/6` 时才启用环带(00027 起主/预览同口径);超出预算
+ * 必须**降级**(回退旧分块实现),并把可读原因(`reason=SIZE|PROVIDER`、bandBytes、budget)
+ * 交给 logger,供 UI/日志明确提示"这首歌太长,无法用环带"而不是静默换实现。
  *
  * 说明:
  * - canUse 的预算参数是**显式传入**的,所以本测试不依赖跑测试的 JVM 堆大小;
  * - 真机 memoryClass 典型值 256~512MB,这里用 402MB(项目文档/真机实测口径);
- * - 10 分钟窗口 = 600s × 48000Hz × 2ch × 2B = 115,200,000 B,远大于 402MB/10=40.2MB。
+ * - 10 分钟窗口 = 600s × 48000Hz × 2ch × 2B = 115,200,000 B,大于 402MB/6=67.1MB。
  */
 class RingBandSizeGuardTest {
 
@@ -47,28 +47,29 @@ class RingBandSizeGuardTest {
         assertEquals(600L * sampleRate, timeline.loopFrames)
         val bytes = bandBytes(timeline)
         assertEquals(115_200_000L, bytes)
-        val budget = deviceHeapBytes / 10L
-        assertEquals(42_152_755L, budget)
+        val budget = RingBandSource.budgetBytes(deviceHeapBytes, RingBandSource.BUDGET_DIVISOR_MAIN)
+        assertEquals(70_254_592L, budget)
 
         assertFalse(
             "10min ring (" + bytes + "B) must exceed device budget " + budget + "B",
             RingBandSource.canUse(timeline, deviceHeapBytes),
         )
         // 降级原因(与 LoopingPcmExtractorMediaSource 的日志口径一致,便于报告引用):
-        // bandBytes=115200000 budget=42152755 over=73047245(约 2.73 倍预算)
+        // bandBytes=115200000 budget=70254592 over=44945408(约 1.64 倍预算)
         println(
             "SIZE-GUARD window=600s bandBytes=" + bytes + " budget=" + budget +
                 " over=" + (bytes - budget) + " ratio=" + (bytes.toDouble() / budget),
         )
         assertTrue("reason payload must name the exceeded budget", bytes > budget)
-        assertTrue("overrun must be large enough to be user visible", bytes >= budget * 2L)
+        // heap/6 时代 10 分钟窗口只超出约 1.64 倍(旧 heap/10 时是 2.73 倍),但仍足以被用户感知。
+        assertTrue("overrun must be large enough to be user visible", bytes * 2L >= budget * 3L)
     }
 
     @Test
     fun `一小时窗口在任意常见真机堆上都拒绝`() {
         val timeline = window(3_600_000_000L)
         val bytes = bandBytes(timeline)
-        // 402MB / 512MB / 1GB 三种 memoryClass 都不够(预算 40MB ~ 102MB)
+        // 402MB / 512MB / 1GB 三种 memoryClass 都不够(预算 67MB ~ 171MB)
         for (heap in longArrayOf(402L, 512L, 1024L) ) {
             val heapBytes = heap * 1024L * 1024L
             assertFalse(
@@ -80,15 +81,15 @@ class RingBandSizeGuardTest {
     }
 
     @Test
-    fun `预算边界严格等于堆的十分之一`() {
+    fun `预算边界严格等于堆的六分之一`() {
         val timeline = window(2_000_000L) // 2s
         val bytes = bandBytes(timeline)
         assertEquals(384_000L, bytes) // 2s*48000*4B
 
-        assertTrue("bytes == heap/10 must pass", RingBandSource.canUse(timeline, bytes * 10L))
+        assertTrue("bytes == heap/6 must pass", RingBandSource.canUse(timeline, bytes * 6L))
         assertFalse(
-            "bytes = heap/10 + 1 must fail",
-            RingBandSource.canUse(timeline, bytes * 10L - 1L),
+            "bytes = heap/6 + 1 must fail",
+            RingBandSource.canUse(timeline, bytes * 6L - 1L),
         )
         // 0/负预算必须拒绝,不能因为整数除法出现"0 字节也通过"的边界
         assertFalse(RingBandSource.canUse(timeline, 0L))
@@ -115,8 +116,8 @@ class RingBandSizeGuardTest {
         )
         assertTrue("must report band bytes: " + fallback, fallback.contains("bandBytes=115200000"))
         assertTrue(
-            "must report budget (heap/10): " + fallback,
-            fallback.contains("budget=" + (Runtime.getRuntime().maxMemory() / 10L)),
+            "must report budget (heap/6): " + fallback,
+            fallback.contains("budget=" + (Runtime.getRuntime().maxMemory() / 6L)),
         )
         println("SIZE-GUARD fallback-log=" + fallback)
     }
@@ -129,13 +130,14 @@ class RingBandSizeGuardTest {
         val decoder = allocateWithoutConstructor(PcmDecoder::class.java)
         val provider = PcmDecoderRangeProvider(decoder, "/size-guard/never-decoded.flac")
         val heap = Runtime.getRuntime().maxMemory()
-        // 优先用 10 分钟窗口(115,200,000B);若跑测试的 JVM 堆特别大(>1.15GB,budget > 窗口),
+        // 优先用 10 分钟窗口(115,200,000B);若跑测试的 JVM 堆特别大(budget > 窗口),
         // 退回 60 分钟窗口以保证确实越过预算。断言的是"超预算 -> reason=SIZE",不依赖具体堆。
         val tenMinutes = window(600_000_000L)
-        val timeline = if (bandBytes(tenMinutes) > heap / 10L) tenMinutes else window(3_600_000_000L)
+        val budget = RingBandSource.budgetBytes(heap, RingBandSource.BUDGET_DIVISOR_MAIN)
+        val timeline = if (bandBytes(tenMinutes) > budget) tenMinutes else window(3_600_000_000L)
         assertTrue(
-            "test premise: ring " + bandBytes(timeline) + "B must exceed JVM budget " + (heap / 10L) + "B",
-            bandBytes(timeline) > heap / 10L,
+            "test premise: ring " + bandBytes(timeline) + "B must exceed JVM budget " + budget + "B",
+            bandBytes(timeline) > budget,
         )
         assertFalse(RingBandSource.canUse(timeline, heap))
 
@@ -149,7 +151,7 @@ class RingBandSizeGuardTest {
         )
         assertTrue(
             "must report exact budget: " + fallback,
-            fallback.contains("budget=" + (heap / 10L)),
+            fallback.contains("budget=" + RingBandSource.budgetBytes(heap, RingBandSource.BUDGET_DIVISOR_MAIN)),
         )
         println("SIZE-GUARD size-log=" + fallback)
     }

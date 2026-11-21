@@ -193,6 +193,7 @@ fun PlayerScreen(
                 // **折返后的展示位置**(有循环窗口时引擎会把目标折回 [A,B)),否则无缝态永远等不到收敛。
                 LaunchedEffect(pendingSeekMs) {
                     val target = pendingSeekMs ?: return@LaunchedEffect
+                    // loopWindowState = activeLoopWindow:源未真正循环时为 null -> expected 用真实媒体时间。
                     val expected = SeekOverlayPolicy.expectedDisplayMs(target, loopWindowState.value)
                     val startedAtMs = SystemClock.uptimeMillis()
                     while (!SeekOverlayPolicy.shouldRelease(
@@ -561,7 +562,11 @@ internal object SeekOverlayPolicy {
     /**
      * 松手 seek 目标在**展示口径**下的期望落点。
      *
-     * 有无缝窗口时引擎会把目标折回 [A, B)(见 [LoopPosition.displayUs]),UI 之后读到的展示
+     * 传入的 [window] 必须是 [com.zjr.hesimusic.ui.common.effectiveLoopWindow] 的结果
+     * (源真的接管了循环才是非 null)。00027:SOURCE 回退/构建失败时窗口仍在,但播放是
+     * 普通整曲、位置不折返;此时传 null,期望落点 = 真实媒体时间。
+     *
+     * 有生效窗口时引擎会把目标折回 [A, B)(见 [LoopPosition.displayUs]),UI 之后读到的展示
      * 位置就是折返后的值,所以收敛判定必须用折返后的目标;无窗口(或非法窗口)时就是目标本身。
      */
     fun expectedDisplayMs(targetMs: Long, window: LoopWindow?): Long {
