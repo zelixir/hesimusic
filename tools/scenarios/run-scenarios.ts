@@ -64,6 +64,8 @@ interface Opts {
   song: number;
   songShort: number;
   songUnconfirmed: number;
+  songLong: number;
+  longOnly: boolean;
   allow: string[];
 }
 
@@ -81,6 +83,8 @@ function parseArgs(argv: string[]): Opts {
     song: 0,
     songShort: 0,
     songUnconfirmed: 0,
+    songLong: 0,
+    longOnly: false,
     allow: [],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -101,6 +105,8 @@ function parseArgs(argv: string[]): Opts {
     else if (a === "--song") opts.song = Number(next()) || 0;
     else if (a === "--song-short") opts.songShort = Number(next()) || 0;
     else if (a === "--song-unconfirmed") opts.songUnconfirmed = Number(next()) || 0;
+    else if (a === "--song-long") opts.songLong = Number(next()) || 0;
+    else if (a === "--long") opts.longOnly = true;
     else if (a === "--allow-invariant") opts.allow.push(next());
     else if (a === "--help" || a === "-h") {
       printHelp();
@@ -118,6 +124,7 @@ function printHelp(): void {
     [
       "场景矩阵执行器",
       "  bun run tools/scenarios/run-scenarios.ts [--device b1e84dad] [--only 1,2,9] [--skip-ui]",
+      "  bun run tools/scenarios/run-scenarios.ts --long   # 长窗口(>200s) 10 分钟稳定性(不放进常规 18 条)",
       "  powershell -NoProfile -File tools/scenarios/run-scenarios.ps1 ...",
       "产物: e2e-artifacts/scenarios/<时间戳>/report.md + report.json + evidence/*.json",
     ].join("\n"),
@@ -144,7 +151,12 @@ function pickDevice(adbExe: string, wanted: string): string {
   return devices[0];
 }
 
-function pickSongs(all: SongInfo[], opts: Opts): { primary: SongInfo; short: SongInfo; unconfirmed: SongInfo } {
+function pickSongs(all: SongInfo[], opts: Opts): {
+  primary: SongInfo;
+  short: SongInfo;
+  unconfirmed: SongInfo;
+  long: SongInfo | null;
+} {
   const byId = (id: number): SongInfo | null => all.find((s) => s.id === id) ?? null;
   const conf = all.filter(
     (s) =>
@@ -200,7 +212,18 @@ function pickSongs(all: SongInfo[], opts: Opts): { primary: SongInfo; short: Son
   }
   if (!unconfirmed) throw new Error("曲库中没有「未确认循环」的歌;场景 14 无法执行");
 
-  return { primary: primary!, short: short!, unconfirmed: unconfirmed! };
+  // 长窗口场景用：已确认循环里时长 ≥240s 的最长一首（优先可解码格式）。
+  let long: SongInfo | null = null;
+  if (opts.songLong > 0) long = byId(opts.songLong);
+  if (!long) {
+    const decodable = (s: SongInfo) => /\.(mp3|wav|m4a|aac|flac)$/i.test(s.path);
+    const longCands = conf
+      .filter((s) => s.durationMs >= 240000)
+      .sort((a, b) => Number(decodable(b)) - Number(decodable(a)) || b.durationMs - a.durationMs || a.id - b.id);
+    long = longCands[0] ?? null;
+  }
+
+  return { primary: primary!, short: short!, unconfirmed: unconfirmed!, long };
 }
 
 function songLine(s: SongInfo): string {
@@ -305,7 +328,8 @@ async function main(): Promise<number> {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.list) {
     for (const s of SCENARIOS) {
-      console.log(s.id + "\t" + s.tag + "\t" + (s.exclusive ? "EXCL" : "shared") + "\t" + s.name + "\t" + s.key);
+      const kind = s.long ? "LONG" : s.exclusive ? "EXCL" : "shared";
+      console.log(s.id + "\t" + s.tag + "\t" + kind + "\t" + s.name + "\t" + s.key);
     }
     return 0;
   }
@@ -378,6 +402,7 @@ async function main(): Promise<number> {
   console.log("primary: " + songLine(songs.primary));
   console.log("short:   " + songLine(songs.short));
   console.log("unconf:  " + songLine(songs.unconfirmed));
+  console.log("long:    " + (songs.long ? songLine(songs.long) : "(没有 ≥240s 的已确认循环歌;场景 19 会 SKIP)"));
 
   const sampleRateMap = new Map<number, number>();
   for (const s of all) if (s.sampleRate != null) sampleRateMap.set(s.id, s.sampleRate);
@@ -566,15 +591,25 @@ async function main(): Promise<number> {
 
   // ---- 场景执行 ----
   if (opts.exclusiveOnly && opts.nonExclusiveOnly) throw new Error("--exclusive 与 --non-exclusive 不能同时用");
-  const selected = SCENARIOS.filter(
-    (s) =>
-      (opts.only.length === 0 || opts.only.includes(s.id)) &&
-      (!opts.exclusiveOnly || s.exclusive === true) &&
-      (!opts.nonExclusiveOnly || s.exclusive !== true),
-  );
+  if (opts.longOnly && (opts.exclusiveOnly || opts.nonExclusiveOnly)) {
+    throw new Error("--long 不能与 --exclusive/--non-exclusive 同时用");
+  }
+  const explicitOnly = opts.only.length > 0;
+  const selected = SCENARIOS.filter((s) => {
+    if (explicitOnly && !opts.only.includes(s.id)) return false;
+    if (opts.longOnly && s.long !== true) return false;
+    // 常规跑（无 --only/--long）默认排除长稳定性场景。
+    if (!opts.longOnly && s.long === true && !explicitOnly) return false;
+    if (opts.exclusiveOnly && s.exclusive !== true) return false;
+    if (opts.nonExclusiveOnly && s.exclusive === true) return false;
+    return true;
+  });
   if (selected.length === 0) throw new Error("没有匹配的场景;--list 查看编号");
   if (opts.exclusiveOnly) {
     console.log("独占组: " + selected.map((s) => "#" + s.id).join(",") + " (跑之前确认设备没有其它 agent 在操作)");
+  }
+  if (opts.longOnly) {
+    console.log("长窗口组: " + selected.map((s) => "#" + s.id).join(",") + " (约 10 分钟,确认设备可独占)");
   }
 
   interface ScenarioResult {
@@ -661,7 +696,11 @@ async function main(): Promise<number> {
     })();
 
     try {
-      const res: ScenarioRunResult = await withTimeout(scenario.run(ctx), cfg.scenarioTimeoutMs, scenario.name);
+      const res: ScenarioRunResult = await withTimeout(
+        scenario.run(ctx),
+        scenario.timeoutMs ?? cfg.scenarioTimeoutMs,
+        scenario.name,
+      );
       checks = res.checks;
       summary = res.summary;
       pending = res.pendingDecision ?? [];

@@ -1,6 +1,7 @@
 # 场景化自动化测试（真机场景矩阵）
 
-面向"每个功能单独能跑、按常识组合就出问题"这类缺陷：把用户会做的动作序列固化成 18 条场景，
+面向"每个功能单独能跑、按常识组合就出问题"这类缺陷：把用户会做的动作序列固化成 18 条常规场景，
+外加 1 条 ~~~--long~~~ 长窗口（>200s）10 分钟稳定性场景，
 在真机（debug 包 + adb）上按**常识判据**跑一遍，输出一份可贴进 issue 的 PASS/FAIL 表 + 失败证据。
 
 - 执行器：~~~tools/scenarios/run-scenarios.ts~~~（Bun），一条命令包装：~~~tools/scenarios/run-scenarios.ps1~~~
@@ -35,7 +36,8 @@ bun run tools/scenarios/run-scenarios.ts
 | ~~~--exclusive~~~ | 只跑独占组（6/7/9/10/11/15，见 §1.4） |
 | ~~~--non-exclusive~~~ | 只跑其余场景（可在有人用的设备上先跑） |
 | ~~~--timeout 150000~~~ | 单场景硬超时（默认 150s） |
-| ~~~--song / --song-short / --song-unconfirmed~~~ | 覆盖自动选歌 |
+| ~~~--song / --song-short / --song-unconfirmed / --song-long~~~ | 覆盖自动选歌 |
+| ~~~--long~~~ | 只跑长窗口 10 分钟稳定性（场景 19，默认不跑；见 §9） |
 | ~~~--allow-invariant <code>~~~ | 临时允许某个不变量 code（也可写进 allow-invariants.json） |
 
 ### 前置条件
@@ -46,7 +48,8 @@ bun run tools/scenarios/run-scenarios.ts
    该计数只在 SOURCE 路线上更新；M3′ 路线下相关判据会报"探针不可用"而不是假装 PASS。
 4. 独占设备：本套件会切页面、改 A/B、暂停/播放。与其它 agent / 手工操作并发时结果不可信
    （进程重装会直接杀掉 app；对方切歌会让"暂停后出声"等判据失真）。
-5. 首次运行前至少有一首"已确认循环"的歌；场景 14 需要一首"未确认循环"的歌。
+5. 首次运行前至少有一首"已确认循环"的歌；场景 14 需要一首"未确认循环"的歌；
+   ~~~--long~~~ 还需要一首时长 ≥240s 的已确认循环歌（没有则场景 19 SKIP）。
    执行器会自动从 ~~~/library/songs~~~ 选歌并打印选择结果，也可用参数指定。
 
 ### 产物
@@ -129,7 +132,7 @@ powershell -NoProfile -File tools/scenarios/run-scenarios.ps1 --non-exclusive
 | 13 | 后台 -> 前台 | HOME；1.5s；am start 回前台 | 声音不断、位置连续 | 后台仍 playing、位置前进 ≥800ms、2s 出声；回前台位置不回跳 >1s、仍出声 |
 | 14 | 未确认循环进循环 | 对 unconfirmed 歌 /loop/enter | 不得进入循环（或提示）、不崩 | 3s 后 engine≠loop 且 window.songId≠该歌；进程存活 |
 | 15 | 极短窗口(A=B-3s)循环 | /confirm 落 3s 窗口；结果页「仅循环段」；采样 9s | 能循环、接缝无停顿 | 9s 内 display 回绕 ≥2 次；outputFrames 相邻 100ms 采样不间断（最长停顿 ≤300ms）；位置始终在 [A,B]；整体出声 ≥80%；结束时**恢复原 A/B** |
-| 16 | 全流程连跑 3 轮 | 每轮：播放→seek→进/出循环→暂停/继续→结果页试听→回列表；期间每 30s 采一次 meminfo | 无内存增长、无不变量、不崩、无 OOM | 三轮 pid 不变；每轮有输出；Java Heap 末轮 ≤ 首轮+16MB；PSS ≤ 首轮×1.15+30MB；**30s heap 曲线**连续上升段 <3；无新增不变量；无 OutOfMemoryError |
+| 16 | 全流程连跑 3 轮 | 每轮：播放→seek→进/出循环→暂停/继续→结果页试听→回列表；期间每 30s 采一次 meminfo，不足 5 点补观察 | 无内存增长、无不变量、不崩、无 OOM | 三轮 pid 不变；每轮有输出；Java Heap 末轮 ≤ 首轮+16MB；PSS ≤ 首轮×1.15+30MB；**30s 曲线 ≥5 点 + Theil–Sen 斜率 ≤8MB/min + 后半均值不高于前半+16MB**；无新增不变量；无 OutOfMemoryError |
 | 17 | 循环中暂停 -> 继续 | 循环中 pause/resume（常识补充） | 暂停静音、继续仍循环 | 同场景 1 的静音判据 + 继续后 engine=loop 且出声 |
 
 说明：
@@ -189,7 +192,17 @@ powershell -NoProfile -File tools/scenarios/run-scenarios.ps1 --non-exclusive
 - 全部跑完后扫 ~~~logcat -b crash~~~ 与 main buffer 中运行开始后的本包 ~~~FATAL EXCEPTION / ANR in~~~。
 - 场景内异常（HTTP 5xx、超时、断言抛错）记为"执行异常"并保存现场，不影响后续场景（每条场景开始前重置播放态）。
 
-### 3.6 证据
+### 3.6 内存 / heap 曲线（抗 GC 抖动）
+
+- 固定 **30s 采样**；场景 16 不足 5 个点时结尾观察补齐（最多 120s），场景 19 约 20 个点。
+- 斜率用 **Theil–Sen 中位斜率**（两两斜率取中位数），不用最小二乘：GC 锯齿/单点尖峰不会把斜率带偏。
+- 只有**同时**满足以下两条才判泄漏：
+  1. 中位斜率 > **8MB/min**；
+  2. 后半段均值 > 前半段均值 + **16MB**（排除"一次性分配后平稳"）。
+- 单点 GC 后回落、只涨不连续的情况不算；同时保留 Java Heap 首末 16MB / PSS +15%+30MB 的粗阈值。
+- OOM 不看 pid，直接扫 crash buffer 判 FAIL（§3.5）。曲线写进 evidence，并在“判据明细”里显示。
+
+### 3.7 证据
 
 失败场景保存：
 - 动作序列（时间、动作、关键参数）；
@@ -292,9 +305,9 @@ const s18: Scenario = {
 5. 场景 16 的"heap 稳定"是启发式：Java Heap 16MB / PSS +15%+30MB 容差，只能发现明显泄漏，
    不能替代长时间内存压测。
 6. 执行器不做 install/启动环境搭建；包不在、调试口不通会直接报环境错误。
-7. **长窗口（B−A > 200s）不包含在场景 16 的 3 轮里**：长窗口的环回/预填/内存行为需要单独跑一次
-   10 分钟稳定性（循环播放 + 每 30s 采样 heap + 不变量/崩溃扫描），建议用
-   ~~~--only 3~~~ 或新增一条长窗口场景，跑 10 分钟后看 heap 曲线与 OOM。
+7. **长窗口（B−A > 200s）不包含在场景 16 的 3 轮里**：已做成可选的场景 19，
+   用 ~~~--long~~~ 单独跑一次 10 分钟稳定性（循环播放 + 每 30s heap + 不变量/崩溃/OOM）。
+   分块回退路径怎么造窗口见 §9。
 
 ---
 
@@ -388,5 +401,73 @@ powershell -NoProfile -File tools/scenarios/run-scenarios.ps1
 三轮 heap 稳定 JavaHeap 105912→47608KB、接缝检查首声 149ms ≤500ms）。
 
 > 本轮之后新增的判据（30s heap 曲线、逐场景 OOM 扫描、以 stages.playoutMs 作为出声延迟）已在代码与
-> 文档中就位，等 1259+ 正式包下一轮全量验证；长窗口（>200s）按 §6.7 单独跑 10 分钟稳定性。
+> 文档中就位，等 1259+ 正式包下一轮全量验证；长窗口（>200s）用 --long 单独跑，见 §9。
+
+---
+
+## 9. 长窗口（>200s）与分块回退路径
+
+### 9.1 一条命令跑 10 分钟稳定性
+
+~~~powershell
+powershell -NoProfile -File tools/scenarios/run-scenarios.ps1 --long
+# 约 630s；只跑场景 19，不进入常规 18 条
+~~~
+
+- 选歌：已确认循环、时长 ≥240s 里最长的一首（优先 mp3/flac）；没有则 SKIP。也可 --song-long <id>。
+- 构造窗口：A=5s，B=A+210s（曲目不够则夹到 duration-2s）；写入 loop 行前先记下原 sample 值，
+  finally 里用 /confirm 精确恢复（和场景 15 一样，测试污染用户数据必须还原）。
+- 进入循环后跑 19 个采样点 × 30s（约 10 分钟），每点记录：engine/window/playing/position/seam/degrade/
+  Java Heap/PSS；每 60s 额外测 2s 输出帧。
+- 判据：10 分钟保持 engine=loop+playing；位置始终在 [A,B]；seamCount 增长 ≥2；周期性出声；
+  degradeCount 不增长；heap 曲线 ≥15 点且斜率/前后半均值不超阈值；跑满 ≥540s；无 OOM/崩溃。
+- 若中途 engine=exo / window=null：先看窗口 PCM 是否超过**主播放器**预算 heap/10（见 §9.2），
+  超预算会回退普通播放（主播放器不会回退到分块实现）。
+
+### 9.2 整窗 PCM 预算与"分块回退"怎么造
+
+窗口 PCM 字节数（PCM16）：
+
+~~~text
+bytes = (B - A) 秒 × sampleRate × channels × 2
+# 44.1kHz 立体声 16bit ≈ 176.4 KB/s ≈ 0.168 MB/s
+~~~
+
+预算：
+
+| 播放器 | 环带预算 | 超过预算的行为 |
+|---|---|---|
+| 主播放器 | heap / 10 | 预检 RING_TOO_LARGE → 回退"普通播放/不循环"，不是分块 |
+| 结果页预览 | heap / 6 | LoopingPcmExtractorMediaSource 回退 **1 秒块 + 块缓存**（分块路径） |
+
+所以"分块回退路径"要在**结果页预览**上造，而不是主播放器。
+
+步骤（以 heap 402MB、44.1kHz 立体声为例）：
+
+1. 取 heap（两个来源任选）：
+   ~~~powershell
+   adb shell getprop dalvik.vm.heapsize        # 例如 512m
+   adb logcat -d -s LoopPcmSource | Select-String "RingBand (select|fallback)"
+   # 日志里有 heap=... budget=... divisor=6，直接是实际 maxMemory/预算
+   ~~~
+2. 算超预算窗口：heap/6=67MB → 需要 > 67MB / 0.168MB/s ≈ **> 400s** 的窗口；
+   选一首时长 ≥ 430s 的已确认循环歌（没有就用 /analyze + /confirm 先确认）。
+3. 用 /confirm 显式写 A/B（会落库，跑完记得恢复原值）：
+   ~~~powershell
+   # sr 从 /song/{id}.sampleRate 取；A=5s、B=405s
+   $body = '{"songId":<id>,"aSamples":220500,"bSamples":17860500}'
+   Invoke-RestMethod -Method Post -Uri http://127.0.0.1:18765/confirm -ContentType application/json -Body $body
+   ~~~
+4. 打开结果页并点「仅循环段」后看日志：
+   ~~~powershell
+   adb logcat -d -s LoopPcmSource | Select-String "RingBand fallback reason=SIZE"
+   # 期望: RingBand fallback reason=SIZE bandBytes=... budget=... divisor=6
+   ~~~
+   同时 GET /debug/preview 应看到 engine=SOURCE、window 是新区间、outputFrames 持续增长、
+   isPlaying=true——说明分块实现仍然能出声/环回，只是首声与 seek 延迟会变高。
+5. 判定：出现 "fallback reason=SIZE" 且出声/环回正常 = 分块回退路径可用；
+   若首声 > 500ms 或 seek playout > 300ms，按场景 9/10 的口径记录（属于长窗口路径的成本，不是常规回归）。
+
+注意：主播放器超过 heap/10 会直接回退普通播放（不循环），不要把这种窗口拿去做"长窗口循环稳定性"；
+场景 19 用 210s（约 37MB@44.1k）留在常见 heap/10 预算内，就是为避免这条回退干扰稳定性判定。
 

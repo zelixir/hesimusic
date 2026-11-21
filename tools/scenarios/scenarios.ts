@@ -67,7 +67,7 @@ export interface ScenarioCtx {
   cfg: Cfg;
   api: Api;
   adb: Adb;
-  songs: { primary: SongInfo; unconfirmed: SongInfo; short: SongInfo };
+  songs: { primary: SongInfo; unconfirmed: SongInfo; short: SongInfo; long: SongInfo | null };
   evidence: Evidence;
   log: (message: string) => void;
   sampleRateFor: (songId: number) => number;
@@ -93,6 +93,10 @@ export interface Scenario {
   tag: string;
   /** 需要独占设备:会切结果页/改窗口/依赖 UI 时序，--exclusive 只跑这些。 */
   exclusive?: boolean;
+  /** 长窗口/长稳定性场景:默认不跑，用 --long 显式触发。 */
+  long?: boolean;
+  /** 覆盖单场景硬超时（长稳定性需要 10 分钟+）。 */
+  timeoutMs?: number;
   run: (ctx: ScenarioCtx) => Promise<ScenarioRunResult>;
 }
 
@@ -264,6 +268,72 @@ function mainWindowCheck(name: string, state: State | null, songId: number): Che
     "window songId=" + w.songId + " A=" + w.aMs + " B=" + w.bMs +
       " pos=" + state!.playback.positionMs,
   );
+}
+
+/**
+ * heap 曲线趋势（抗 GC 抖动）：
+ * - 只用 30s 采样点；
+ * - Theil–Sen 中位数斜率（对 GC 锯齿/单点尖峰稳健，不用最小二乘）；
+ * - 同时看前半段/后半段均值，避免"一次性分配后平稳"被当成泄漏。
+ */
+function heapTrend(points: { atMs: number; javaHeapKb: number | null }[]): {
+  n: number;
+  slopeKbPerMin: number;
+  growthKb: number;
+  firstHalfAvgKb: number;
+  secondHalfAvgKb: number;
+} {
+  const pts = points
+    .filter((p) => p.javaHeapKb != null && Number.isFinite(Number(p.javaHeapKb)))
+    .map((p) => ({ x: Number(p.atMs), y: Number(p.javaHeapKb) }))
+    .sort((a, b) => a.x - b.x);
+  if (pts.length < 2) {
+    return { n: pts.length, slopeKbPerMin: 0, growthKb: 0, firstHalfAvgKb: 0, secondHalfAvgKb: 0 };
+  }
+  const slopes: number[] = [];
+  for (let i = 0; i < pts.length; i++) {
+    for (let j = i + 1; j < pts.length; j++) {
+      const dtMin = (pts[j].x - pts[i].x) / 60000;
+      if (dtMin > 0) slopes.push((pts[j].y - pts[i].y) / dtMin);
+    }
+  }
+  slopes.sort((a, b) => a - b);
+  const median = slopes.length ? slopes[Math.floor(slopes.length / 2)] : 0;
+  const half = Math.floor(pts.length / 2);
+  const avg = (arr: { y: number }[]) => (arr.length ? arr.reduce((s, p) => s + p.y, 0) / arr.length : 0);
+  const first = half > 0 ? avg(pts.slice(0, half)) : avg(pts);
+  const second = half > 0 ? avg(pts.slice(pts.length - half)) : avg(pts);
+  return {
+    n: pts.length,
+    slopeKbPerMin: median,
+    growthKb: pts[pts.length - 1].y - pts[0].y,
+    firstHalfAvgKb: first,
+    secondHalfAvgKb: second,
+  };
+}
+
+function heapTrendCheck(
+  points: { atMs: number; javaHeapKb: number | null }[],
+  minPoints: number,
+  label: string,
+): { check: Check; trend: ReturnType<typeof heapTrend> } {
+  const trend = heapTrend(points);
+  const slopeOk = trend.slopeKbPerMin <= 8192; // 8MB/min
+  const levelOk = trend.secondHalfAvgKb <= trend.firstHalfAvgKb + 16384; // 后半段均值不高于前半段 +16MB
+  const nOk = trend.n >= minPoints;
+  const checkResult = check(
+    label,
+    nOk && slopeOk && levelOk,
+    "n=" + trend.n + " TheilSen斜率=" + round(trend.slopeKbPerMin / 1024, 1) + "MB/min; 增长=" +
+      round(trend.growthKb / 1024, 1) + "MB; 前半均=" + round(trend.firstHalfAvgKb / 1024, 1) +
+      "MB 后半均=" + round(trend.secondHalfAvgKb / 1024, 1) + "MB",
+    !nOk
+      ? "采样点不足(" + trend.n + "<" + minPoints + "):GC 抖动下至少 5 点才有斜率意义"
+      : !slopeOk || !levelOk
+        ? "斜率/前后半均值同时超阈值才判泄漏;单点 GC 尖峰不算"
+        : undefined,
+  );
+  return { check: checkResult, trend };
 }
 
 // ---------------------------------------------------------------------------
@@ -1356,6 +1426,11 @@ const s16: Scenario = {
       });
       ctx.evidence.step("round-" + round, { ms: Date.now() - t0, audible: audible.ratio, preview: previewAudio.ratio, javaHeapKb: mem.javaHeapKb, totalPssKb: mem.totalPssKb, pid });
     }
+    // GC 抖动下至少 5 个 30s 点才有斜率意义：不足就结尾观察补齐（最多 120s）。
+    const waitStart = Date.now();
+    while (heapSeries.filter((s) => s.javaHeapKb != null).length < 5 && Date.now() - waitStart < 120000) {
+      await sleep(1000);
+    }
     } finally {
       sampling = false;
       await sampler;
@@ -1378,25 +1453,11 @@ const s16: Scenario = {
       ),
     );
     const validHeap = heapSeries.filter((s) => s.javaHeapKb != null);
-    let upStreak = 0;
-    let maxUpStreak = 0;
-    for (let i = 1; i < validHeap.length; i++) {
-      const diff = Number(validHeap[i].javaHeapKb) - Number(validHeap[i - 1].javaHeapKb);
-      if (diff > 4096) upStreak += 1;
-      else upStreak = 0;
-      maxUpStreak = Math.max(maxUpStreak, upStreak);
-    }
     const curve = validHeap.map((s) => Math.round(Number(s.javaHeapKb) / 1024) + "MB").join("→");
     const curveTimes = validHeap.map((s) => Math.round(s.atMs / 1000) + "s").join("→");
-    checks.push(
-      check(
-        "heap 30s 曲线无持续上升",
-        maxUpStreak < 3,
-        "Java Heap: " + curve + " (t=" + curveTimes + "); 连续上升段=" + maxUpStreak,
-        maxUpStreak >= 3 ? "连续 3 个采样点每次增长 >4MB:优先排查预览页/分析结果缓存泄漏" : undefined,
-      ),
-    );
-    ctx.evidence.step("heap-series", { series: heapSeries, curve, curveTimes });
+    const trendResult = heapTrendCheck(heapSeries, 5, "heap 30s 斜率(≥5 点，抗 GC 抖动)");
+    checks.push(trendResult.check);
+    ctx.evidence.step("heap-series", { series: heapSeries, curve, curveTimes, trend: trendResult.trend });
     // 不变量由 runner 统一做「场景前后 code×count diff」；这里不再用"invariants 必须为空"误伤历史事件。
     return {
       checks,
@@ -1526,5 +1587,187 @@ const s18: Scenario = {
   },
 };
 
-export const SCENARIOS: Scenario[] = [s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17, s18];
+// ---------------------------------------------------------------------------
+// 场景 19（可选，--long）：长窗口(>200s) + 10 分钟稳定性
+// 不放进常规 18 条：单跑约 10 分钟，且会临时改长曲目的 A/B（finally 恢复）。
+// ---------------------------------------------------------------------------
+
+const s19: Scenario = {
+  id: 19,
+  key: "long-window-stability",
+  name: "长窗口(>200s) 10 分钟稳定性",
+  tag: "稳定性",
+  long: true,
+  timeoutMs: 780000,
+  async run(ctx) {
+    const checks: Check[] = [];
+    const song = ctx.songs.long;
+    if (!song) throw new SkipError("曲库没有 ≥240s 的已确认循环歌;可用 --song-long 指定");
+    const info = await ctx.api.song(song.id);
+    const sr = Number(info.sampleRate ?? ctx.sampleRateFor(song.id));
+    const duration = Number(info.durationMs);
+    const origA = Number(info.loopStartSamples);
+    const origB = Number(info.loopEndSamples);
+    // 构造 >200s 的窗口：A=5s，B=A+210s（给 210s 环回留 2 次以上环回；曲目不够则夹到尾部）。
+    const aMs = 5000;
+    const bMs = Math.min(duration - 2000, aMs + 210000);
+    if (bMs - aMs < 200000) throw new SkipError("曲目太短,无法构造 >200s 窗口");
+    // 诊断：整窗 PCM 字节数（16bit 立体声按 4B/帧估算；仅用于报告，不参与判定）。
+    const windowBytes = ((bMs - aMs) / 1000) * sr * 2 * 2;
+    const confirm = await ctx.api.post("/confirm", {
+      songId: song.id,
+      aSamples: msToSamples(aMs, sr),
+      bSamples: msToSamples(bMs, sr),
+    });
+    ctx.evidence.step("confirm-long-window", {
+      songId: song.id,
+      aMs,
+      bMs,
+      sampleRate: sr,
+      windowSeconds: (bMs - aMs) / 1000,
+      windowBytes,
+      status: confirm.status,
+      body: confirm.json,
+    });
+    if (confirm.status !== 200) throw new Error("/confirm -> " + confirm.status + " " + confirm.text.slice(0, 200));
+    try {
+      await ctx.resetForMain();
+      const enter = await enterLoop(ctx, song.id, true, true);
+      ctx.evidence.step("enter-long-loop", { status: enter.status, body: enter.json });
+      if (enter.status !== 200) throw new Error("/loop/enter -> " + enter.status + " " + enter.text.slice(0, 200));
+      const installed = await waitLoopInstalled(ctx, song.id, 15000);
+      if (!installed.ok) {
+        const st = (await ctx.api.state()) ?? null;
+        ctx.evidence.step("enter-long-failed", {
+          engine: st?.playback.engine,
+          window: st ? loopWindowOf(st) : null,
+          playing: st?.playback.playing,
+          windowBytes,
+        });
+        throw new Error("长窗口未进入循环(engine/window 不匹配);见 evidence enter-long-failed");
+      }
+      const st0 = installed.state!;
+      const seam0 = Number(st0.loop.seamCount ?? 0);
+      const degrade0 = Number(st0.loop.degradeCount ?? 0);
+      const t0 = Date.now();
+      const samples: any[] = [];
+      const heapSeries: { atMs: number; javaHeapKb: number | null }[] = [];
+      let loopLost = 0;
+      let posOut = 0;
+      let audibleFail = 0;
+      let lastAudio = 0;
+      const ITER = 19; // 18 x 30s ≈ 9 分钟采样窗口 + 起播/测量 ≈ 10 分钟
+      for (let i = 0; i < ITER; i++) {
+        const st = await ctx.api.state();
+        const w = loopWindowOf(st);
+        const mem = await ctx.adb.meminfo(ctx.cfg.pkg);
+        const atMs = Date.now() - t0;
+        samples.push({
+          atMs,
+          engine: st.playback.engine,
+          playing: st.playback.playing,
+          positionMs: st.playback.positionMs,
+          seamCount: st.loop?.seamCount,
+          degradeCount: st.loop?.degradeCount,
+          replaying: st.loop?.isReplaying,
+          javaHeapKb: mem.javaHeapKb,
+          totalPssKb: mem.totalPssKb,
+        });
+        if (mem.javaHeapKb != null) heapSeries.push({ atMs, javaHeapKb: mem.javaHeapKb });
+        if (w?.songId !== song.id || st.playback.engine !== "loop" || st.playback.playing !== true) loopLost += 1;
+        if (Number(st.playback.positionMs) < aMs - 1000 || Number(st.playback.positionMs) > bMs + 1000) posOut += 1;
+        if (i % 2 === 0) {
+          const audio = await measureMainFrames(ctx.api, 2000, sr);
+          lastAudio = audio.ratio;
+          if (audio.ratio < 0.8) audibleFail += 1;
+        }
+        if (i < ITER - 1) await sleep(30000);
+      }
+      const elapsed = Date.now() - t0;
+      const stEnd = await ctx.api.state();
+      const seamDelta = Number(stEnd.loop?.seamCount ?? 0) - seam0;
+      const degradeDelta = Number(stEnd.loop?.degradeCount ?? 0) - degrade0;
+      ctx.evidence.step("long-window-samples", {
+        window: { songId: song.id, aMs, bMs },
+        windowBytes,
+        elapsedMs: elapsed,
+        seamDelta,
+        degradeDelta,
+        lastAudioRatio: lastAudio,
+        samples,
+      });
+      checks.push(
+        check(
+          "10 分钟保持循环",
+          loopLost === 0,
+          "engine/window/playing 异常采样 " + loopLost + "/" + samples.length,
+          loopLost > 0
+            ? "长窗口中途掉出循环:若 engine=exo,先看窗口 PCM 是否超过 heap/10(主播放器预算)并回退普通播放"
+            : undefined,
+        ),
+      );
+      checks.push(check("位置始终在 [A,B]", posOut === 0, "越界采样 " + posOut + "/" + samples.length + " (A=" + aMs + " B=" + bMs + ")"));
+      checks.push(
+        check(
+          "环回次数 ≥2",
+          seamDelta >= 2,
+          "seamCount +" + seamDelta + " (210s 窗口,10 分钟约 2~3 次)",
+          seamDelta < 2 ? "长窗口没有环回:可能被降级/回退成普通播放" : undefined,
+        ),
+      );
+      checks.push(
+        check(
+          "周期性出声",
+          audibleFail === 0,
+          "每 60s 测 2s,失败次数=" + audibleFail + "; 最后一次出声率=" + round(lastAudio * 100, 0) + "%",
+        ),
+      );
+      checks.push(
+        check(
+          "无降级",
+          degradeDelta === 0,
+          "degradeCount +" + degradeDelta,
+          degradeDelta > 0 ? "长窗口发生降级;检查环预算(整窗 PCM 约 " + round(windowBytes / 1048576, 1) + "MB)" : undefined,
+        ),
+      );
+      const trend = heapTrendCheck(heapSeries, 15, "长窗口 heap 斜率(≥15 点,抗 GC 抖动)");
+      checks.push(trend.check);
+      checks.push(
+        check(
+          "跑满 10 分钟量级",
+          elapsed >= 540000,
+          "采样时长 " + round(elapsed / 1000, 0) + "s",
+        ),
+      );
+      return {
+        checks,
+        summary:
+          "10min loop; window=" + round((bMs - aMs) / 1000, 0) + "s/" + round(windowBytes / 1048576, 1) +
+          "MB; seams+" + seamDelta + "; heap " + round(trend.trend.slopeKbPerMin / 1024, 1) + "MB/min",
+      };
+    } finally {
+      // 无论成败都恢复原 A/B（这是用户数据）。
+      await ctx.api.post("/loop/exit").catch(() => null);
+      const restore = await ctx.api.post("/confirm", { songId: song.id, aSamples: origA, bSamples: origB });
+      const restored = await ctx.api.song(song.id).catch(() => null);
+      const ok =
+        restore.status === 200 &&
+        restored != null &&
+        Math.abs(Number(restored.loopStartSamples) - origA) <= 1 &&
+        Math.abs(Number(restored.loopEndSamples) - origB) <= 1;
+      ctx.evidence.step("restore-loop", {
+        status: restore.status,
+        origA,
+        origB,
+        restored: restored ? { A: restored.loopStartSamples, B: restored.loopEndSamples } : null,
+        ok,
+      });
+      if (!ok) checks.push(check("恢复原 A/B", false, "未能还原 song " + song.id + " 的 loop 行", "测试污染用户数据"));
+      else checks.push(check("恢复原 A/B", true, "已还原 A=" + origA + " B=" + origB));
+      await ctx.resetForMain().catch(() => null);
+    }
+  },
+};
+
+export const SCENARIOS: Scenario[] = [s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17, s18, s19];
 
