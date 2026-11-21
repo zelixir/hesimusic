@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     无缝循环 P4 E2E 执行器(L2 A/C/D 组 + L3 PCM 取证矩阵)。
 
@@ -296,9 +296,13 @@ function Get-Sample($s) {
         replay   = $s.loop.isReplaying
         seams    = $s.loop.seamCount
         degrade  = $s.loop.degradeCount
-        ring     = $s.loop.isRingComplete
-        rawMs    = [long][math]::Round($s.loop.positionUs / 1000.0)
-        analysis = $s.analysis.phase
+        ring       = $s.loop.isRingComplete
+        rawMs      = [long][math]::Round($s.loop.positionUs / 1000.0)
+        claimed    = $s.loop.claimed
+        claimActive = $s.loop.claimActive
+        sourceActive = $s.loop.sourceActive
+        claimReason = $s.loop.claimReason
+        analysis   = $s.analysis.phase
     }
 }
 
@@ -572,7 +576,7 @@ function Initialize-Seamless {
         Invoke-Seek $SeekMs | Out-Null
         Start-Sleep -Milliseconds 500
     }
-    return Wait-State -Predicate { param($s) ($null -ne $s.loop.window) -and ($s.loop.window.songId -eq $Id) -and ($s.playback.engine -eq 'loop') } -TimeoutMs $TimeoutMs -IntervalMs 200
+    return Wait-State -Predicate { param($s) ($null -ne $s.loop.window) -and ($s.loop.window.songId -eq $Id) -and ($s.loop.claimed -eq $true) -and ($s.loop.sourceActive -eq $true) -and ($s.playback.engine -eq 'loop') } -TimeoutMs $TimeoutMs -IntervalMs 200
 }
 
 function Wait-PlayerReady {
@@ -1301,7 +1305,7 @@ function Case-N3 {
         Add-Metric "windowBeforeEnter" $(if ($null -ne $base.State) { (Get-Sample $base.State).winSong } else { $null })
         $enter = Enter-Loop $SongId
         Add-Metric "enterStatus" $enter.Status
-        $w = Wait-State -Predicate { param($s) ($null -ne $s.loop.window) -and ($s.loop.window.songId -eq $SongId) -and ($s.playback.engine -eq 'loop') } -TimeoutMs 8000 -IntervalMs 200
+        $w = Wait-State -Predicate { param($s) ($null -ne $s.loop.window) -and ($s.loop.window.songId -eq $SongId) -and ($s.loop.claimed -eq $true) -and ($s.loop.sourceActive -eq $true) -and ($s.playback.engine -eq 'loop') } -TimeoutMs 8000 -IntervalMs 200
         Add-SampleSeries $w.Samples
         $s = Get-Sample $w.State
         Add-Metric "windowSongId" $(if ($null -ne $s) { $s.winSong } else { $null })
@@ -1404,7 +1408,7 @@ function Case-C9 {
         $seam0 = $s0.seams
         $t0 = Now-Ms
         Invoke-Seek ($aMs + 2000) | Out-Null
-        $back = Wait-State -Predicate { param($s) ($null -ne $s.loop.window) -and ($s.playback.engine -eq 'loop') -and $s.playback.playing } -TimeoutMs 3000 -IntervalMs 100
+        $back = Wait-State -Predicate { param($s) ($null -ne $s.loop.window) -and ($s.loop.claimed -eq $true) -and ($s.loop.sourceActive -eq $true) -and ($s.playback.engine -eq 'loop') -and $s.playback.playing } -TimeoutMs 3000 -IntervalMs 100
         $seekLatency = (Now-Ms) - $t0
         Add-SampleSeries $back.Samples
         $sBack = Get-Sample $back.State
@@ -2055,9 +2059,12 @@ function Case-L4-notify {
         if ($outOfRange -gt 0) { Add-Failure ("session 外推位置与 /state 偏差 >1.5s 的样本 " + $outOfRange + " 个") }
         # session PlaybackState 刷新间隔:窗口内 delta 没有回落 = 一直没刷新
         if ($updates -eq 0 -and $maxAbs -gt 3000) { Add-Metric "sessionStalenessWarning" ("10s 窗口内 session PlaybackState 未刷新,原始 position 落后 /state " + $maxAbs + "ms(通知/锁屏进度靠系统外推)") }
-        $posBad = @($samples | Where-Object { $null -ne $_.pos -and ($_.pos -lt $aMs -or $_.pos -ge $bMs) }).Count
+        # 只在 claimActive 时要求 position ∈ [A,B)；源未生效时位置本来就该是线性媒体时间。
+        $posBad = @($samples | Where-Object { $_.claimActive -eq $true -and $null -ne $_.pos -and ($_.pos -lt $aMs -or $_.pos -ge $bMs) }).Count
+        $posSkipped = @($samples | Where-Object { $_.claimActive -ne $true }).Count
         Add-Metric "statePosOutOfWindow" $posBad
-        if ($posBad -gt 0) { Add-Failure ("/state positionMs 不在 [A,B) 内的样本 " + $posBad + " 个") }
+        Add-Metric "statePosUncheckedBecauseClaimInactive" $posSkipped
+        if ($posBad -gt 0) { Add-Failure ("/state positionMs 在 claimActive 时不在 [A,B) 内的样本 " + $posBad + " 个") }
         # 锁屏 -> 亮屏 -> 解锁
         Write-Log "   (锁屏/亮屏)" "DarkYellow"
         Invoke-Adb "input keyevent 26" | Out-Null
@@ -2159,6 +2166,7 @@ function Case-L5 {
         $ops = 200
         $violations = 0
         $stalls = 0
+        $claimFallbacks = 0
         $lastPos = -1
         $lastMoveAt = Now-Ms
         $samples = [System.Collections.ArrayList]::new()
@@ -2189,10 +2197,16 @@ function Case-L5 {
             if ($null -eq $s) { continue }
             $smp = Get-Sample $s
             [void]$samples.Add($smp)
-            # 一致性:只对"属于当前歌"的 window 判定(切歌瞬间 window 还是上一首的是预期行为)
+            # 一致性:engine 必须严格等于 claimActive；claimActive 必须严格等于 sourceActive。
+            # claimed=true + sourceActive=false 是“回退到普通播放”的合法退化，单独计数，不算违规。
             $windowForCurrent = ($null -ne $smp.winSong) -and ($smp.winSong -eq $smp.songId)
-            if ($windowForCurrent -and $smp.engine -ne "loop") { $violations++ }
-            if ($smp.engine -eq "loop" -and -not $windowForCurrent) { $violations++ }
+            $claimActive = $smp.claimActive -eq $true
+            $sourceActive = $smp.sourceActive -eq $true
+            $engineLoop = $smp.engine -eq "loop"
+            if ($engineLoop -ne $claimActive) { $violations++ }
+            if ($claimActive -ne $sourceActive) { $violations++ }
+            if ($claimActive -and -not $windowForCurrent) { $violations++ }
+            if (($smp.claimed -eq $true) -and -not $sourceActive) { $claimFallbacks++ }
             # 卡死:playing 且位置 5s 不动
             if ($smp.playing -eq $true) {
                 if ($smp.pos -ne $lastPos) { $lastPos = $smp.pos; $lastMoveAt = Now-Ms }
@@ -2209,9 +2223,10 @@ function Case-L5 {
         Add-Metric "opsExecuted" $samples.Count
         Add-Metric "elapsedMs" $elapsed
         Add-Metric "consistencyViolations" $violations
+        Add-Metric "claimFallbacks" $claimFallbacks
         Add-Metric "stalls" $stalls
         Add-Metric "crashAtOp" $crashAt
-        if ($violations -gt 0) { Add-Failure ("window/engine 一致性违反 " + $violations + " 次") }
+        if ($violations -gt 0) { Add-Failure ("claim/engine/source 一致性违反 " + $violations + " 次") }
         if ($stalls -gt 0) { Add-Failure ("卡死(playing 且位置 5s 不动) " + $stalls + " 次") }
         if ($crashAt -ge 0) { Add-Failure ("第 " + $crashAt + " 次操作后进程消失") }
         $fatal = Get-FatalLines 4000

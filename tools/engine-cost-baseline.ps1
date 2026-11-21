@@ -427,6 +427,7 @@ function Start-ApiLoop {
     $song = Invoke-Api -Path ("/song/" + $SongId)
     Write-Log ("song " + $SongId + ": " + $song.title + " sr=" + $song.sampleRate + " window=" + $song.loopStartMs + ".." + $song.loopEndMs)
     $already = ((Get-P $st "loop.engine") -eq "loop" -and (Get-P $st "loop.loopPath") -eq "source" -and
+        (Get-P $st "loop.claimed") -eq $true -and (Get-P $st "loop.sourceActive") -eq $true -and
         (Get-P $st "loop.window.songId") -eq $SongId -and (Get-P $st "playback.playing") -eq $true)
     if ($already) {
         # Calling /loop/enter again while the loop is already active re-arms the player and can
@@ -459,6 +460,7 @@ function Start-ApiLoop {
     Write-Log ("loop active: engine=" + $engine + " loopPath=" + $loopPath + " window=" + (Get-P $win "songId") + " " + (Get-P $win "startMs") + ".." + (Get-P $win "endMs"))
     if ($engine -ne "loop") { throw ("loop.engine is " + $engine + " (expected loop); refusing to measure a non-ring-band round") }
     if ($loopPath -ne "source") { throw ("loopPath is " + $loopPath + ", not source; switch the engine to SOURCE before measuring the ring band") }
+    if ((Get-P $final "loop.sourceActive") -ne $true) { throw "loop.claimed but loop.sourceActive is not true; refusing to measure a fallback round" }
     if ($Ams -gt 0 -and $Bms -gt $Ams) {
         $wA = Get-P $win "startMs"; $wB = Get-P $win "endMs"
         if ($null -ne $wA -and [int]$wA -ne $Ams) { throw ("loop window startMs=" + $wA + " but -Ams=" + $Ams + " expected") }

@@ -695,6 +695,7 @@ function Start-LoopPlayback {
         $s = Get-State -Retries 0
         if ($null -ne $s) {
             if ((Get-P $s "playback.playing") -eq $true -and (Get-P $s "loop.engine") -eq "loop" -and
+                (Get-P $s "loop.claimed") -eq $true -and (Get-P $s "loop.sourceActive") -eq $true -and
                 (Get-P $s "loop.window.songId") -eq $Id -and (Get-P $s "loop.loopPath") -eq $ExpectedPath) { $ok = $true; break }
         }
         Start-Sleep -Milliseconds 500
@@ -730,6 +731,7 @@ function Wait-SteadyLoop {
         if ($null -ne $s) {
             if ((Get-P $s "playback.playing") -ne $true) { throw "playback stopped during steady wait" }
             if ((Get-P $s "loop.loopPath") -ne $ExpectedPath) { throw "loopPath changed during steady wait" }
+            if ((Get-P $s "loop.sourceActive") -ne $true) { throw "loop.sourceActive became false during steady wait (claimed without source)" }
             if ((Get-P $s "loop.window.songId") -ne $Id) { throw "loop window lost during steady wait" }
             $pos = Get-P $s "playback.positionMs"
             if ($null -ne $pos) {
