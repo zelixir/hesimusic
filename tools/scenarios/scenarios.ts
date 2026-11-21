@@ -23,6 +23,7 @@ import {
 } from "./harness";
 import { ENV_SCENARIOS } from "./scenarios-env";
 import { INTERACTION_SCENARIOS } from "./scenarios-interaction";
+import { CONTENT_SCENARIOS } from "./scenarios-content";
 import type {
   Adb,
   Api,
@@ -1793,7 +1794,9 @@ export const SCENARIOS: Scenario[] = [
   s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17, s18, s19,
   ...ENV_SCENARIOS,
   ...INTERACTION_SCENARIOS,
+  ...CONTENT_SCENARIOS,
 ];
+
 
 
 
