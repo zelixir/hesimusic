@@ -58,6 +58,39 @@ fun PlayerScreen(
 
     val context = LocalContext.current
 
+    // D06：回退提示与“为什么没在循环”的常驻状态行，都读同一条 claim 真值。
+    val snackbarHostState = remember { SnackbarHostState() }
+    val currentSongId = uiState.currentPlayingSongId?.toLongOrNull()
+    val claimRevision by LoopClaimStore.revisionFlow.collectAsState()
+    val loopClaim = remember(currentSongId, claimRevision) {
+        LoopClaimStore.claimFor(currentSongId)
+    }
+    val loopNoticeCenter = remember(context) { AppLoopNoticeCenter.get(context) }
+    val loopIntent = rememberLoopIntent()
+    val armedLoop by loopIntent.armed.collectAsState()
+    val seamlessEngaged = LoopSeamlessExitPolicy.shouldShowExitEntry(
+        currentSongId = currentSongId,
+        armedSongId = armedLoop?.songId,
+        claimActive = loopClaim.claimActive,
+    )
+    LaunchedEffect(currentSongId, claimRevision) {
+        fallbackNotice(currentSongId, loopClaim)?.let { loopNoticeCenter.offer(it) }
+    }
+    LoopNoticeHost(
+        songId = currentSongId,
+        snackbarHostState = snackbarHostState,
+        onAction = { notice ->
+            if (notice.kind == LoopNoticeKind.FALLBACK) {
+                exitSeamless(
+                    viewModel = viewModel,
+                    loopIntent = loopIntent,
+                    center = loopNoticeCenter,
+                    keepPlainSingleLoop = false,
+                )
+            }
+        },
+    )
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -90,7 +123,8 @@ fun PlayerScreen(
                     }
                 }
             )
-        }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { paddingValues ->
         Column(
             modifier = Modifier
@@ -263,6 +297,45 @@ fun PlayerScreen(
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
+                // D06：常驻一行，错过 Snackbar 也能事后看到原因（带原因码）。
+                loopClaim.fallbackReason?.let { reason ->
+                    Text(
+                        text = fallbackNoticeMessage(reason),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp),
+                    )
+                }
+                // D05：显式的“退出无缝循环”入口（与 repeat 按钮的 XOR 语义分开）。
+                if (seamlessEngaged) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = loopClaim.effectiveWindow?.let { window ->
+                                "无缝循环中 · " + (LoopSeamlessExitPolicy.loopRangeLabel(window) ?: "")
+                            } ?: "无缝循环未生效",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        TextButton(
+                            onClick = {
+                                exitSeamless(
+                                    viewModel = viewModel,
+                                    loopIntent = loopIntent,
+                                    center = loopNoticeCenter,
+                                    keepPlainSingleLoop = false,
+                                )
+                            },
+                        ) {
+                            Text("退出无缝循环")
+                        }
+                    }
+                }
             }
 
             // Controls
@@ -271,15 +344,38 @@ fun PlayerScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Three-state playback mode button: 列表循环 -> 随机播放 -> 单曲循环
+                // Three-state playback mode button: 列表循环 -> 随机播放 -> 单曲循环。
+                // 无缝态下“单曲循环”按钮 = 退出无缝 + 普通单曲循环（XOR），不再用 ALL 隐式退出。
                 IconButton(onClick = {
-                    val (newShuffle, newRepeat) = when {
-                        uiState.shuffleModeEnabled -> false to Player.REPEAT_MODE_ONE // Random -> Single Loop
-                        uiState.repeatMode == Player.REPEAT_MODE_ONE -> false to Player.REPEAT_MODE_ALL // Single Loop -> List Loop
-                        else -> true to Player.REPEAT_MODE_ALL // List Loop -> Random
+                    when (LoopSeamlessExitPolicy.repeatTap(
+                        shuffleEnabled = uiState.shuffleModeEnabled,
+                        repeatMode = uiState.repeatMode,
+                        seamlessActive = seamlessEngaged,
+                    )) {
+                        LoopSeamlessExitPolicy.RepeatTap.EXIT_KEEP_PLAIN_SINGLE -> {
+                            exitSeamless(
+                                viewModel = viewModel,
+                                loopIntent = loopIntent,
+                                center = loopNoticeCenter,
+                                keepPlainSingleLoop = true,
+                            )
+                        }
+
+                        LoopSeamlessExitPolicy.RepeatTap.TO_SINGLE_LOOP -> {
+                            viewModel.setShuffleModeEnabled(false)
+                            viewModel.setRepeatMode(Player.REPEAT_MODE_ONE)
+                        }
+
+                        LoopSeamlessExitPolicy.RepeatTap.TO_LIST_LOOP -> {
+                            viewModel.setShuffleModeEnabled(false)
+                            viewModel.setRepeatMode(Player.REPEAT_MODE_ALL)
+                        }
+
+                        LoopSeamlessExitPolicy.RepeatTap.TO_SHUFFLE -> {
+                            viewModel.setShuffleModeEnabled(true)
+                            viewModel.setRepeatMode(Player.REPEAT_MODE_ALL)
+                        }
                     }
-                    viewModel.setShuffleModeEnabled(newShuffle)
-                    viewModel.setRepeatMode(newRepeat)
                 }) {
                     Icon(
                         imageVector = when {

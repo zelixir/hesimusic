@@ -12,6 +12,7 @@ import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
@@ -50,6 +51,9 @@ class MusicService : MediaSessionService() {
 
         /** #112 共享闸门守卫的检查间隔（只做布尔读，成本可忽略）。 */
         private const val GATE_GUARD_INTERVAL_MS = 120L
+
+        /** D10：claim 连续变化时通知只刷一次（进入循环的 settle 会连发多次）。 */
+        private const val LOOP_NOTIFICATION_DEBOUNCE_MS = 200L
     }
 
     @Inject
@@ -111,59 +115,9 @@ class MusicService : MediaSessionService() {
             }
         }
         
-        val forwardingPlayer = object : ForwardingPlayer(player) {
-            override fun getAvailableCommands(): Player.Commands {
-                return super.getAvailableCommands().buildUpon()
-                    .add(Player.COMMAND_SEEK_TO_NEXT)
-                    .add(Player.COMMAND_SEEK_TO_PREVIOUS)
-                    .build()
-            }
-
-            override fun isCommandAvailable(command: Int): Boolean {
-                return if (command == Player.COMMAND_SEEK_TO_NEXT || command == Player.COMMAND_SEEK_TO_PREVIOUS) {
-                    mediaItemCount > 0
-                } else {
-                    super.isCommandAvailable(command)
-                }
-            }
-
-            override fun seekToNext() {
-                val hasNext = hasNextMediaItem()
-                if (hasNext) {
-                    super.seekToNext()
-                } else if (MusicNavigationPolicy.shouldWrapToStart(
-                        hasNext = hasNext,
-                        repeatMode = repeatMode,
-                        mediaItemCount = mediaItemCount,
-                    )
-                ) {
-                    // A-085: repeat=ALL 时 hasNextMediaItem() 恒 true(播放器自己绕回),
-                    // 手写绕回只对 repeat != ALL 的最后一项生效。
-                    seekToDefaultPosition(0)
-                    if (playbackState == Player.STATE_ENDED || !isPlaying) {
-                        play()
-                    }
-                }
-            }
-            
-            override fun seekToPrevious() {
-                val hasPrevious = hasPreviousMediaItem()
-                if (hasPrevious) {
-                    super.seekToPrevious()
-                } else if (MusicNavigationPolicy.shouldWrapToEnd(
-                        hasPrevious = hasPrevious,
-                        repeatMode = repeatMode,
-                        mediaItemCount = mediaItemCount,
-                    )
-                ) {
-                    // 同 A-085: repeat=ALL 时上一项由播放器自己绕回。
-                    seekToDefaultPosition(mediaItemCount - 1)
-                    if (playbackState == Player.STATE_ENDED || !isPlaying) {
-                        play()
-                    }
-                }
-            }
-        }
+        // 通知/锁屏/车机与界面共用同一套命令与元数据：next/prev 的首尾绕回与
+        // “>3s 回本曲开头”语义由本层对齐（见 MainSessionForwardingPlayer）。
+        val forwardingPlayer = MainSessionForwardingPlayer(player) { loopMediaStatus() }
 
         // 位置/时长投影层：只重写位置/时长/seek，其余全部透传给上面的 forwardingPlayer
         // （队列首尾绕回播放仍由 forwardingPlayer 的 seekToNext/Previous 负责）。
@@ -187,6 +141,16 @@ class MusicService : MediaSessionService() {
             .setCallback(MusicSessionCallback())
             .build()
         updateSessionAudioSessionId()
+
+        // D10：claim 变化（进入 / 回退 / 退出）时刷新 session extras（循环区间/phase/原因）
+        // 并重新发一次通知。回退/退出不一定伴随播放器事件，不主动刷会让通知停留在旧文案。
+        serviceScope.launch {
+            LoopClaimStore.revisionFlow.collect {
+                runCatching { updateSessionExtras() }
+                    .onFailure { Log.w(TAG, "loop extras update failed", it) }
+                scheduleLoopNotificationRefresh()
+            }
+        }
 
         restorePlaybackState()
         setupPlayerListeners()
@@ -412,17 +376,59 @@ class MusicService : MediaSessionService() {
     }
 
     private fun updateSessionAudioSessionId(audioSessionId: Int = player.audioSessionId) {
-        val session = mediaSession
-        if (session == null) {
+        if (mediaSession == null) {
             Log.w(TAG, "updateSessionAudioSessionId: mediaSession is null")
             return
         }
         if (lastAudioSessionId == audioSessionId) return
         lastAudioSessionId = audioSessionId
+        updateSessionExtras()
+    }
+
+    /** 通知刷新去抖：进入循环时 refresh 会连发多次 claim revision。 */
+    @Volatile
+    private var loopNotificationGeneration = 0L
+
+    private fun scheduleLoopNotificationRefresh() {
+        val generation = ++loopNotificationGeneration
+        serviceScope.launch {
+            delay(LOOP_NOTIFICATION_DEBOUNCE_MS)
+            if (generation != loopNotificationGeneration) return@launch
+            val session = mediaSession ?: return@launch
+            runCatching { onUpdateNotification(session, false) }
+                .onFailure { Log.w(TAG, "loop notification refresh failed", it) }
+        }
+    }
+
+    /**
+     * session extras：车机/手表/其它 controller 也能看到“是否在循环 + A/B + phase + 原因”。
+     * 通知正文与锁屏元数据由 [MainSessionForwardingPlayer.getMediaMetadata] 负责。
+     */
+    private fun updateSessionExtras() {
+        val session = mediaSession ?: return
+        val status = loopMediaStatus()
         val extras = Bundle(session.sessionExtras ?: Bundle()).apply {
-            putInt(KEY_AUDIO_SESSION_ID, audioSessionId)
+            putInt(KEY_AUDIO_SESSION_ID, player.audioSessionId)
+            LoopSessionExtras.applyTo(this, status, loopPhaseWire(status))
         }
         session.setSessionExtras(extras)
+    }
+
+    /** 当前 claim 对应的通知/MediaSession 状态；普通播放（无意图/无窗口）返回 null。 */
+    private fun loopMediaStatus(): LoopMediaStatus? {
+        val songId = songIdOf(player.currentMediaItem) ?: return null
+        return LoopMediaMetadata.statusFor(LoopClaimStore.claimFor(songId))
+    }
+
+    /** 当前循环 phase（prelude/loop/tail）；只在 claim 生效时有意义。 */
+    private fun loopPhaseWire(status: LoopMediaStatus?): String? {
+        if (status?.active != true) return null
+        val songId = songIdOf(player.currentMediaItem) ?: return null
+        if (!::sessionPlayer.isInitialized) return null
+        val claim = LoopClaimStore.claimFor(songId)
+        return claim.phaseForDisplayUs(
+            sessionPlayer.currentPosition * LoopSessionProjection.US_PER_MS,
+        )?.wire
     }
 
     /**
@@ -458,6 +464,12 @@ class MusicService : MediaSessionService() {
             while (isActive) {
                 if (player.isPlaying && !isRestoringState) {
                     saveCurrentState()
+                    // 循环中 phase 会随播放自然变化（prelude→loop→tail）；不刷新的话
+                    // session extras 里的 LOOP_PHASE 会停在进入时的值（车机/手表可读）。
+                    if (loopMediaStatus()?.active == true) {
+                        runCatching { updateSessionExtras() }
+                            .onFailure { Log.w(TAG, "periodic loop extras update failed", it) }
+                    }
                 }
                 delay(5000) // Save every 5 seconds
             }
@@ -554,6 +566,8 @@ class MusicService : MediaSessionService() {
             // Use try-catch to prevent crashes if player is not ready or other issues
             try {
                 sessionExtras.putInt(KEY_AUDIO_SESSION_ID, player.audioSessionId)
+                val status = loopMediaStatus()
+                LoopSessionExtras.applyTo(sessionExtras, status, loopPhaseWire(status))
             } catch (e: Exception) {
                 Log.e(TAG, "MusicSessionCallback.onConnect: error getting audio session ID", e)
                 appLogger.error(TAG, "Error getting audio session ID in onConnect", e)
@@ -562,5 +576,219 @@ class MusicService : MediaSessionService() {
                 .setSessionExtras(sessionExtras)
                 .build()
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// D10：通知 / MediaSession / 锁屏的循环标识（纯逻辑，可 JVM 单测）
+// ---------------------------------------------------------------------------
+
+/**
+ * 一次“是否在循环 / 回退原因”的媒体会话快照。
+ *
+ * [active] = claim 真的生效；否则 [reasonCode] 是 /state.loop.claimReason 的同一口径。
+ */
+internal data class LoopMediaStatus(
+    val active: Boolean,
+    val startMs: Long?,
+    val endMs: Long?,
+    val reasonCode: String?,
+)
+
+/**
+ * 锁屏 / 通知正文 / 车机的循环标识。
+ *
+ * 为什么改 metadata：media3 1.8.0 的 DefaultMediaNotificationProvider 正文就是
+ * MediaMetadata.artist，而 MediaSession 的 PlayerInfo.mediaMetadata 也来自
+ * player.getMediaMetadata()。因此在这里加后缀可一次覆盖通知正文和锁屏媒体卡。
+ *
+ * 文案克制（只在有循环意图时出现）：
+ * - 生效：      "<artist> · 无缝循环"（区间/相位放 LoopSessionExtras，避免暂停时过期）
+ * - 回退：      "<artist> · 未进入无缝循环（ring-too-large）"
+ * - 普通播放：  原样返回同一实例，不产生额外 metadata 事件。
+ *
+ * 原始 artist 写进 [EXTRA_RAW_ARTIST]，App 内 UI 仍读 currentMediaItem 的原始 metadata。
+ */
+internal object LoopMediaMetadata {
+
+    const val LOOP_MARKER = "无缝循环"
+
+    const val EXTRA_RAW_ARTIST = "com.zjr.hesimusic.extra.RAW_ARTIST"
+    const val EXTRA_LOOP_ACTIVE = "com.zjr.hesimusic.extra.LOOP_ACTIVE"
+    const val EXTRA_LOOP_START_MS = "com.zjr.hesimusic.extra.LOOP_START_MS"
+    const val EXTRA_LOOP_END_MS = "com.zjr.hesimusic.extra.LOOP_END_MS"
+    const val EXTRA_LOOP_REASON = "com.zjr.hesimusic.extra.LOOP_REASON"
+
+    /** claim -> 会话状态；普通播放（无窗口且无原因）返回 null。 */
+    fun statusFor(claim: LoopClaim): LoopMediaStatus? {
+        if (claim.claimActive) {
+            val window = claim.effectiveWindow ?: return null
+            return LoopMediaStatus(
+                active = true,
+                startMs = window.loopStartUs / 1_000L,
+                endMs = window.loopEndUs / 1_000L,
+                reasonCode = null,
+            )
+        }
+        val reason = claim.fallbackReason ?: return null
+        val window = claim.window
+        return LoopMediaStatus(
+            active = false,
+            startMs = window?.loopStartUs?.div(1_000L),
+            endMs = window?.loopEndUs?.div(1_000L),
+            reasonCode = reason.logName,
+        )
+    }
+
+    /** 纯函数：装饰后的 artist；不需要装饰返回 null（调用方原样返回同一 metadata 实例）。 */
+    fun decoratedArtist(rawArtist: CharSequence?, status: LoopMediaStatus?): String? {
+        if (status == null) return null
+        val artist = rawArtist?.toString()?.trim().orEmpty()
+        // 幂等：已经是装饰过的 metadata 就不再叠后缀。
+        if (artist.contains(LOOP_MARKER)) return null
+        val suffix = if (status.active) {
+            LOOP_MARKER
+        } else {
+            "未进入无缝循环（" + status.reasonCode + "）"
+        }
+        return if (artist.isEmpty()) suffix else artist + " · " + suffix
+    }
+
+    /** 纯函数：要写进 MediaMetadata.extras 的键值（原始 artist 必须仍可取到）。 */
+    fun extrasFor(status: LoopMediaStatus?, rawArtist: CharSequence?): Map<String, Any> {
+        if (status == null) return emptyMap()
+        return buildMap {
+            if (rawArtist != null) put(EXTRA_RAW_ARTIST, rawArtist.toString())
+            put(EXTRA_LOOP_ACTIVE, status.active)
+            status.startMs?.let { put(EXTRA_LOOP_START_MS, it) }
+            status.endMs?.let { put(EXTRA_LOOP_END_MS, it) }
+            status.reasonCode?.let { put(EXTRA_LOOP_REASON, it) }
+        }
+    }
+
+    fun decorate(base: MediaMetadata, status: LoopMediaStatus?): MediaMetadata {
+        val newArtist = decoratedArtist(base.artist, status) ?: return base
+        val extras = Bundle(base.extras ?: Bundle.EMPTY).apply {
+            for ((key, value) in extrasFor(status, base.artist)) {
+                when (value) {
+                    is Boolean -> putBoolean(key, value)
+                    is Long -> putLong(key, value)
+                    is String -> putString(key, value)
+                    else -> Unit
+                }
+            }
+        }
+        return base.buildUpon().setArtist(newArtist).setExtras(extras).build()
+    }
+}
+
+/** session extras：车机/手表/其它 controller 可读的循环区间与 phase。 */
+internal object LoopSessionExtras {
+
+    const val KEY_LOOP_ACTIVE = "LOOP_ACTIVE"
+    const val KEY_LOOP_START_MS = "LOOP_START_MS"
+    const val KEY_LOOP_END_MS = "LOOP_END_MS"
+    const val KEY_LOOP_PHASE = "LOOP_PHASE"
+    const val KEY_LOOP_REASON = "LOOP_REASON"
+
+    /** 纯函数：session extras 的键值；没有的键由 [applyTo] 负责 remove。 */
+    fun extrasFor(status: LoopMediaStatus?, phase: String?): Map<String, Any> = buildMap {
+        put(KEY_LOOP_ACTIVE, status?.active == true)
+        if (status == null) return@buildMap
+        status.startMs?.let { put(KEY_LOOP_START_MS, it) }
+        status.endMs?.let { put(KEY_LOOP_END_MS, it) }
+        if (status.active && phase != null) put(KEY_LOOP_PHASE, phase)
+        status.reasonCode?.let { put(KEY_LOOP_REASON, it) }
+    }
+
+    fun applyTo(bundle: Bundle, status: LoopMediaStatus?, phase: String?) {
+        for ((key, value) in extrasFor(status, phase)) {
+            when (value) {
+                is Boolean -> bundle.putBoolean(key, value)
+                is Long -> bundle.putLong(key, value)
+                is String -> bundle.putString(key, value)
+                else -> Unit
+            }
+        }
+        val present = extrasFor(status, phase).keys
+        for (key in listOf(KEY_LOOP_START_MS, KEY_LOOP_END_MS, KEY_LOOP_PHASE, KEY_LOOP_REASON)) {
+            if (key !in present) bundle.remove(key)
+        }
+    }
+}
+
+/**
+ * MediaSession 底下的播放器（包一层，保持 ExoPlayer 为状态机权威）。
+ *
+ * - next/prev：通知的 MediaItem 版本委托给界面同款 seekToNext/seekToPrevious，
+ *   保证队尾绕回与“>3s 回本曲开头”在通知/锁屏/界面一致；
+ * - metadata：只加“无缝循环 / 未进入无缝循环（原因）”后缀，不改 title/artwork。
+ */
+internal class MainSessionForwardingPlayer(
+    player: Player,
+    private val loopStatus: () -> LoopMediaStatus?,
+) : ForwardingPlayer(player) {
+
+    override fun getAvailableCommands(): Player.Commands =
+        super.getAvailableCommands().buildUpon()
+            .add(Player.COMMAND_SEEK_TO_NEXT)
+            .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+            .build()
+
+    override fun isCommandAvailable(command: Int): Boolean =
+        if (command == Player.COMMAND_SEEK_TO_NEXT || command == Player.COMMAND_SEEK_TO_PREVIOUS) {
+            mediaItemCount > 0
+        } else {
+            super.isCommandAvailable(command)
+        }
+
+    override fun getMediaMetadata(): MediaMetadata =
+        LoopMediaMetadata.decorate(super.getMediaMetadata(), loopStatus())
+
+    override fun seekToNext() {
+        val hasNext = hasNextMediaItem()
+        if (hasNext) {
+            super.seekToNext()
+        } else if (MusicNavigationPolicy.shouldWrapToStart(
+                hasNext = hasNext,
+                repeatMode = repeatMode,
+                mediaItemCount = mediaItemCount,
+            )
+        ) {
+            // A-085: repeat=ALL 时 hasNextMediaItem() 恒 true(播放器自己绕回),
+            // 手写绕回只对 repeat != ALL 的最后一项生效。
+            seekToDefaultPosition(0)
+            if (playbackState == Player.STATE_ENDED || !isPlaying) {
+                play()
+            }
+        }
+    }
+
+    override fun seekToPrevious() {
+        val hasPrevious = hasPreviousMediaItem()
+        if (hasPrevious) {
+            super.seekToPrevious()
+        } else if (MusicNavigationPolicy.shouldWrapToEnd(
+                hasPrevious = hasPrevious,
+                repeatMode = repeatMode,
+                mediaItemCount = mediaItemCount,
+            )
+        ) {
+            // 同 A-085: repeat=ALL 时上一项由播放器自己绕回。
+            seekToDefaultPosition(mediaItemCount - 1)
+            if (playbackState == Player.STATE_ENDED || !isPlaying) {
+                play()
+            }
+        }
+    }
+
+    // MediaSession 的 COMMAND_SEEK_TO_NEXT/PREVIOUS 走 MediaItem 版本（真机 1271 已证）。
+    // 与界面按钮（seekToNext/seekToPrevious）对齐，避免通知里 next 绕回、界面里不绕回。
+    override fun seekToNextMediaItem() {
+        seekToNext()
+    }
+
+    override fun seekToPreviousMediaItem() {
+        seekToPrevious()
     }
 }

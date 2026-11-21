@@ -56,6 +56,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
@@ -112,7 +114,14 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.zjr.hesimusic.data.model.Song
 import kotlinx.coroutines.delay
 import com.zjr.hesimusic.loop.analysis.WaveformPeaks
+import com.zjr.hesimusic.service.LoopClaimStore
 import com.zjr.hesimusic.ui.common.MusicViewModel
+import com.zjr.hesimusic.ui.player.AppLoopNoticeCenter
+import com.zjr.hesimusic.ui.player.LoopNoticeHost
+import com.zjr.hesimusic.ui.player.LoopNoticeKind
+import com.zjr.hesimusic.ui.player.exitSeamless
+import com.zjr.hesimusic.ui.player.fallbackNotice
+import com.zjr.hesimusic.ui.player.rememberLoopIntent
 import com.zjr.hesimusic.ui.loop.state.AnalysisPhase
 import com.zjr.hesimusic.ui.loop.state.LoopHandle
 import com.zjr.hesimusic.ui.loop.state.LoopPageEvent
@@ -202,6 +211,26 @@ fun LoopScreen(
     val context = LocalContext.current
     val currentOnBack by rememberUpdatedState(onBack)
 
+    // D06：主播放回退到普通播放时，结果页与播放页共用同一条提示通道。
+    // 只有“正在播的这首 == 本页分析的这首”才提示，避免把别的歌的回退带到这里。
+    val musicUiState by musicViewModel.uiState.collectAsState()
+    val currentSongId = musicUiState.currentPlayingSongId?.toLongOrNull()
+    val claimRevision by LoopClaimStore.revisionFlow.collectAsState()
+    val loopClaim = remember(currentSongId, claimRevision) {
+        LoopClaimStore.claimFor(currentSongId)
+    }
+    val snackbarHostState = remember { SnackbarHostState() }
+    val loopNoticeCenter = remember(context) { AppLoopNoticeCenter.get(context) }
+    val loopIntent = rememberLoopIntent()
+    val armedLoop by loopIntent.armed.collectAsState()
+    // 结果页也给一个显式退出入口：只有“本页分析的歌 == 当前武装的无缝歌”才显示。
+    val showExitSeamless = song?.id != null && armedLoop?.songId == song?.id
+    LaunchedEffect(song?.id, currentSongId, claimRevision) {
+        if (song?.id != null && song?.id == currentSongId) {
+            fallbackNotice(currentSongId, loopClaim)?.let { loopNoticeCenter.offer(it) }
+        }
+    }
+
     // 一次性提示(Toast)消费
     LaunchedEffect(notice) {
         val message = notice ?: return@LaunchedEffect
@@ -269,6 +298,7 @@ fun LoopScreen(
                 // 在自测全绿之前不向用户暴露，避免拿到半成品。
             )
         },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { innerPadding ->
         Column(
             modifier = Modifier
@@ -301,10 +331,37 @@ fun LoopScreen(
                     song = song,
                     viewModel = viewModel,
                     onSavedAndPlay = onSavedAndPlay,
+                    onExitSeamless = if (showExitSeamless) {
+                        {
+                            exitSeamless(
+                                viewModel = musicViewModel,
+                                loopIntent = loopIntent,
+                                center = loopNoticeCenter,
+                                keepPlainSingleLoop = false,
+                            )
+                        }
+                    } else {
+                        null
+                    },
                 )
             }
         }
     }
+
+    LoopNoticeHost(
+        songId = song?.id,
+        snackbarHostState = snackbarHostState,
+        onAction = { notice ->
+            if (notice.kind == LoopNoticeKind.FALLBACK) {
+                exitSeamless(
+                    viewModel = musicViewModel,
+                    loopIntent = loopIntent,
+                    center = loopNoticeCenter,
+                    keepPlainSingleLoop = false,
+                )
+            }
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +473,7 @@ private fun ResultContent(
     song: Song?,
     viewModel: LoopViewModel,
     onSavedAndPlay: (Song) -> Unit,
+    onExitSeamless: (() -> Unit)? = null,
 ) {
     val buffering by viewModel.buffering.collectAsState()
     val isReplaying by viewModel.isReplaying.collectAsState()
@@ -685,6 +743,11 @@ private fun ResultContent(
 
         // 底部按钮组(契约 §2.4)。按钮在滚动内容里,不覆盖上方内容;
         // 滚动容器底部预留 nav bar inset,最后一行可完整滚到。
+        if (onExitSeamless != null) {
+            OutlinedButton(onClick = onExitSeamless, modifier = Modifier.fillMaxWidth()) {
+                Text("退出无缝循环", maxLines = 1)
+            }
+        }
         Button(onClick = { viewModel.confirmAndSave { saved -> onSavedAndPlay(saved) } }, modifier = Modifier.fillMaxWidth()) {
             Text("确认并保存")
         }
