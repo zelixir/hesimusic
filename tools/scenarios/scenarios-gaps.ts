@@ -1322,6 +1322,15 @@ const g88: Scenario = {
       );
       checks.push(check("没有切到别的歌", Number(st.playback?.songId) === song.id, "songId=" + st.playback?.songId));
       checks.push(check("保存后开始播放", st.playback?.playing === true, "playing=" + st.playback?.playing));
+      // 00028：启动无缝循环从原点（曲目开头）开始，不允许沿用进入前的播放位置。
+      // 采样发生在 claim 可见后 ~1.1s，正常已播到 1s 左右；<=3000ms 即视为 prelude 起点。
+      checks.push(
+        check(
+          "进入后从曲目开头起播(prelude)",
+          Number(st.playback?.positionMs) <= 3000,
+          "positionMs=" + st.playback?.positionMs + "（期望 <=3000）",
+        ),
+      );
       const released = await waitFor(
         async () => (await ctx.api.preview()).available === false,
         (v) => v === true,

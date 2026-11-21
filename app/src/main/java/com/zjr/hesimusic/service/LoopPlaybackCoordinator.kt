@@ -109,6 +109,19 @@ class LoopPlaybackCoordinator @Inject constructor(
     private var pendingSourceInstall: PendingSourceInstall? = null
     private var pendingInstallTimeout: Job? = null
     private var pendingPublishDelay: Job? = null
+
+    /** 上一次 refresh 看到的意图对象（同一实例 = 没有重新 arm）；用于识别“新一轮进入”。 */
+    private var lastArmedRef: LoopIntent.Armed? = null
+
+    /**
+     * 00028：用户**新一次** arm 无缝循环后，下一次 source 重建必须落到 T=0（曲目开头）。
+     *
+     * 不能只看 tag：若进入前当前 item 已经是循环源（例如刚退出/重进、或 A/B 调整），
+     * tag 分支会把“当前展示位置”映射到新时间轴（真机 1293 曾出现 pos=15904ms）。
+     * “确认并保存”/菜单/调试 /loop/enter 都属于启动无缝循环，一律从 0 起播；
+     * 只有进程重启的 restore 保持原位置。
+     */
+    private var forcePreludeStartOnNextInstall = false
     private val installReadyListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
             maybePublishSourceInstall()
@@ -337,6 +350,22 @@ class LoopPlaybackCoordinator @Inject constructor(
                 player.shuffleModeEnabled
             }
             val armedBefore = loopIntent.armed.value
+            // 00028：识别“新一次显式进入”（LoopIntent.arm 每次都会新建 Armed 实例）。
+            // 同实例的后续 refresh（row/repeat/transition）不重置落点。
+            if (armedBefore == null) {
+                lastArmedRef = null
+            } else if (armedBefore !== lastArmedRef) {
+                lastArmedRef = armedBefore
+                // restore 是进程重启恢复，保留保存的位置；其余（菜单/确认并保存/debug enter）从 0。
+                if (LoopEntryStartPolicy.shouldForcePreludeStart(
+                        armedChanged = true,
+                        reason = reason,
+                        restoreReason = REASON_RESTORE,
+                    )
+                ) {
+                    forcePreludeStartOnNextInstall = true
+                }
+            }
             // 上一轮的窗口必须在任何 clear 之前读：D13 的 demote 检测靠它判断“刚才是否真在循环”。
             val previousWindow = runtime.window.value
             // 回到武装歌 / 意图已清 → 之前排队的“切歌退出”复核作废。
@@ -1083,7 +1112,11 @@ class LoopPlaybackCoordinator @Inject constructor(
         // 才把当前展示位置映射到新窗口时间轴（不重头、不跳 A）。
         val fullDurationUs = (song?.duration ?: 0L) * 1_000L
         val currentTimelineUs = player.currentPosition * 1_000L
-        val entryTimelineUs = if (tag is LoopSourceItemTag) {
+        val forcePreludeStart = forcePreludeStartOnNextInstall
+        val entryTimelineUs = if (forcePreludeStart && fullDurationUs > 0L) {
+            // 00028：新一次进入必须从曲目开头（prelude T=0），即使当前 item 已经是循环源。
+            LoopWholeTimeline.PRELUDE_START_US
+        } else if (tag is LoopSourceItemTag) {
             val oldWindow = LoopWindow(tag.songId, tag.loopStartUs, tag.loopEndUs)
             val displayUs = if (tag.fullDurationUs > 0L) {
                 LoopWholeTimeline.displayUs(currentTimelineUs, oldWindow, tag.fullDurationUs)
@@ -1146,8 +1179,10 @@ class LoopPlaybackCoordinator @Inject constructor(
         val tagged = LoopSourceMediaItem.tagged(current, plan.tag)
         val loopCountBefore = LoopAwareMediaSourceFactory.loopSourcesCreated()
         Log.i(TAG_PERF, "source rebuild before index=" + plan.index +
-            " " + describeItem(current) + " -> " + describeItem(tagged))
+            " " + describeItem(current) + " -> " + describeItem(tagged) +
+            " entryTMs=" + plan.seekTimelineMs + " forcedPreludeStart=" + forcePreludeStart)
         rebuildQueueItem(player, plan.index, tagged, plan.seekTimelineMs)
+        forcePreludeStartOnNextInstall = false
         val loopCountAfter = LoopAwareMediaSourceFactory.loopSourcesCreated()
         val builtByFactory = loopCountAfter > loopCountBefore
         Log.i(TAG_PERF, "source rebuild after index=" + player.currentMediaItemIndex +
@@ -1544,6 +1579,18 @@ class LoopPlaybackCoordinator @Inject constructor(
  * 还要 ~300ms 才 READY，于是"保存并播放"那一刻 playing=false（听觉上像没播）。
  * 现在等播放器 READY/ENDED 再发布；超时/异常由协调器强制兜底，不会永久不 claim。
  */
+/**
+ * 00028：新一次进入无缝循环是否必须从曲目开头（prelude T=0）起播。
+ *
+ * “确认并保存”/菜单/debug /loop/enter 都算启动无缝循环 → 0；
+ * 进程重启的 restore 保留保存位置；同一 intent 的后续 refresh 不算新进入。
+ */
+internal object LoopEntryStartPolicy {
+
+    fun shouldForcePreludeStart(armedChanged: Boolean, reason: String, restoreReason: String): Boolean =
+        armedChanged && reason != restoreReason
+}
+
 internal object SourceInstallPublishPolicy {
 
     /**
