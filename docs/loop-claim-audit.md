@@ -5,9 +5,24 @@
 > 分析预览页与结果页状态机、列表/菜单/播放模式、最近播放/恢复、测试脚本。
 >
 > 结论先行：当前工作区已有一版并行修复（`MusicViewModel.loopEngaged`、`/state.loop.sourceAvailable`、
-> `LoopSourceFallback` 预算 10→6），它**只覆盖了主播放 UI 的一部分**；仍有 6 类“窗口在、源没在，
-> 但某处仍按循环口径说话”的路径（共 12 条根因）。本文第 8 节按严重度列根因，第 9 节给出 `LoopClaim` 单一事实源，
+> `LoopSourceFallback` 预算 10→6），它**只覆盖了主播放 UI 的一部分**；审计时仍有 12 条“窗口在、源没在，
+> 但某处仍按循环口径说话”的路径。本文第 8 节按严重度列根因，第 9 节给出 `LoopClaim` 单一事实源，
 > 第 10/11 节给出文件级改动与测试矩阵。
+
+## 实施状态（2026-11-21）
+
+已按本清单落地并分步提交：
+
+| 步骤 | commit | 内容 |
+|---|---|---|
+| P0-1 | `fd965e2` | coordinator 只在工厂真的建成循环源时 `onInstalled`；`isInstalledFor` 查回退登记；build-failed 立即 restore |
+| P0-2 | `bce5cfd` | MediaSession/通知时长：回退时也报整曲，不再透传 `TIME_UNSET` |
+| P0-3 | `279d926` | WINDOW_INVALID 纳入统一回退登记；`reasonFor` |
+| P1 | `e1becc4` | `LoopClaim` / `LoopClaimResolver` / `LoopClaimStore`；session/UI/debug/About 统一读 claim；`/state.loop.claimed/claimActive/sourceActive/claimReason`；`/state.playback.positionMs` 依赖 claim；`loop-claim-without-source` 不变量；claim store 变更即时触发 UI 重算（消灭 1s 脏帧） |
+| P2 | `d7238ac` + `23ffd51` + `0447edb` | About 回退时显示普通播放（EXO/none），不再写 M3′；per-song reason；空闲时保留按配置显示 |
+| P3 | `c1ac1ca` | `loop-e2e.ps1` / `engine-cost-*.ps1` 等待与断言加 `claimed/sourceActive`；新增真机验证清单 |
+
+验证：`:app:testProdDebugUnitTest` 全量通过；真机清单见 [loop-claim-e2e-checklist.md](loop-claim-e2e-checklist.md)。
 
 ---
 
