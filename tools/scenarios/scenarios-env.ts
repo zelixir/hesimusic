@@ -101,6 +101,10 @@ function mainWindowCheck(name: string, state: State, songId: number, tolMs = 100
   if (!claimActiveOf(state)) {
     return check(name, true, "claimActive=false: 源未接管/已回退,不要求 position ∈ [A,B)");
   }
+  const phase = (state as any)?.loop?.phase;
+  if (phase && phase !== "loop") {
+    return check(name, true, "phase=" + phase + ": 前奏/尾奏阶段位置可在 [A,B) 外(00028 整曲时间轴)");
+  }
   if (!w) return check(name, false, "loop.window 为空(循环窗口丢失)");
   const pos = Number(state.playback?.positionMs);
   const inWindow = w.songId === songId && pos >= w.aMs - tolMs && pos <= w.bMs + tolMs;

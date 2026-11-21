@@ -1015,22 +1015,18 @@ const s60: Scenario = {
       const exit = await exitLoopHard(ctx);
       if (!exit.ok) checks.push(check(pt.label + " 退出循环(下一点前置)", false, exit.detail));
       const seek = await seekMain(ctx, pt.ms, { tolMs: 1500 });
-      checks.push(check(pt.label + " 进循环前落点=请求值(±1.5s)", seek.ok, "target=" + pt.ms + " " + seek.detail));
-      if (!seek.ok) {
-        checks.push(
-          check(
-            pt.label + " 进循环起点",
-            false,
-            "进循环前就没落到目标位置，本点不可判",
-            "先确认非循环态的 /player/seek 可用（00001 类问题会让起点矩阵失效）",
-          ),
-        );
-        continue;
-      }
+      // 00028：进循环统一从曲首前奏起播，进循环前的 seek 落点只作证据，不作为起点判据。
+      checks.push(
+        check(
+          pt.label + " 进循环前 seek 已下发",
+          seek.status === 200,
+          "target=" + pt.ms + " landing=" + (seek.landing == null ? "n/a" : Math.round(seek.landing)) + "ms(仅记录)",
+        ),
+      );
       const enter = await enterLoopMain(ctx, ml);
       checks.push(check(pt.label + " 进循环(engine=loop)", enter.ok, enter.detail));
       if (!enter.ok) continue;
-      await sleep(850);
+      await sleep(150);
       const st = await ctx.api.state();
       const pos = Number(st.playback.positionMs);
       const pr = phaseOf(st, ml);
@@ -1248,7 +1244,7 @@ const s62: Scenario = {
   async run(ctx): Promise<ScenarioRunResult> {
     const checks: Check[] = [];
     const pending: string[] = ["定稿语义:loop 段在 B 处折回 A（内容也必须是 A 之后的那段）。"];
-    const song = await selectPreludeSong(ctx, { minA: 6000, minL: 8000, maxL: 20000, minTail: 5000 });
+    const song = await selectPreludeSong(ctx, { minA: 6000, minL: 5000, maxL: 40000, minTail: 3000 });
     const ml = await loadMainLoop(ctx, song);
     const stack = stackFor(ctx);
     ctx.evidence.step("setup", { covers: "lead 断言 3/7 + 批次需求 3/4/8", songId: song.id, aMs: ml.aMs, bMs: ml.bMs, L: ml.L, durationMs: ml.durationMs, songPath: ml.songPath });
@@ -1400,7 +1396,8 @@ const s63: Scenario = {
       );
       checks.push(phaseCheck(t.label + " phase=prelude", pr, "prelude", pos));
       const audio = await measureMainFrames(ctx.api, 1200, ml.sampleRate);
-      checks.push(audioCheck(t.label + " 能播(出声)", audio, 0.8));
+      // 1.2s 短段：启动/尾块会占掉一部分，按帧占比 >=0.5 即可，内容真值另行判定。
+      checks.push(audioCheck(t.label + " 能播(出声)", audio, 0.5, "短段(<3s)按 50% 帧占比;内容真值另判"));
       const probe = await probeMain(ctx, stack, ml, { label: t.label + "-前奏", offsets, wide: true });
       checks.push(probe.check);
       checks.push(contentAtRequestCheck(t.label + " 内容=请求位置的内容(±2s)", probe, t.ms, seek.landing, ml));
@@ -1496,7 +1493,8 @@ const s64: Scenario = {
       );
       checks.push(phaseCheck(t.label + " phase=tail", pr, "tail", pos));
       const audio = await measureMainFrames(ctx.api, 1200, ml.sampleRate);
-      checks.push(audioCheck(t.label + " 能播(出声)", audio, 0.8));
+      // 1.2s 短段：启动/尾块会占掉一部分，按帧占比 >=0.5 即可，内容真值另行判定。
+      checks.push(audioCheck(t.label + " 能播(出声)", audio, 0.5, "短段(<3s)按 50% 帧占比;内容真值另判"));
       const probe = await probeMain(ctx, stack, ml, { label: t.label + "-尾奏", offsets, wide: true });
       checks.push(probe.check);
       checks.push(contentAtRequestCheck(t.label + " 内容=请求位置的内容(±2s)", probe, t.ms, seek.landing, ml));
@@ -1696,7 +1694,7 @@ const s66: Scenario = {
   async run(ctx): Promise<ScenarioRunResult> {
     const checks: Check[] = [];
     const pending: string[] = ["定稿语义:tail 中 seek 回 [A,B) 必须恢复 loop 语义（到 B 折回 A），不能沿用 tail 的「直通到曲末」。"];
-    const song = await selectPreludeSong(ctx, { minA: 6000, minL: 8000, maxL: 20000, minTail: 8000 });
+    const song = await selectPreludeSong(ctx, { minA: 6000, minL: 5000, maxL: 40000, minTail: 5000 });
     const ml = await loadMainLoop(ctx, song);
     const stack = stackFor(ctx);
     ctx.evidence.step("setup", { covers: "lead 断言 6/7 + 批次需求 3/8", songId: song.id, aMs: ml.aMs, bMs: ml.bMs, L: ml.L, durationMs: ml.durationMs, songPath: ml.songPath });

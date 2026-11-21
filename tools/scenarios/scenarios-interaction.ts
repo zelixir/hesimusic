@@ -24,10 +24,12 @@
 
 import {
   check,
+  loopPhase,
   measureMainFrames,
   measurePreviewFrames,
   msToSamples,
   pendingCheck,
+  positionPhaseCheck,
   round,
   samplesToMs,
   sleep,
@@ -915,9 +917,8 @@ const s104: Scenario = {
       const sr = ctx.sampleRateFor(song.id);
       const audible = await measureMainFrames(ctx.api, 1500, sr);
       checks.push(audioCheck("非法请求后仍出声", audible, 0.85));
-      const p = Number(installed.state?.playback?.positionMs ?? -1);
       checks.push(
-        check("位置在窗口内", w !== null && within(p, w.aMs - 1000, w.bMs + 1000), "pos=" + p + " window=" + fmtWindow(w)),
+        positionPhaseCheck("位置在窗口内", installed.state, w?.aMs ?? 0, w?.bMs ?? 0),
       );
       return {
         checks,
@@ -1011,6 +1012,15 @@ const s105: Scenario = {
             "enter=" + enter.status + " window=" + fmtWindow(w0),
             installed.ok ? undefined : "0.5s 窗口下无法进入循环:极短窗口把环回装不上",
           ),
+        );
+        // 00028 进循环从曲首前奏起播；要测 0.5s 窗口的环回，必须进入 loop 后再 seek 到 A 附近。
+        await ctx.api.post("/player/seek", { positionMs: aShort + 50 });
+        await waitFor(
+          async () => ctx.api.state(),
+          (s) => loopPhase(s) === "loop" && Number(s.playback?.positionMs) >= aShort - 300 &&
+            Number(s.playback?.positionMs) <= bShort + 300,
+          6000,
+          100,
         );
         const samples = await sampleStates(ctx, 3000, 100);
         const wraps = countWraps(samples, 200);
@@ -1566,13 +1576,8 @@ const s107: Scenario = {
       const audibleAfter = await measureMainFrames(ctx.api, 1600, sr);
       checks.push(audioCheck("分析完成后仍能出声", audibleAfter, 0.85));
       const stAfter = await ctx.api.state();
-      const pAfter = Number(stAfter.playback?.positionMs ?? -1);
       checks.push(
-        check(
-          "分析完成后位置在窗口内",
-          wAfter !== null && within(pAfter, wAfter.aMs - 1000, wAfter.bMs + 1000),
-          "pos=" + pAfter + " window=" + fmtWindow(wAfter),
-        ),
+        positionPhaseCheck("分析完成后位置在窗口内", stAfter, wAfter?.aMs ?? 0, wAfter?.bMs ?? 0),
       );
       if (windowChanged) {
         pending.push(
@@ -1883,11 +1888,7 @@ const s109: Scenario = {
       const audible = await measureMainFrames(ctx.api, 1400, sr);
       checks.push(audioCheck("连点结束后仍出声", audible, 0.85));
       checks.push(
-        check(
-          "位置仍在窗口内",
-          win0 !== null && st.playback?.positionMs != null && within(Number(st.playback.positionMs), win0.aMs - 1000, win0.bMs + 1000),
-          "pos=" + st.playback?.positionMs + " window=" + fmtWindow(win0) + "; 越界样本 " + outside,
-        ),
+        positionPhaseCheck("位置仍在窗口内", st, win0?.aMs ?? 0, win0?.bMs ?? 0),
       );
       checks.push(check("队列没有重复堆积", queue0 === queueEnd, "queueSize " + queue0 + " -> " + queueEnd));
       checks.push(check("没有降级", degDelta === 0, "degrade+" + degDelta));

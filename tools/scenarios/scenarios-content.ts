@@ -1117,8 +1117,16 @@ const s26: Scenario = {
     const li: ContentLoop = { song, songPath, sampleRate: Number(info.sampleRate ?? ctx.sampleRateFor(song.id)) || 44100, aMs, bMs, durationMs: Number(info.durationMs), L, snap: null };
 
     // 校准偏移（环带中段；回退态下内容=文件时间，与 display 一致，所以中段同样成立）
-    await ctx.api.post("/player/seek", { positionMs: Math.round(aMs + L / 2) });
-    await sleep(1200);
+    // 00028：进循环可能从 prelude 起播；seek 到中段后必须等 phase=loop 再自证，别在 prelude 采样。
+    const midMs = Math.round(aMs + L / 2);
+    await ctx.api.post("/player/seek", { positionMs: midMs });
+    await waitFor(
+      async () => ctx.api.state(),
+      (s) => s.loop?.phase === "loop" && Math.abs(Number(s.playback?.positionMs) - midMs) <= 2500,
+      8000,
+      150,
+    );
+    await sleep(800);
     const base = await probeAt(ctx, stack, li, { label: "校准(中段)", offsetMs: 0, target: "main" });
     const offset = base.result.driftMs ?? 0;
     checks.push(

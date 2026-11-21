@@ -33,7 +33,7 @@
  * 写域：本文件。不改 app，不碰其它 scenarios-*.ts。
  */
 
-import { check, measureMainFrames, measurePreviewFrames, pendingCheck, round, sleep, waitFramesSettled, waitFor } from "./harness";
+import { check, measureMainFrames, measurePreviewFrames, pendingCheck, positionPhaseCheck, round, sleep, waitFramesSettled, waitFor } from "./harness";
 import type { Check, SongInfo, State } from "./harness";
 import { createProber, defaultWorkDir } from "./content-probe";
 import type { ProbeResult, ProbeStack } from "./content-probe";
@@ -1337,14 +1337,7 @@ const g89: Scenario = {
       const silent = await measureMainFrames(ctx.api, 1200, sr);
       checks.push(check("暂停期间无输出", silent.deltaFrames === 0, "Δ=" + silent.deltaFrames + "f/" + silent.spanMs + "ms"));
       const stPaused = await ctx.api.state();
-      const posPaused = Number(stPaused.playback?.positionMs);
-      checks.push(
-        check(
-          "暂停后位置仍在 [A,B)",
-          claimActiveOf(stPaused) && posPaused >= aMs - 1000 && posPaused <= bMs + 1000,
-          "pos=" + posPaused + " window=" + aMs + ".." + bMs,
-        ),
-      );
+      checks.push(positionPhaseCheck("暂停后位置仍在窗口/前奏尾奏", stPaused, aMs, bMs));
       if (!(await tapByDesc(ctx, "播放/暂停"))) throw newSkip("播放页播放按钮消失(content-desc 读不到)");
       const resumed = await waitFor(async () => (await ctx.api.state()).playback?.playing, (p) => p === true, 8000, 100);
       checks.push(check("播放页点继续生效", resumed.ok, "playing=" + String(resumed.value)));
@@ -1753,8 +1746,8 @@ const g93: Scenario = {
       checks.push(
         check(
           "位置仍在窗口内/或已明确退出",
-          exitCondition(pos, claimNow, w),
-          "pos=" + pos + " window=" + JSON.stringify(w) + " claim=" + claimNow,
+          exitCondition(pos, claimNow, w, (s as any).loop?.phase ?? null),
+          "pos=" + pos + " window=" + JSON.stringify(w) + " claim=" + claimNow + " phase=" + String((s as any).loop?.phase ?? "?"),
         ),
       );
       const pid1 = await ctx.adb.pidof(ctx.cfg.pkg);
@@ -1783,9 +1776,11 @@ const g93: Scenario = {
 };
 
 /** 位置自洽：claim 生效时位置在 [A,B]（允许 ±1s），否则不假装窗口。 */
-function exitCondition(position: number, claimNow: boolean, w: Win | null): boolean {
+function exitCondition(position: number, claimNow: boolean, w: Win | null, phase: string | null): boolean {
   if (!claimNow) return true;
   if (w == null) return false;
+  // 00028：prelude/tail 播放头在媒体时间轴上，不要求 [A,B)。
+  if (phase && phase !== "loop") return true;
   return position >= w.aMs - 1000 && position <= w.bMs + 1000;
 }
 

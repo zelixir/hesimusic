@@ -165,6 +165,55 @@ export function round(n: number, digits = 1): number {
   return Math.round(n * f) / f;
 }
 
+/** 00028：claimActive 的兼容读法（旧包无字段时退回 engine）。 */
+export function loopClaimActive(s: any): boolean {
+  const v = s?.loop?.claimActive;
+  return v === true || (v === undefined && s?.playback?.engine === "loop");
+}
+
+export function loopPhase(s: any): string | null {
+  return s?.loop?.phase ?? null;
+}
+
+/**
+ * 00028 phase-aware 位置判据：
+ * - phase=prelude：播放头在媒体时间轴上（不要求落在 [A,B)），只要求没越过 B；
+ * - phase=tail：要求播放头已过 A（可到曲末）；
+ * - phase=loop：才要求落 [A,B)；
+ * - claimActive=false：不判位置。
+ */
+export function positionPhaseCheck(
+  name: string,
+  state: any,
+  aMs: number,
+  bMs: number,
+  tolMs = 1000,
+): Check {
+  const pos = Number(state?.playback?.positionMs);
+  if (!state || !Number.isFinite(pos)) return check(name, false, "读不到 positionMs");
+  if (!loopClaimActive(state)) return check(name, true, "claimActive=false: 不要求位置∈[A,B)");
+  const phase = loopPhase(state);
+  if (phase === "prelude") {
+    return check(
+      name,
+      pos <= bMs + tolMs,
+      "phase=prelude pos=" + pos + "ms（媒体时间轴，不要求∈[A,B)）",
+    );
+  }
+  if (phase === "tail") {
+    return check(
+      name,
+      pos >= aMs - tolMs,
+      "phase=tail pos=" + pos + "ms（媒体时间轴，不要求∈[A,B)）",
+    );
+  }
+  return check(
+    name,
+    pos >= aMs - tolMs && pos <= bMs + tolMs,
+    "phase=" + String(phase ?? "loop") + " pos=" + pos + "ms window=" + aMs + ".." + bMs,
+  );
+}
+
 export function compactState(s: State): any {
   const pb = s.playback ?? {};
   const loop = s.loop ?? {};
