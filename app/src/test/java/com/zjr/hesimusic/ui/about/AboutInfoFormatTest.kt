@@ -1,8 +1,11 @@
 package com.zjr.hesimusic.ui.about
 
+import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.source.LoopEngineInfo
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMainPlayer
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
+import com.zjr.hesimusic.service.LoopClaim
+import com.zjr.hesimusic.service.LoopClaimStore
 import com.zjr.hesimusic.service.LoopSourceFallback
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -170,22 +173,31 @@ class AboutInfoFormatTest {
         val previousMode = LoopSourceMode.current
         LoopSourceFallback.reset()
         try {
-            // SOURCE 生效 → 环带 + source。
+            // SOURCE 生效 → 环带 + source。About 也读 claim：先装一个活动 claim。
             LoopSourceMode.current = LoopSourceMode.SOURCE
             LoopSourceMainPlayer.setEnabledForTest(true)
+            LoopClaimStore.install {
+                LoopClaim(
+                    songId = 7L,
+                    window = LoopWindow(7L, 0L, 1_000_000L),
+                    sourceActive = true,
+                )
+            }
             val source = LoopEngineInfoSource.current(null)
             assertEquals(LoopEngineInfo.ENGINE_SOURCE_RING, source.engine)
             assertEquals("source", source.loopPath)
             assertEquals(0L, source.bandBytes)
 
-            // 主播放器开关关掉、没有回退原因 → 路径 none(不是把引擎名硬映射成 m3)。
+            // 主播放器开关关掉 → 没有活动 claim → 路径 none(不是把引擎名硬映射成 m3)。
             LoopSourceMainPlayer.setEnabledForTest(false)
+            LoopClaimStore.uninstall()
             val idle = LoopEngineInfoSource.current(null)
             assertEquals("none", idle.loopPath)
         } finally {
             LoopSourceMainPlayer.setEnabledForTest(null)
             LoopSourceMode.current = previousMode
             LoopSourceFallback.reset()
+            LoopClaimStore.uninstall()
         }
     }
 

@@ -1,6 +1,7 @@
 package com.zjr.hesimusic.loop.audio.source
 
 import android.content.Context
+import com.zjr.hesimusic.service.LoopClaimStore
 import com.zjr.hesimusic.service.LoopSourceFallback
 import com.zjr.hesimusic.service.LoopSourceRuntime
 
@@ -29,6 +30,9 @@ data class LoopEngineInfo(
     companion object {
         const val ENGINE_SOURCE_RING = "SOURCE_RING"
         const val ENGINE_M3_PRIME = "M3_PRIME"
+
+        /** 没有生效的循环（普通播放 / 回退）。AboutInfo 映射为「无循环 (普通播放)」。 */
+        const val ENGINE_NONE = "EXO"
         const val PATH_SOURCE = "source"
         const val PATH_M3 = "m3"
         const val PATH_NONE = "none"
@@ -56,36 +60,52 @@ data class LoopEngineInfo(
                 LoopSourceMode.refreshFromSettings(context)
                 LoopSourceMainPlayer.refreshFromSettings(context)
             }
-            // 只有当前确实有 SOURCE 接管窗口时才显示 band；否则保留上次值会污染
-            // About（例如切到主开关关闭/普通播放但仍显示 3.4MB）。
-            val installed = LoopSourceRuntime.installedWindow != null
+            // 00027/P2：About 也必须读 claim 真值。窗口只是意图；SOURCE 回退（五种原因）
+            // 时实际是普通整曲，不能再写成 M3′。per-song reason 由 claim/reasonFor 给出，
+            // provider 未安装（单测/初始化前）才退回全局 latest。
+            val claim = LoopClaimStore.claimFor(null)
+            val installed = LoopSourceRuntime.installedWindow
+            val effectiveSongId = claim.songId ?: installed?.songId
+            val effectiveWindow = claim.window ?: installed
+            val fallbackReason = claim.fallbackReason
+                ?: LoopSourceFallback.reasonFor(effectiveSongId, effectiveWindow)
+                ?: if (!LoopClaimStore.isInstalled()) LoopSourceFallback.latestReason() else null
             return of(
                 sourceMode = LoopSourceMode.isSource(),
                 mainEnabled = LoopSourceMainPlayer.enabled,
-                bandBytes = if (installed) lastBandBytes else 0L,
-                fallbackReason = LoopSourceFallback.latestReason()?.logName,
+                bandBytes = if (claim.claimActive) lastBandBytes else 0L,
+                fallbackReason = fallbackReason?.logName,
+                claimActive = claim.claimActive,
             )
         }
 
-        /** 纯判定：显式 m3 或任意回退原因存在时返回 M3_PRIME。 */
+        /**
+         * 纯判定：只有 [claimActive]（源真的在环回）才可能显示 source/m3；
+         * 回退或没有活动 claim → [ENGINE_NONE] + [PATH_NONE]（普通播放）。
+         */
         fun of(
             sourceMode: Boolean,
             mainEnabled: Boolean,
             bandBytes: Long = 0L,
             fallbackReason: String? = null,
             loopPath: String? = null,
+            claimActive: Boolean = false,
         ): LoopEngineInfo {
-            val useSource = sourceMode && mainEnabled && fallbackReason.isNullOrBlank()
+            val sourceRoute = sourceMode && mainEnabled
+            val useSource = sourceRoute && claimActive && fallbackReason.isNullOrBlank()
             val path = loopPath ?: when {
                 useSource -> PATH_SOURCE
-                !sourceMode -> PATH_M3
-                !fallbackReason.isNullOrBlank() -> PATH_M3
+                claimActive -> PATH_M3
                 else -> PATH_NONE
             }
             return LoopEngineInfo(
-                engine = if (useSource) ENGINE_SOURCE_RING else ENGINE_M3_PRIME,
+                engine = when {
+                    useSource -> ENGINE_SOURCE_RING
+                    claimActive -> ENGINE_M3_PRIME
+                    else -> ENGINE_NONE
+                },
                 loopPath = path,
-                bandBytes = if (useSource) bandBytes.coerceAtLeast(0L) else 0L,
+                bandBytes = if (claimActive) bandBytes.coerceAtLeast(0L) else 0L,
                 fallbackReason = fallbackReason?.takeIf { it.isNotBlank() },
             )
         }
