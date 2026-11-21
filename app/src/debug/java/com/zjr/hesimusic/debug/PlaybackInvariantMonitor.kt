@@ -52,8 +52,6 @@ import com.zjr.hesimusic.loop.audio.source.LoopSourceItemTag
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMainPlayer
 import com.zjr.hesimusic.service.LoopClaimStore
 import com.zjr.hesimusic.service.LoopSessionProjection
-import com.zjr.hesimusic.service.LoopSourceFallback
-import com.zjr.hesimusic.service.LoopSourceRuntime
 
 /**
  * 运行期不变量采样器（仅 debug 源集；release 不编译，天然关闭）。
@@ -403,19 +401,10 @@ internal object PlaybackInvariantMonitor {
         val tag = current?.localConfiguration?.tag
         val itemHasLoopTag = tag is LoopSourceItemTag
         val songId = current?.mediaId?.let { mediaIdToSongId(it) }
-        val runtimeWindow = d.loopRuntime().window.value
-        val installed = LoopSourceRuntime.installedWindow
-        // 「页面/会话投影处于循环模式」= SOURCE 路线 + 会话窗口有效且属于当前歌 +
-        // SOURCE 接管已登记同一窗口 + 没有被回退登记。M3′ 路线虽然 window 也非空，
-        // 但它的普通文件源是设计如此（环回在 sink 层），不能判成“投影循环、音源普通”。
-        val windowActive = routeSource &&
-            runtimeWindow != null && runtimeWindow.isValid() &&
-            (songId == null || runtimeWindow.songId == songId) &&
-            installed != null &&
-            installed.songId == runtimeWindow.songId &&
-            installed.loopStartUs == runtimeWindow.loopStartUs &&
-            installed.loopEndUs == runtimeWindow.loopEndUs &&
-            !LoopSourceFallback.isUnavailable(songId, runtimeWindow)
+        // 00027：唯一真值是 LoopClaim。source invariant 不再用
+        // “窗口 + installed + factory 最近一次 select” 近似（会被队列预取覆盖 -> #26/#108 假报警）。
+        val claim = LoopClaimStore.claimFor(songId)
+        val windowActive = claim.claimActive
         val select = if (mediaId.isEmpty()) {
             null
         } else {
@@ -427,31 +416,26 @@ internal object PlaybackInvariantMonitor {
             FAULT_SOURCE_PLAIN -> sourceEvaluator.onSample(
                 SourceInvariantSample(
                     atMs = now,
-                    windowActive = true,
-                    itemHasLoopTag = false,
-                    factoryLastSelectLoop = false,
+                    claimActive = true,
+                    sourceActive = false,
                 ),
             )
             FAULT_SOURCE_LOOP -> sourceEvaluator.onSample(
                 SourceInvariantSample(
                     atMs = now,
-                    windowActive = false,
-                    itemHasLoopTag = true,
-                    factoryLastSelectLoop = false,
+                    claimActive = false,
+                    sourceActive = true,
                 ),
             )
-            else -> if (routeSource) {
-                sourceEvaluator.onSample(
-                    SourceInvariantSample(
-                        atMs = now,
-                        windowActive = windowActive,
-                        itemHasLoopTag = itemHasLoopTag,
-                        factoryLastSelectLoop = selectLoop,
-                    ),
-                )
-            } else {
-                null
-            }
+            else -> sourceEvaluator.onSample(
+                SourceInvariantSample(
+                    atMs = now,
+                    claimActive = windowActive,
+                    sourceActive = claim.sourceActive,
+                    itemHasLoopTag = itemHasLoopTag,
+                    factoryLastSelectLoop = selectLoop,
+                ),
+            )
         }
         if (sourceEvent == null) {
             sourcePendingSamples = 0
@@ -464,7 +448,6 @@ internal object PlaybackInvariantMonitor {
         }
 
         // ---- 00027 claim 真值：claimActive/claimed 不得脱离 sourceActive ----
-        val claim = LoopClaimStore.claimFor(songId)
         val claimSample = LoopClaimInvariantSample(
             atMs = now,
             songId = songId,

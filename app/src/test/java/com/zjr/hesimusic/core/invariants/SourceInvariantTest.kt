@@ -6,71 +6,83 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * 音源一致性不变量（issue 00021）纯 JVM 测试。
+ * 音源一致性不变量（issue 00021 / 00027）纯 JVM 测试。
  *
- * 规则与任务约定一致：
- * - window!=null + tag==null → 触发；
- * - window!=null + tag!=null（且工厂最近一次 select=loop）→ 不触发；
- * - window==null + tag!=null → 反向触发。
+ * 关键回归（场景 #26/#108）：claim 与 source 都 true 时，**即使** factory 最近一次 select
+ * 是 delegate、或当前 item 的 tag 不可见，也不能误报——factory select 会被队列预取覆盖。
  */
 class SourceInvariantTest {
 
     private fun sample(
         atMs: Long = 0L,
-        windowActive: Boolean,
-        itemHasLoopTag: Boolean,
-        factoryLastSelectLoop: Boolean = true,
+        claimActive: Boolean,
+        sourceActive: Boolean,
+        itemHasLoopTag: Boolean = false,
+        factoryLastSelectLoop: Boolean = false,
     ): SourceInvariantSample = SourceInvariantSample(
         atMs = atMs,
-        windowActive = windowActive,
+        claimActive = claimActive,
+        sourceActive = sourceActive,
         itemHasLoopTag = itemHasLoopTag,
         factoryLastSelectLoop = factoryLastSelectLoop,
     )
 
     @Test
-    fun loopProjectionWithoutLoopTagTriggers() {
+    fun `claim loop but plain source triggers`() {
         val event = SourceInvariantEvaluator().onSample(
-            sample(windowActive = true, itemHasLoopTag = false),
+            sample(claimActive = true, sourceActive = false),
         )
         assertNotNull(event)
         assertEquals(InvariantCode.PROJECTION_LOOP_SOURCE_PLAIN, event!!.code)
-        assertEquals("INVARIANT violated: projection=loop but source=plain", event.message)
+        assertEquals("INVARIANT violated: claim=loop but source=plain", event.message)
     }
 
     @Test
-    fun loopProjectionWithTagAndLoopSelectDoesNotTrigger() {
+    fun `claim and source both loop does not trigger even with stale factory diagnostics`() {
+        // #26 / #108 的假报警形态：源真的在循环（claim/source 都 true），
+        // 但 factory 的最近一次 select 是 delegate 或 tag 不可见。
         assertNull(
             SourceInvariantEvaluator().onSample(
-                sample(windowActive = true, itemHasLoopTag = true, factoryLastSelectLoop = true),
+                sample(
+                    claimActive = true,
+                    sourceActive = true,
+                    itemHasLoopTag = false,
+                    factoryLastSelectLoop = false,
+                ),
             ),
         )
     }
 
     @Test
-    fun loopProjectionWithTagButPlainSelectTriggers() {
-        // 00021 的真实形态：时间线 item 有 tag，但 MediaSourceFactory 最近一次是普通源。
+    fun `plain claim but loop source triggers`() {
         val event = SourceInvariantEvaluator().onSample(
-            sample(windowActive = true, itemHasLoopTag = true, factoryLastSelectLoop = false),
-        )
-        assertNotNull(event)
-        assertEquals(InvariantCode.PROJECTION_LOOP_SOURCE_PLAIN, event!!.code)
-    }
-
-    @Test
-    fun plainProjectionWithLoopTagTriggers() {
-        val event = SourceInvariantEvaluator().onSample(
-            sample(windowActive = false, itemHasLoopTag = true),
+            sample(claimActive = false, sourceActive = true),
         )
         assertNotNull(event)
         assertEquals(InvariantCode.PROJECTION_PLAIN_SOURCE_LOOP, event!!.code)
-        assertEquals("INVARIANT violated: projection=plain but source=loop", event.message)
+        assertEquals("INVARIANT violated: claim=plain but source=loop", event.message)
     }
 
     @Test
-    fun plainProjectionWithoutLoopTagDoesNotTrigger() {
+    fun `plain claim and plain source does not trigger`() {
         assertNull(
             SourceInvariantEvaluator().onSample(
-                sample(windowActive = false, itemHasLoopTag = false),
+                sample(claimActive = false, sourceActive = false),
+            ),
+        )
+    }
+
+    @Test
+    fun `diagnostic tag alone no longer drives the verdict`() {
+        // 00021 旧判据会看 tag/select；现在只认 claim/source，避免诊断字段造成假报警。
+        assertNull(
+            SourceInvariantEvaluator().onSample(
+                sample(
+                    claimActive = false,
+                    sourceActive = false,
+                    itemHasLoopTag = true,
+                    factoryLastSelectLoop = true,
+                ),
             ),
         )
     }

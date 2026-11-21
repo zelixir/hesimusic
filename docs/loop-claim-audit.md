@@ -24,6 +24,27 @@
 
 验证：`:app:testProdDebugUnitTest` 全量通过；真机清单见 [loop-claim-e2e-checklist.md](loop-claim-e2e-checklist.md)。
 
+### 2026-11-21 追加：#26 / #108 的 projection-loop-source-plain 定性
+
+结论：**假报警**，不是 claim/resolver 的真 bug。
+
+- **#26 长窗口**：evidence `26-long-window-fallback-content.json` 的 `after.loop` 是
+  `claimed=true / claimActive=true / sourceActive=true / claimReason=null`，
+  `engine=loop / loopPath=source`，content-probe peak=1.00；源确实在环回。
+- **#108 暂停改 A/B**：恢复后 `after.loop` 是 `claimed=false / claimActive=false / sourceActive=false`
+  （已还原并退出），恢复播放期间 output 88200f/2019ms=99.1%，新 A/B 窗口内源确实在环回。
+- **根因**：旧 `SourceInvariantEvaluator` 用
+  `windowActive + itemHasLoopTag + factoryLastSelectLoop` 作判据；
+  `factoryLastSelectFor(mediaId)` 会被同 mediaId 的队列预取/恢复覆盖，不能代表“当前源”。
+  在 #26/#108 中 claim/source 都 true，仅 factory 最近 select 是 delegate → 误报。
+- **修复**：`SourceInvariantEvaluator` 改为读 `LoopClaim` 的 `claimActive/sourceActive`：
+  - `claimActive && !sourceActive` → `projection-loop-source-plain`（真 bug）；
+  - `!claimActive && sourceActive` → `projection-plain-source-loop`；
+  - 两者一致 → 不报。
+  `itemHasLoopTag` / `factoryLastSelectLoop` 仅保留在 `/state.invariantProbe` 作诊断。
+- **回归测试**：`SourceInvariantTest` 增加“claim/source 都 true、但 factory 诊断为 delegate/tag 不可见”
+  的 #26/#108 形态，断言不触发。
+
 ---
 
 ## 0. 口径与术语

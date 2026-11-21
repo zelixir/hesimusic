@@ -165,3 +165,16 @@ $inv.invariants | Where-Object { $_.code -eq 'loop-claim-without-source' }
 3. `/state.playback.positionMs` 与 `/state.loop.claimActive` 严格同步；
 4. 通知/锁屏/车机时长不再是 -1；
 5. About 在回退时显示「无循环 (普通播放)」，不再显示 M3′；不同歌的 reason 不串。
+
+## 6. #26 / #108 回归（不变量应为 0）
+
+- **#26 长窗口 fallback**（song 41126，A=23301/B=261457）：
+  - 如果 source 建成：`claimed=true / claimActive=true / sourceActive=true`，content peak >= 0.90；
+  - 如果回退：`claimed=true / claimActive=false / sourceActive=false / claimReason=ring-too-large`；
+  - 两种情况下都不应出现 `projection-loop-source-plain`（该 code 只允许在
+    `claimActive=true` 且 `sourceActive=false` 时出现；这本身应是真 bug）。
+- **#108 暂停改 A/B 后恢复**（song 39944）：
+  - 新窗口 40496..50167 生效期间 `claimActive=sourceActive=true`；
+  - 恢复后 output 帧率 >= 85%，位置从新 A 附近起播；
+  - `projection-loop-source-plain` 必须为 0；
+  - 还原原 A/B 后 `claimed=false / claimActive=false / sourceActive=false`。
