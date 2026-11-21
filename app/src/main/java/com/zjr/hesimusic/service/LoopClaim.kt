@@ -186,11 +186,11 @@ object LoopClaimResolver {
             isReplaying = audio.isReplaying,
             sourceRoute = sourceRoute,
             sourceUnavailable = unavailable,
+            // 只认该窗口的 per-song reason，绝不用全局 latest 串歌。
             fallbackReason = if (selected == null) {
                 null
             } else {
                 LoopSourceFallback.reasonFor(effectiveSongId, selected)
-                    ?: if (unavailable) LoopSourceFallback.latestReason() else null
             },
         )
     }
