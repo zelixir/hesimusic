@@ -415,10 +415,13 @@ object LoopDebugServer {
             Log.w(TAG, "loopBridge snapshot failed", t)
             linkedMapOf("error" to (t.message ?: t.javaClass.simpleName))
         }
+        // 00027：playback.engine 必须来自与 loop 同一份 bridge 快照，否则两次 snapshot 之间
+        // 的瞬时变化会让 /state 自相矛盾（engine=loop 但 loop.sourceAvailable=false）。
+        val loopEngine = (loop as? Map<*, *>)?.get("engine")?.toString()
         return linkedMapOf(
             "screen" to lastRoute,
             "analysis" to analysisSummary(d),
-            "playback" to playbackMapForState().withShadowDiagnostics(),
+            "playback" to playbackMapForState(engineOverride = loopEngine).withShadowDiagnostics(),
             "loop" to loop,
             // 运行期不变量（00020/00021 加固）：最近 10 条 {code,message,atMs,count}。
             "invariants" to PlaybackInvariantMonitor.snapshotMaps(),
@@ -506,11 +509,13 @@ object LoopDebugServer {
         }
     }
 
-    private fun playbackMapForState(): Map<String, Any?> {
+    private fun playbackMapForState(engineOverride: String? = null): Map<String, Any?> {
         val p = player ?: return notConnectedPlayback(null)
         val read = p.snapshotForRead() ?: return notConnectedPlayback(p)
         // /state 是高频轮询端点:不吐 200 条 queue(每条约 3 字段),只给 queueSize/currentIndex。
-        return LinkedHashMap(snapshotMap(read.snapshot, includeQueue = false)).apply {
+        return LinkedHashMap(
+            snapshotMap(read.snapshot, includeQueue = false, engineOverride = engineOverride),
+        ).apply {
             put("connecting", false)
             put("stale", read.stale)
             put("connected", true)
@@ -1179,7 +1184,11 @@ object LoopDebugServer {
         return linkedMapOf("exited" to true)
     }
 
-    private fun snapshotMap(snapshot: PlayerSnapshot, includeQueue: Boolean = true): Map<String, Any?> {
+    private fun snapshotMap(
+        snapshot: PlayerSnapshot,
+        includeQueue: Boolean = true,
+        engineOverride: String? = null,
+    ): Map<String, Any?> {
         val map = linkedMapOf<String, Any?>(
             "songId" to snapshot.songId,
             "title" to snapshot.title,
@@ -1196,7 +1205,7 @@ object LoopDebugServer {
             "playbackState" to snapshot.playbackState,
             "queueSize" to snapshot.queueSize,
             "currentIndex" to snapshot.currentIndex,
-            "engine" to engineName(),
+            "engine" to (engineOverride ?: engineName()),
         )
         if (includeQueue) {
             map["queue"] = snapshot.queue.map { item ->
