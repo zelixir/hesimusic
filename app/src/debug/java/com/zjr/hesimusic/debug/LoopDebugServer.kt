@@ -1190,7 +1190,7 @@ object LoopDebugServer {
             "playing" to snapshot.playing,
             "playWhenReady" to snapshot.playWhenReady,
             // 展示口径:MediaController 在 PlaybackState 刷新间会本地外推,重放跨 B 会冲出 B;
-            // 与 UI 一致地按当前 loop window 折返(幂等,无窗口/非当前歌原样返回)。
+            // 与 UI 一致地只按 LoopClaim 折返（claim 未生效 = 原样媒体时间，绝不再自己拼窗口）。
             "positionMs" to displayPositionMs(snapshot),
             "durationMs" to snapshot.durationMs,
             "buffering" to snapshot.buffering,
