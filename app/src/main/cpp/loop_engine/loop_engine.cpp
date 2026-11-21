@@ -1665,9 +1665,40 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
             const int64_t minLenSamples = int64_t(minLoopFrames) * kHop;
             const int64_t maxLenSamples = int64_t(maxLoopFrames) * kHop;
             const int64_t yTotal = int64_t(y.size());
-            // Only the legacy top candidates get the expensive treatment; each
-            // shard writes its own ScoredPair, so the stage stays deterministic.
-            parallelForRangeItems(0, int64_t(seamCount), [&](int64_t lo, int64_t hi, int /*shard*/) {
+            // Cheap pre-screen: always fully evaluate the top core, then add the
+            // best cheap-proxy candidates from the rest. This keeps the expensive
+            // 50 ms xcorr bounded while still letting a low-legacy/high-seam
+            // candidate (e.g. legacy rank 32 of a 285 s song) into the pool.
+            {
+                const size_t core = std::min<size_t>(
+                    ranked.size(), size_t(std::max(16, maxCandidates + 6)));
+                std::vector<char> selected(ranked.size(), 0);
+                for (size_t i = 0; i < core; i++) selected[i] = 1;
+                std::vector<std::pair<double, size_t>> extra;
+                for (size_t i = core; i < ranked.size(); i++) {
+                    const int64_t ca = int64_t(ranked[i].p.startF) * kHop;
+                    const int64_t cb = int64_t(ranked[i].p.endF) * kHop;
+                    extra.emplace_back(cheapSeamCost(y, ca, cb, sampleRate), i);
+                }
+                const auto better = [&](const std::pair<double, size_t>& x,
+                                        const std::pair<double, size_t>& yv) {
+                    if (x.first != yv.first) return x.first < yv.first;
+                    if (ranked[x.second].score != ranked[yv.second].score)
+                        return ranked[x.second].score > ranked[yv.second].score;
+                    return x.second < yv.second;
+                };
+                std::stable_sort(extra.begin(), extra.end(), better);
+                const size_t wild = std::min<size_t>(8, extra.size());
+                for (size_t k = 0; k < wild; k++) selected[extra[k].second] = 1;
+                std::vector<ScoredPair> kept;
+                kept.reserve(core + wild);
+                for (size_t i = 0; i < ranked.size(); i++)
+                    if (selected[i]) kept.push_back(std::move(ranked[i]));
+                ranked.swap(kept);
+            }
+            const int64_t evaluated = int64_t(ranked.size());
+            // Each shard writes its own ScoredPair, so the stage stays deterministic.
+            parallelForRangeItems(0, evaluated, [&](int64_t lo, int64_t hi, int /*shard*/) {
                 for (int64_t i = lo; i < hi; i++) {
                     ScoredPair& sp = ranked[size_t(i)];
                     sp.legacyScore = sp.score;
@@ -1700,7 +1731,10 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
                             const int64_t ryb = rbSnap - trimStart;
                             if (rya >= 0 && ryb > rya && ryb < yTotal) {
                                 const SeamQuality qr = evaluateSeam(y, rya, ryb, sampleRate);
-                                if (qr.quality > best.quality + 1e-9) {
+                                // Require a meaningful gain (2% of the 0..1 scale):
+                                // moving the cut for noise-level differences can buy
+                                // RMS in exchange for a spectral-flux regression.
+                                if (qr.quality > best.quality + 0.02) {
                                     best = qr;
                                     bestA = rya;
                                     bestB = ryb;
