@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Loop Lab — 多算法循环分析对比</title>
+<meta name="color-scheme" content="dark" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M4 16c4-9 12-9 16 0s12 9 16 0' fill='none' stroke='%234ea1ff' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+      <path d="M4 16c4-9 12-9 16 0s12 9 16 0" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+      <circle cx="16" cy="16" r="2.4" fill="currentColor"/>
+    </svg>
+    <div class="brand-text">
+      <h1>Loop Lab</h1>
+      <p>同一首歌跑多种循环分析算法，在电脑上对比并试听</p>
+    </div>
+  </div>
+  <div class="top-actions">
+    <span id="statusPill" class="status-pill">就绪</span>
+    <button id="exportBtn" class="btn ghost" disabled>
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v9m0 0 3.5-3.5M10 12 6.5 8.5M4 14v2.5h12V14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      导出对比 JSON
+    </button>
+  </div>
+</header>
+
+<main>
+  <section class="card file-card">
+    <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="选择或拖入音频文件">
+      <svg class="drop-icon" viewBox="0 0 48 48" aria-hidden="true">
+        <path d="M24 32V12m0 0-8 8m8-8 8 8" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M10 30v5a4 4 0 0 0 4 4h20a4 4 0 0 0 4-4v-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+      </svg>
+      <div class="drop-title">把音频拖到这里，或点击选择文件</div>
+      <div class="drop-sub">mp3 / flac / ogg / wav / m4a · 本地解码，不上传</div>
+      <div class="drop-actions">
+        <button id="chooseBtn" class="btn primary" type="button">选择文件</button>
+        <button id="demoBtn" class="btn ghost" type="button">载入合成测试音频（20s）</button>
+      </div>
+      <input id="fileInput" type="file" accept=".mp3,.flac,.ogg,.wav,.m4a,audio/*" hidden />
+    </div>
+    <div id="fileInfo" class="file-info hidden">
+      <div class="file-name">
+        <span class="file-dot"></span>
+        <b id="fileName"></b>
+        <button id="changeBtn" class="btn tiny ghost" type="button">更换文件</button>
+        <button id="clearBtn" class="btn tiny ghost" type="button">清空</button>
+      </div>
+      <div class="badges" id="fileBadges"></div>
+    </div>
+    <div id="longWarning" class="warning hidden">
+      <b>长音频提示</b>
+      <span>文件超过 10 分钟：配对阶段是 O(B²)，可能很慢。</span>
+      <button id="suggestStride" class="btn tiny" type="button">启用每 2 拍降采样</button>
+    </div>
+  </section>
+
+  <section class="card params-card">
+    <div class="card-head">
+      <h2>参数与算法</h2>
+      <div class="head-actions">
+        <button id="analyzeBtn" class="btn primary" type="button">开始分析</button>
+        <button id="cancelBtn" class="btn danger hidden" type="button">取消</button>
+      </div>
+    </div>
+    <div class="algo-grid">
+      <label class="algo-check" style="--c:#4ea1ff">
+        <input type="checkbox" id="algoA" checked />
+        <span class="dot"></span>
+        <span class="algo-name">A baseline</span>
+        <small>复刻现网 C++ 逻辑</small>
+      </label>
+      <label class="algo-check" style="--c:#f5a524">
+        <input type="checkbox" id="algoB" checked />
+        <span class="dot"></span>
+        <span class="algo-name">B +seamQuality</span>
+        <small>接缝质量排序/过滤</small>
+      </label>
+      <label class="algo-check" style="--c:#a78bfa">
+        <input type="checkbox" id="algoC" checked />
+        <span class="dot"></span>
+        <span class="algo-name">C +sub-beat</span>
+        <small>±30ms 精修</small>
+      </label>
+      <label class="algo-check" style="--c:#34d399">
+        <input type="checkbox" id="algoD" />
+        <span class="dot"></span>
+        <span class="algo-name">D LSH</span>
+        <small>beat 向量 + 聚类粗筛 + 暴力对照</small>
+      </label>
+      <label class="algo-check" style="--c:#fb7185">
+        <input type="checkbox" id="algoE" />
+        <span class="dot"></span>
+        <span class="algo-name">E 整秒重合</span>
+        <small>log-mel 粗筛 → 8k 波形验证 → 选点</small>
+      </label>
+    </div>
+
+    <div class="param-groups">
+      <fieldset>
+        <legend>基础（A）</legend>
+        <label>minLoop (s)<input id="minLoop" type="number" min="0.1" step="0.01" placeholder="auto 35%" /></label>
+        <label>maxLoop (s)<input id="maxLoop" type="number" min="0.2" step="0.01" placeholder="auto 100%" /></label>
+        <label>chroma 阈值<input id="chromaThreshold" type="number" min="0.001" max="1" step="0.001" value="0.0875" /></label>
+        <label>dB 阈值<input id="dbThreshold" type="number" min="0" max="20" step="0.05" value="0.5" /></label>
+        <label>topN<input id="topN" type="number" min="1" max="50" step="1" value="10" /></label>
+        <label class="check-label"><input id="beatStrideEnable" type="checkbox" /> 降采样 beat</label>
+        <label>每 k 拍取一个<input id="beatStride" type="number" min="2" max="16" step="1" value="2" disabled /></label>
+      </fieldset>
+
+      <fieldset>
+        <legend>接缝与精修（B / C）</legend>
+        <label class="check-label"><input id="seamSort" type="checkbox" checked /> seamQuality 参与排序</label>
+        <label>seam 过滤阈值<input id="minSeamQuality" type="number" min="0" max="1" step="0.01" value="0" /></label>
+        <label>接缝候选池<input id="seamPool" type="number" min="1" max="300" step="1" value="40" /></label>
+        <label>sub-beat 候选数<input id="subbeatCandidates" type="number" min="1" max="10" step="1" value="3" /></label>
+        <label>sub-beat 预算 (ms)<input id="subbeatBudget" type="number" min="100" max="10000" step="100" value="1200" /></label>
+      </fieldset>
+
+      <fieldset>
+        <legend>D（beat 向量 + LSH）</legend>
+        <label>LSH 表数 m<input id="dTables" type="number" min="1" max="32" step="1" value="8" /></label>
+        <label>桶宽 w<input id="dWidth" type="number" min="0.02" max="2" step="0.01" value="0.3" /></label>
+        <label>精筛候选池<input id="dRefinePool" type="number" min="10" max="300" step="10" value="60" /></label>
+        <label class="check-label"><input id="dInt8" type="checkbox" /> int8 量化</label>
+        <label class="check-label"><input id="dPca" type="checkbox" /> PCA 到 12 维</label>
+        <label class="check-label"><input id="dSubbeat" type="checkbox" /> D 候选 sub-beat 精修</label>
+      </fieldset>
+
+      <fieldset>
+        <legend>E（整秒重合）</legend>
+        <label>锚点间距<input id="eAnchorStep" type="number" min="0.1" max="2" step="0.05" value="0.25" /></label>
+        <label>压缩<select id="eCompression">
+          <option value="none">不压缩 (1984 维)</option>
+          <option value="pca">PCA 白化 256</option>
+          <option value="rp">随机投影 256</option>
+        </select></label>
+        <label>粗筛 topK<input id="eTopK" type="number" min="50" max="5000" step="50" value="2000" /></label>
+        <label>余弦阈值<input id="eSimThreshold" type="number" min="0" max="1" step="0.01" value="0.5" /></label>
+        <label>验证对数上限<input id="eVerifyMax" type="number" min="10" max="2000" step="10" value="250" /></label>
+        <label>NCC 峰值阈值<input id="ePeakThreshold" type="number" min="0.3" max="0.99" step="0.01" value="0.8" /></label>
+        <label>验证预算 (ms)<input id="eVerifyBudget" type="number" min="200" max="20000" step="100" value="2500" /></label>
+        <label>选点步长 (ms)<input id="eSelectStep" type="number" min="10" max="200" step="10" value="50" /></label>
+        <label>滑动多向量<input id="eSlideVariants" type="number" min="0" max="4" step="2" value="0" /></label>
+        <label>锚点上限<input id="eMaxAnchors" type="number" min="100" max="4000" step="100" value="1600" /></label>
+      </fieldset>
+    </div>
+  </section>
+
+  <section class="card wave-card">
+    <div class="card-head">
+      <h2>波形与候选</h2>
+      <div class="wave-tools">
+        <div id="legend" class="legend"></div>
+        <label class="check-label"><input id="showAllMarkers" type="checkbox" /> 显示全部标记</label>
+      </div>
+    </div>
+    <div class="wave-wrap" id="waveWrap">
+      <canvas id="waveCanvas" aria-label="音频波形"></canvas>
+      <canvas id="overlayCanvas" aria-label="候选标记"></canvas>
+      <div id="waveEmpty" class="wave-empty">载入音频后这里显示波形</div>
+      <div id="tooltip" class="tooltip hidden" role="tooltip"></div>
+    </div>
+    <div class="player" id="player">
+      <button id="playBtn" class="icon-btn" type="button" title="播放 / 暂停 (空格)" disabled>
+        <svg id="playIcon" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5v11l9-5.5-9-5.5Z" fill="currentColor"/></svg>
+        <svg id="pauseIcon" class="hidden" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5h3v11H6zM11 4.5h3v11h-3z" fill="currentColor"/></svg>
+      </button>
+      <div class="player-meta">
+        <span id="playerTitle">未选择候选</span>
+        <span id="position" class="mono">0.0 s</span>
+      </div>
+      <div class="seg" id="modeSeg" role="group" aria-label="试听模式">
+        <button data-mode="loop" class="active" type="button">整段循环</button>
+        <button data-mode="seam" type="button">接缝模式</button>
+      </div>
+      <button id="jumpSeamBtn" class="btn tiny" type="button" disabled>跳到接缝</button>
+      <label class="volume" title="音量">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 8v4h3l4 3V5L6 8H3Zm10-1.5a5 5 0 0 1 0 7M15.5 4a7.5 7.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        <input id="volume" type="range" min="0" max="1" step="0.01" value="0.8" />
+      </label>
+    </div>
+  </section>
+
+  <section class="card results-card">
+    <div class="card-head">
+      <h2>结果</h2>
+      <div id="recallBadge" class="recall-badge hidden"></div>
+    </div>
+    <div id="progressWrap" class="progress-wrap hidden">
+      <div class="progress"><div id="progressBar"></div></div>
+      <span id="progressText" class="mono">0%</span>
+    </div>
+    <div id="algoCards" class="algo-cards"></div>
+    <div id="recallPanel" class="recall-panel hidden"></div>
+    <div class="table-wrap">
+      <table id="resultTable" class="result-table">
+        <thead>
+          <tr>
+            <th>算法</th>
+            <th>A (ms)</th>
+            <th>B (ms)</th>
+            <th>长度 (s)</th>
+            <th>score</th>
+            <th>chromaDist</th>
+            <th>loudnessDiff</th>
+            <th>seamQuality</th>
+            <th>xcorrLag (ms)</th>
+            <th>相似度 / 峰值</th>
+            <th>命中 / 选点</th>
+            <th>E 对齐 / D 表命中</th>
+          </tr>
+        </thead>
+        <tbody id="resultBody"></tbody>
+      </table>
+    </div>
+    <div id="emptyResults" class="empty">
+      拖入音频（或点击“载入合成测试音频”）后会自动分析；结果、耗时与召回率显示在这里。
+    </div>
+    <details id="debugPanel" class="debug hidden">
+      <summary>调试视图：被规则丢弃的对 / 低峰值</summary>
+      <div id="debugContent"></div>
+    </details>
+  </section>
+</main>
+
+<footer class="footer">
+  <span>纯本地静态工具：Web Audio 解码 + Worker 分析；不联网、无外部 CDN。</span>
+  <span class="mono">A–E 五档算法 · 试听 · 导出 JSON</span>
+</footer>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>
