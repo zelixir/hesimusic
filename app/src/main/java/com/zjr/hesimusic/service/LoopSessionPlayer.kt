@@ -5,6 +5,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import androidx.media3.common.ForwardingPlayer
+import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import com.zjr.hesimusic.data.mapper.mediaIdToSongId
 import com.zjr.hesimusic.loop.LoopIntent
@@ -230,6 +231,87 @@ class LoopSessionPlayer(
 
     override fun seekToDefaultPosition(mediaItemIndex: Int) {
         navigateOutsideLoop { super.seekToDefaultPosition(mediaItemIndex) }
+    }
+
+    // ------------------------------------------------------------------ 进循环保留队列
+
+    /**
+     * 从列表/结果页「确认并播放」进循环时，UI 会调用 playKeepPosition(song)；当该歌
+     * 不是当前项时它退化成 play(song) → setMediaItem(单条)，把整条队列压成一首
+     * （之后 next 只能重播当前歌）。这里在**会话层**拦截这一次 setMediaItem：
+     *
+     * - 目标歌已在队列里 → 只 seek 到它的 index，队列/其它项一字不动；
+     * - 目标歌不在队列里（跨列表点播）→ 用完整队列做整表 setMediaItems，只替换
+     *   **当前项**为请求项（队列长度与 index 不变，前后歌保留），绝不压成单曲；
+     * - 队列本来就只有一首 → 保持原语义（无从保留）。
+     *
+     * 只在「已武装的正是这首歌」时生效：普通播放/队列操作仍走原生 setMediaItem。
+     */
+    override fun setMediaItem(mediaItem: MediaItem) {
+        if (keepQueueForLoopEntry(mediaItem)) return
+        super.setMediaItem(mediaItem)
+    }
+
+    override fun setMediaItem(mediaItem: MediaItem, resetPosition: Boolean) {
+        if (keepQueueForLoopEntry(mediaItem)) return
+        super.setMediaItem(mediaItem, resetPosition)
+    }
+
+    override fun setMediaItem(mediaItem: MediaItem, startPositionMs: Long) {
+        if (keepQueueForLoopEntry(mediaItem)) return
+        super.setMediaItem(mediaItem, startPositionMs)
+    }
+
+    // MediaSession 对 COMMAND_SET_MEDIA_ITEM 在某些路径会走 setMediaItems(singletonList)；
+    // 同样拦截，避免"压成一首"从另一个入口复活。
+    override fun setMediaItems(mediaItems: List<MediaItem>) {
+        if (mediaItems.size == 1 && keepQueueForLoopEntry(mediaItems[0])) return
+        super.setMediaItems(mediaItems)
+    }
+
+    override fun setMediaItems(mediaItems: List<MediaItem>, resetPosition: Boolean) {
+        if (mediaItems.size == 1 && keepQueueForLoopEntry(mediaItems[0])) return
+        super.setMediaItems(mediaItems, resetPosition)
+    }
+
+    override fun setMediaItems(mediaItems: List<MediaItem>, startIndex: Int, startPositionMs: Long) {
+        if (mediaItems.size == 1 && startIndex == 0 && keepQueueForLoopEntry(mediaItems[0])) return
+        super.setMediaItems(mediaItems, startIndex, startPositionMs)
+    }
+
+    /**
+     * @return true = 已按"保留队列"处理，调用方不要再执行原生 setMediaItem。
+     */
+    private fun keepQueueForLoopEntry(mediaItem: MediaItem): Boolean {
+        val armedSongId = loopIntent?.armed?.value?.songId ?: return false
+        val count = mediaItemCount
+        val currentIndex = currentMediaItemIndex
+        val ids = ArrayList<String>(count)
+        for (i in 0 until count) ids.add(getMediaItemAt(i).mediaId)
+        val plan = LoopEntryQueuePolicy.plan(
+            armedSongId = armedSongId,
+            requestedMediaId = mediaItem.mediaId,
+            queueMediaIds = ids,
+            currentIndex = currentIndex,
+        ) ?: return false
+        Log.i(
+            TAG,
+            "loop entry keeps queue requested=" + mediaItem.mediaId +
+                " armed=" + armedSongId + " queue=" + count + " current=" + currentIndex +
+                " target=" + plan.targetIndex + " replaceCurrent=" + plan.replaceCurrent,
+        )
+        if (plan.replaceCurrent) {
+            // 整表重建（A-086）：队列长度/index 不变，只把当前项换成请求项。
+            val items = ArrayList<MediaItem>(count)
+            for (i in 0 until count) {
+                items.add(if (i == plan.targetIndex) mediaItem else getMediaItemAt(i))
+            }
+            super.setMediaItems(items, plan.targetIndex, 0L)
+        } else if (plan.targetIndex != currentIndex) {
+            super.seekTo(plan.targetIndex, 0L)
+        }
+        if (playWhenReady && playbackState == Player.STATE_IDLE) super.prepare()
+        return true
     }
 
     /**
@@ -508,6 +590,44 @@ internal object LoopNavigationPolicy {
         if (repeatMode != Player.REPEAT_MODE_ONE) return false
         if (currentSongId == null) return false
         return armedSongId == currentSongId || claimActive
+    }
+}
+
+/**
+ * 进循环时"是否保留队列"的纯决策（单测 LoopEntryQueuePolicyTest / Robolectric 契约）。
+ *
+ * 背景：从列表长按「无缝循环」或结果页「确认并播放」时，UI 的 playKeepPosition 在目标歌
+ * 不是当前项时退化成 setMediaItem(单条) → 队列被压成一首，next 只能重播当前歌。
+ * 会话层拦截这次 setMediaItem，按本策略决定：
+ * - 目标歌已在队列 → 只移 index；
+ * - 目标歌不在队列 → 整表重建，只替换当前项（队列长度/index 不变）；
+ * - 队列只有一首 → 无可保留（返回 null，走原生 setMediaItem）。
+ */
+internal object LoopEntryQueuePolicy {
+
+    /**
+     * @param targetIndex 目标项 index（replaceCurrent=true 时 = 当前 index）
+     * @param replaceCurrent true = 目标歌不在队列里，需要把当前项替换成请求项
+     */
+    data class Plan(val targetIndex: Int, val replaceCurrent: Boolean)
+
+    fun plan(
+        armedSongId: Long?,
+        requestedMediaId: String?,
+        queueMediaIds: List<String>,
+        currentIndex: Int,
+    ): Plan? {
+        if (armedSongId == null || requestedMediaId == null) return null
+        val requestedSongId = mediaIdToSongId(requestedMediaId) ?: return null
+        if (requestedSongId != armedSongId) return null
+        if (queueMediaIds.size <= 1) return null
+        // 先精确匹配 mediaId（普通 id / queue:<seq>:<id> 副本），再退到同一首。
+        val exact = queueMediaIds.indexOfFirst { it == requestedMediaId }
+        if (exact >= 0) return Plan(exact, replaceCurrent = false)
+        val sameSong = queueMediaIds.indexOfFirst { mediaIdToSongId(it) == requestedSongId }
+        if (sameSong >= 0) return Plan(sameSong, replaceCurrent = false)
+        if (currentIndex !in queueMediaIds.indices) return null
+        return Plan(currentIndex, replaceCurrent = true)
     }
 }
 
