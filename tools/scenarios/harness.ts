@@ -192,6 +192,14 @@ export function compactState(s: State): any {
             bMs: Math.round(loop.window.loopEndUs / 1000),
           }
         : null,
+      claimed: loop.claimed,
+      claimActive: loop.claimActive,
+      sourceActive: loop.sourceActive,
+      claimReason: loop.claimReason,
+      sourceAvailable: loop.sourceAvailable,
+      fallbackReason: loop.fallbackReason,
+      bandBytes: loop.bandBytes,
+      budgetBytes: loop.budgetBytes,
       isReplaying: loop.isReplaying,
       seamCount: loop.seamCount,
       degradeCount: loop.degradeCount,
@@ -309,10 +317,23 @@ export class Adb {
     return r.out;
   }
 
+  /** 设备上文件是否存在（曲库可能残留已删除歌曲的记录）。 */
+  async fileExists(remotePath: string): Promise<boolean> {
+    if (!remotePath) return false;
+    const quoted = "'" + remotePath.replace(/'/g, "'\\''") + "'";
+    const r = await this.run(["shell", "test -f " + quoted], 10000);
+    return r.code === 0;
+  }
+
   async pidof(pkg: string): Promise<number | null> {
-    const out = await this.shell("pidof " + pkg);
-    const m = out.match(/(\d{2,})/);
-    return m ? Number(m[1]) : null;
+    // 后台冻结/缓存进程上 pidof 偶发返回空串，隔 150ms 重试 3 次，避免把"读不到"误判成"进程重启"。
+    for (let i = 0; i < 3; i++) {
+      const out = await this.shell("pidof " + pkg);
+      const m = out.match(/(\d{2,})/);
+      if (m) return Number(m[1]);
+      await sleep(150);
+    }
+    return null;
   }
 
   async versionInfo(pkg: string): Promise<{ versionCode: number | null; versionName: string | null; lastUpdateTime: string | null }> {
@@ -345,6 +366,66 @@ export class Adb {
   async home(): Promise<void> {
     selfActivity.mark();
     await this.shell("input keyevent KEYCODE_HOME");
+  }
+
+  /** 读屏幕/锁屏状态（唤醒度 + keyguard + 是否安全锁屏）。 */
+  async screenState(): Promise<{ awake: boolean; keyguard: boolean; secure: boolean; wakefulness: string }> {
+    const power = await this.shell("dumpsys power", 15000);
+    const wakefulness = power.match(/mWakefulness=(\w+)/)?.[1] ?? "unknown";
+    const policy = await this.shell("dumpsys window policy", 15000);
+    const showing = /showing=true/.test(policy);
+    const occluded = /mKeyguardOccluded=true/.test(policy);
+    const secure = /\bsecure=true\b/.test(policy);
+    return { awake: wakefulness === "Awake", keyguard: showing && !occluded, secure, wakefulness };
+  }
+
+  /** 读 STREAM_MUSIC 音量（解析 dumpsys audio；兼容 streamVolume/Current/speaker 三种字段）。 */
+  async musicVolume(): Promise<{ volume: number | null; raw: string }> {
+    const out = await this.shell("dumpsys audio", 25000);
+    const idx = out.indexOf("STREAM_MUSIC");
+    const seg = idx >= 0 ? out.slice(idx, idx + 1500) : out;
+    const m =
+      seg.match(/streamVolume:\s*(\d+)/i) ??
+      seg.match(/Current:\s*(\d+)/i) ??
+      seg.match(/speaker[^:\n]*:\s*(\d+)/i);
+    return { volume: m ? Number(m[1]) : null, raw: seg.slice(0, 900) };
+  }
+
+  /** 强制 STREAM_MUSIC=0（cmd audio 优先，旧 ROM 回退 media volume），读回确认。 */
+  async setMusicVolumeZero(): Promise<{ ok: boolean; volume: number | null; raw: string }> {
+    await this.run(["shell", "cmd audio volume --stream 3 --set 0"], 15000);
+    await sleep(200);
+    let v = await this.musicVolume();
+    if (v.volume !== 0) {
+      await this.run(["shell", "media volume --stream 3 --set 0"], 15000);
+      await sleep(200);
+      v = await this.musicVolume();
+    }
+    return { ok: v.volume === 0, volume: v.volume, raw: v.raw };
+  }
+
+  /**
+   * 幂等亮屏 + 尝试解锁（约 200-600ms）。任何场景 finally 都可安全调用。
+   * 只有无安全锁屏(secure=false)时才尝试 MENU/上滑；有 PIN 的设备必须用户自己解。
+   */
+  async wakeAndUnlock(): Promise<{ awake: boolean; keyguard: boolean; secure: boolean; wakefulness: string }> {
+    selfActivity.mark();
+    await this.shell("input keyevent KEYCODE_WAKEUP", 15000);
+    await this.shell("wm dismiss-keyguard", 15000);
+    await sleep(250);
+    let s = await this.screenState();
+    if (s.awake && s.keyguard && !s.secure) {
+      const size = await this.screenSize();
+      await this.shell("input keyevent 82", 10000);
+      await this.shell(
+        "input swipe " + Math.round(size.width / 2) + " " + Math.round(size.height * 0.8) + " " +
+          Math.round(size.width / 2) + " " + Math.round(size.height * 0.3) + " 250",
+        10000,
+      );
+      await sleep(400);
+      s = await this.screenState();
+    }
+    return s;
   }
 
   /** 用 resolve-activity 拿到真正的 launcher component，再显式 am start（-p 在本机 ROM 解析不到）。 */
@@ -550,15 +631,21 @@ export class Api {
     if (apiPath === "/confirm") selfActivity.hold(8000);
     const t0 = Date.now();
     const url = this.cfg.base + apiPath;
+    const ctrl = new AbortController();
+    const abortTimer = setTimeout(() => ctrl.abort(), timeoutMs);
+    // Bun/uk 上偶发 fetch 不响应 AbortSignal（后台冻结时 socket 半开）：再加一道 Promise 竞速，
+    // 保证单次请求最多 ~timeoutMs+500ms 返回，不让一条场景把整轮挂死。
+    const hardTimeout = <T>(ms: number): Promise<T> =>
+      new Promise<T>((_, reject) => setTimeout(() => reject(new Error("HTTP hard timeout " + ms + "ms")), ms));
     const init: RequestInit = {
       method,
       headers: { "Content-Type": "application/json; charset=utf-8" },
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: ctrl.signal,
     };
     if (body !== undefined) init.body = JSON.stringify(body);
     try {
-      const res = await fetch(url, init);
-      const text = await res.text();
+      const res = await Promise.race([fetch(url, init), hardTimeout<Response>(timeoutMs + 500)]);
+      const text = await Promise.race([res.text(), hardTimeout<string>(timeoutMs + 500)]);
       let json: any = null;
       try {
         json = text ? JSON.parse(text) : null;
@@ -568,6 +655,8 @@ export class Api {
       return { status: res.status, json, text, ms: Date.now() - t0 };
     } catch (e: any) {
       return { status: 0, json: null, text: String(e?.message ?? e), ms: Date.now() - t0 };
+    } finally {
+      clearTimeout(abortTimer);
     }
   }
 

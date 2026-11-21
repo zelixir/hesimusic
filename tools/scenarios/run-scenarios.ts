@@ -73,6 +73,7 @@ interface Opts {
   allowNonSource: boolean;
   noLock: boolean;
   forceLock: boolean;
+  allowVisibleStateChanges: boolean;
   allow: string[];
 }
 
@@ -96,6 +97,7 @@ function parseArgs(argv: string[]): Opts {
     allowNonSource: false,
     noLock: false,
     forceLock: false,
+    allowVisibleStateChanges: false,
     allow: [],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -122,6 +124,9 @@ function parseArgs(argv: string[]): Opts {
     else if (a === "--preflight") opts.preflightOnly = true;
     else if (a === "--no-lock") opts.noLock = true;
     else if (a === "--force-lock") opts.forceLock = true;
+    else if (a === "--allow-visible-state-changes" || a === "--allow-screen-changes") {
+      opts.allowVisibleStateChanges = true;
+    }
     else if (a === "--allow-invariant") opts.allow.push(next());
     else if (a === "--help" || a === "-h") {
       printHelp();
@@ -144,6 +149,7 @@ function printHelp(): void {
       "  --preflight         只做环境/路线自检后退出(不起播、不动播放状态)",
       "  --no-lock           不加设备独占锁(默认会写 /sdcard/.hesi-device-lock.json)",
       "  --force-lock        忽略他人的设备锁/成本锁(危险,仅调试用)",
+      "  --allow-visible-state-changes  允许 44/49/51/52 等改用户可见状态(锁屏/熄屏/音量/省电/充电)的场景;默认 SKIP 并排到最后",
       "  powershell -NoProfile -File tools/scenarios/run-scenarios.ps1 ...",
       "产物: e2e-artifacts/scenarios/<时间戳>/report.md + report.json + evidence/*.json",
     ].join("\n"),
@@ -321,6 +327,32 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
  *
  * 启发式而非证明：自己的动作会短暂"掩盖"外部改动；报告里仍建议独占窗口。
  */
+/** 场景前屏幕闸门：唤醒 -> dismiss -> 1s 后复查；仍不 Awake 才判 SKIP（绝不在关屏下继续）。 */
+async function ensureScreenAwake(
+  adb: Adb,
+): Promise<{ awake: boolean; keyguard: boolean; secure: boolean; wakefulness: string }> {
+  let s = await adb.wakeAndUnlock();
+  if (s.awake) return s;
+  await sleep(1000);
+  s = await adb.screenState();
+  if (s.awake) return s;
+  s = await adb.wakeAndUnlock();
+  await sleep(1000);
+  return adb.screenState();
+}
+
+/** 媒体音量闸门：用户要求测试全程 0；不为 0 就强制归零并读回确认。 */
+async function ensureMusicVolumeZero(
+  adb: Adb,
+  fix = true,
+): Promise<{ ok: boolean; volume: number | null; raw: string; fixed: boolean }> {
+  const before = await adb.musicVolume();
+  if (before.volume === 0) return { ok: true, volume: 0, raw: before.raw, fixed: false };
+  if (!fix) return { ok: false, volume: before.volume, raw: before.raw, fixed: false };
+  const set = await adb.setMusicVolumeZero();
+  return { ok: set.ok, volume: set.volume, raw: set.raw, fixed: true };
+}
+
 function stateFingerprint(s: State): string {
   const w = s.loop?.window;
   const analysis = selfActivity.analysisHeld()
@@ -347,7 +379,7 @@ async function main(): Promise<number> {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.list) {
     for (const s of SCENARIOS) {
-      const kind = s.long ? "LONG" : s.exclusive ? "EXCL" : "shared";
+      const kind = s.long ? "LONG" : s.visibleStateChanges ? "VISIBLE" : s.exclusive ? "EXCL" : "shared";
       console.log(s.id + "\t" + s.tag + "\t" + kind + "\t" + s.name + "\t" + s.key);
     }
     return 0;
@@ -402,13 +434,30 @@ async function main(): Promise<number> {
     await adb.bringForeground(cfg.pkg);
     await sleep(1200);
   }
-  // UI 场景必须前台 + 亮屏（/navigate 只是 Activity 导航，后台时 Compose 不组合）。
-  const wake = await adb.shell("dumpsys power");
-  if (/mWakefulness=Asleep/.test(wake)) {
-    await adb.shell("input keyevent KEYCODE_WAKEUP");
-    await adb.shell("wm dismiss-keyguard");
-    await sleep(500);
+  // 屏幕前置：任何场景都不允许在关屏状态下跑；亮屏+尝试解锁失败就中止。
+  const screen0 = await ensureScreenAwake(adb);
+  if (!screen0.awake) {
+    console.error("!! 前置检查失败: 屏幕不是 Awake(wakefulness=" + screen0.wakefulness + "),无法驱动 UI;先人工点亮/解锁");
+    return 2;
   }
+  console.log("screen: awake keyguard=" + screen0.keyguard + " (" + screen0.wakefulness + ")");
+  if (screen0.keyguard) {
+    console.error(
+      "!! 前置检查失败: 设备处于锁屏(keyguard showing, secure=" + screen0.secure + "),wake+dismiss 未能解锁。",
+    );
+    console.error("   需要用户在设备上解锁一次;测试期间请关闭自动锁屏/让屏幕保持常亮。");
+    console.error("   （ harness 不会尝试 PIN/密码;锁屏下 am start/uiautomator 全部不可用）");
+    return 2;
+  }
+
+  // 用户要求：测试全程媒体音量为 0。不为 0 就 cmd audio 归零并读回；仍失败就拒绝开跑。
+  const volume0 = await ensureMusicVolumeZero(adb);
+  if (!volume0.ok) {
+    console.error("!! 前置检查失败: STREAM_MUSIC 音量不是 0(volume=" + String(volume0.volume) + "),无法静音运行");
+    console.error("   手工执行: adb -s " + cfg.device + " shell cmd audio volume --stream 3 --set 0");
+    return 2;
+  }
+  console.log("audio: STREAM_MUSIC volume=0" + (volume0.fixed ? " (已强制归零)" : ""));
   const fgOk = await adb.bringForeground(cfg.pkg);
   if (!fgOk) console.warn("警告: 无法把应用带到前台,UI 场景可能失败");
   for (let i = 0; i < 20; i++) {
@@ -706,6 +755,8 @@ const pid0 = await adb.pidof(cfg.pkg);
     return true;
   });
   if (selected.length === 0) throw new Error("没有匹配的场景;--list 查看编号");
+  // 会改用户可见状态的场景永远排最后（即使 --only 指定多条）。
+  selected.sort((a, b) => Number(!!a.visibleStateChanges) - Number(!!b.visibleStateChanges));
   if (opts.exclusiveOnly) {
     console.log("独占组: " + selected.map((s) => "#" + s.id).join(",") + " (跑之前确认设备没有其它 agent 在操作)");
   }
@@ -731,10 +782,14 @@ const pid0 = await adb.pidof(cfg.pkg);
     pidBefore: number | null;
     pidAfter: number | null;
     contamination: { at: string; before: string; after: string }[];
+    screenRestore?: { awake: boolean; keyguard: boolean; secure: boolean; wakefulness: string } | null;
+    volumeRestore?: { ok: boolean; volume: number | null; fixed: boolean } | null;
   }
   const results: ScenarioResult[] = [];
+  let abortRun: string | null = null;
 
   for (const scenario of selected) {
+    if (abortRun) break;
     evidenceHolder.ev = new Evidence(scenario.key);
     if (opts.skipUi && UI_SCENARIOS.has(scenario.id)) {
       results.push({
@@ -759,6 +814,83 @@ const pid0 = await adb.pidof(cfg.pkg);
       console.log("#" + scenario.id + " SKIP " + scenario.name + " (--skip-ui)");
       continue;
     }
+    if ((scenario.visibleStateChanges || scenario.screenChanges) && !opts.allowVisibleStateChanges) {
+      results.push({
+        id: scenario.id,
+        key: scenario.key,
+        name: scenario.name,
+        tag: scenario.tag,
+        status: "SKIP",
+        durationMs: 0,
+        checks: [],
+        summary: "",
+        skipReason:
+          "默认禁用: 会改用户可见状态(锁屏/熄屏/音量/省电/充电);确认设备可被占用后加 --allow-visible-state-changes",
+        pendingDecision: [],
+        evidenceFile: "",
+        before: null,
+        after: null,
+        newInvariants: [],
+        pidBefore: null,
+        pidAfter: null,
+        contamination: [],
+        screenRestore: null,
+      });
+      console.log("#" + scenario.id + " SKIP " + scenario.name + " (visible-state; 需要 --allow-visible-state-changes)");
+      continue;
+    }
+
+    // 每个场景执行前都确认屏幕是亮的；关屏下继续跑会把后面全部拖挂。
+    const screenReady = await ensureScreenAwake(adb);
+    if (screenReady.keyguard && screenReady.secure) {
+      abortRun = "secure keyguard detected before #" + scenario.id + " (wake+dismiss 无法解除);已中止整轮";
+      results.push({
+        id: scenario.id,
+        key: scenario.key,
+        name: scenario.name,
+        tag: scenario.tag,
+        status: "SKIP",
+        durationMs: 0,
+        checks: [],
+        summary: "",
+        skipReason: "aborted: " + abortRun,
+        pendingDecision: [],
+        evidenceFile: "",
+        before: null,
+        after: null,
+        newInvariants: [],
+        pidBefore: null,
+        pidAfter: null,
+        contamination: [],
+        screenRestore: screenReady,
+      });
+      console.log("#" + scenario.id + " SKIP " + scenario.name + " (ABORT: secure keyguard)");
+      break;
+    }
+    if (!screenReady.awake) {
+      results.push({
+        id: scenario.id,
+        key: scenario.key,
+        name: scenario.name,
+        tag: scenario.tag,
+        status: "SKIP",
+        durationMs: 0,
+        checks: [],
+        summary: "",
+        skipReason: "screen off, cannot drive UI (wakefulness=" + screenReady.wakefulness + ")",
+        pendingDecision: [],
+        evidenceFile: "",
+        before: null,
+        after: null,
+        newInvariants: [],
+        pidBefore: null,
+        pidAfter: null,
+        contamination: [],
+        screenRestore: screenReady,
+      });
+      console.log("#" + scenario.id + " SKIP " + scenario.name + " (screen off: " + screenReady.wakefulness + ")");
+      continue;
+    }
 
     console.log("");
     console.log("== #" + scenario.id + " " + scenario.name + " ==");
@@ -774,6 +906,8 @@ const pid0 = await adb.pidof(cfg.pkg);
     let skipReason: string | undefined;
     const contamination: { at: string; before: string; after: string }[] = [];
     let lastFp = beforeState ? stateFingerprint(beforeState) : "";
+    let screenRestore: { awake: boolean; keyguard: boolean; secure: boolean; wakefulness: string } | null = null;
+    let volumeRestore: { ok: boolean; volume: number | null; fixed: boolean } | null = null;
     let monitorStop = false;
     const monitor = (async () => {
       while (!monitorStop) {
@@ -783,7 +917,8 @@ const pid0 = await adb.pidof(cfg.pkg);
           const s = await api.state();
           const fp = stateFingerprint(s);
           if (lastFp && fp !== lastFp) {
-            if (!selfActivity.recent(3500)) {
+            const analysisRelated = /analysis-held|analyzing/.test(lastFp) || /analysis-held|analyzing/.test(fp);
+            if (!selfActivity.recent(3500) && !analysisRelated) {
               contamination.push({ at: nowHHMMSS(), before: lastFp, after: fp });
             }
             lastFp = fp;
@@ -816,6 +951,22 @@ const pid0 = await adb.pidof(cfg.pkg);
     } finally {
       monitorStop = true;
       await monitor;
+      // 每个场景 finally 都恢复屏幕（幂等、约 200ms）：绝不让用户手机留在灭屏/锁屏。
+      try {
+        screenRestore = await adb.wakeAndUnlock();
+        evidenceHolder.ev.step("screen-restore", screenRestore);
+        if (screenRestore.keyguard && screenRestore.secure) {
+          abortRun = "secure keyguard detected after #" + scenario.id + " (wake+dismiss 无法解除);已中止整轮";
+        }
+      } catch {
+        screenRestore = null;
+      }
+      try {
+        volumeRestore = await ensureMusicVolumeZero(adb);
+        evidenceHolder.ev.step("volume-restore", volumeRestore);
+      } catch {
+        volumeRestore = null;
+      }
     }
     const durationMs = Date.now() - t0;
     const afterState = await api.state().catch(() => null);
@@ -869,6 +1020,26 @@ const pid0 = await adb.pidof(cfg.pkg);
         before: "pkg " + version.versionCode + " / " + version.lastUpdateTime,
         after: "pkg " + versionAfter.versionCode + " / " + versionAfter.lastUpdateTime,
       });
+    }
+    if (volumeRestore && !volumeRestore.ok) {
+      checks.push(
+        check(
+          "媒体音量恢复为 0",
+          false,
+          "volume=" + String(volumeRestore.volume),
+          "用户要求测试全程静音;场景结束时音量不是 0,先 cmd audio volume --stream 3 --set 0 再重跑",
+        ),
+      );
+    }
+    if (screenRestore && (!screenRestore.awake || screenRestore.keyguard)) {
+      checks.push(
+        check(
+          "屏幕已恢复亮屏/无锁屏",
+          false,
+          "awake=" + screenRestore.awake + " keyguard=" + screenRestore.keyguard + " wakefulness=" + screenRestore.wakefulness,
+          "不得让用户设备留在锁屏/灭屏;先人工解锁,再重跑本场景",
+        ),
+      );
     }
     const realFailures = checks.filter((c) => !c.pass && !c.pending);
     if (realFailures.length > 0) status = "FAIL";
@@ -925,7 +1096,10 @@ const pid0 = await adb.pidof(cfg.pkg);
       pidBefore,
       pidAfter,
       contamination,
+      screenRestore,
+      volumeRestore,
     });
+    if (abortRun) break;
   }
 
   // ---- 全局崩溃/OOM 检查 ----
@@ -943,6 +1117,11 @@ const pid0 = await adb.pidof(cfg.pkg);
   } catch (e: any) {
     console.warn("收尾失败: " + e.message);
   }
+  // 收尾也要保证：屏幕亮着、媒体音量 0（用户手机不能被留在灭屏/有声状态）。
+  const finalScreen = await adb.wakeAndUnlock().catch(() => null);
+  const finalVolume = await ensureMusicVolumeZero(adb).catch(() => null);
+  if (finalScreen && !finalScreen.awake) console.warn("!! 收尾后屏幕仍不是 Awake: " + finalScreen.wakefulness);
+  if (finalVolume && !finalVolume.ok) console.warn("!! 收尾后媒体音量不是 0: " + String(finalVolume.volume));
 
   // ---- 报告 ----
   const failedResults = results.filter((r) => r.status === "FAIL");
@@ -968,6 +1147,9 @@ const pid0 = await adb.pidof(cfg.pkg);
     crash,
     oom: crashScan.oom,
     anr: crashScan.anr,
+    finalScreen,
+    finalVolume,
+    aborted: abortRun,
     pendingDecisions,
     results: results.map((r) => ({
       ...r,
@@ -992,6 +1174,9 @@ const pid0 = await adb.pidof(cfg.pkg);
   if (crashScan.oom.length > 0) {
     console.log("!! OutOfMemoryError 证据(" + crashScan.oom.length + " 条) — 必须修复:");
     for (const line of crashScan.oom.slice(-6)) console.log("   " + line.slice(0, 220));
+  }
+  if (abortRun) {
+    console.log("!! 整轮中止: " + abortRun);
   }
   if (crash.length > 0) {
     console.log("!! 崩溃/ANR 证据(" + crash.length + " 条):");
@@ -1018,6 +1203,7 @@ const pid0 = await adb.pidof(cfg.pkg);
   console.log("数据: " + path.join(runDir, "report.json"));
   console.log("证据: " + path.join(runDir, "evidence"));
 
+  if (abortRun) return 2;
   const bad =
     failedResults.length > 0 ||
     crash.length > 0 ||
@@ -1103,6 +1289,7 @@ function buildMarkdown(report: any, results: any[], runDir: string): string {
   L.push("- 包更新时间: " + report.lastUpdateTime);
   L.push("- pid: " + report.pidStart + " -> " + report.pidEnd + "  adb 调用: " + report.adbCalls);
   L.push("- 总耗时: " + Math.round(report.totalMs / 1000) + "s");
+  if (report.aborted) L.push("- **整轮中止**: " + report.aborted);
   L.push("- 选歌: primary " + songLine(report.songs.primary) + "; short " + songLine(report.songs.short) + "; unconfirmed " + songLine(report.songs.unconfirmed));
   L.push("");
   L.push("## 结果总览");
@@ -1203,6 +1390,23 @@ function buildMarkdown(report: any, results: any[], runDir: string): string {
     L.push("");
     for (const line of allowedSeen) L.push("- " + line);
   }
+  L.push("");
+  L.push("## 屏幕/音量恢复（每场景）");
+  L.push("");
+  L.push("| # | 场景 | screenRestore | volumeRestore |");
+  L.push("|---|---|---|---|");
+  for (const r of results) {
+    const s = r.screenRestore;
+    const v = r.volumeRestore;
+    L.push(
+      "| " + r.id + " | " + r.name + " | " +
+        (s ? "awake=" + s.awake + ", keyguard=" + s.keyguard : (r.status === "SKIP" ? "skipped" : "n/a")) + " | " +
+        (v ? "volume=" + String(v.volume) + (v.fixed ? " (fixed)" : "") : (r.status === "SKIP" ? "skipped" : "n/a")) + " |",
+    );
+  }
+  L.push("");
+  L.push("- 收尾屏幕: " + (report.finalScreen ? "awake=" + report.finalScreen.awake + ", keyguard=" + report.finalScreen.keyguard : "n/a"));
+  L.push("- 收尾媒体音量: " + (report.finalVolume ? String(report.finalVolume.volume) + (report.finalVolume.ok ? "" : " (异常)") : "n/a"));
   L.push("");
   L.push("## 待落地依赖");
   L.push("");

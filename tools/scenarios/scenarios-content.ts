@@ -97,6 +97,12 @@ interface ContentLoop {
   snap: any;
 }
 
+function sortByBandLength(cands: SongInfo[]): void {
+  cands.sort(
+    (a, b) => Number(a.loopEndMs) - Number(a.loopStartMs) - (Number(b.loopEndMs) - Number(b.loopStartMs)) || a.id - b.id,
+  );
+}
+
 function decodable(s: SongInfo): boolean {
   return /.(mp3|wav|m4a|aac|flac|ogg|opus)$/i.test(s.path);
 }
@@ -133,11 +139,17 @@ async function selectContentSong(
   if (opts.nearTail) {
     cands.sort((a, b) => a.durationMs - Number(a.loopEndMs) - (b.durationMs - Number(b.loopEndMs)) || a.id - b.id);
   } else {
-    cands.sort(
-      (a, b) => Number(a.loopEndMs) - Number(a.loopStartMs) - (Number(b.loopEndMs) - Number(b.loopStartMs)) || a.id - b.id,
-    );
+    sortByBandLength(cands);
   }
-  return cands[0];
+  // 曲库可能残留"磁盘上已删除"的歌（上一轮 #40740 四季的悠游.ogg）：按排序逐个探文件，
+  // 最多看 8 个，避免整轮因为一首幽灵歌失败。
+  for (const s of cands.slice(0, 8)) {
+    if (await ctx.adb.fileExists(s.path)) return s;
+  }
+  throw newSkipError(
+    "前 8 个候选歌的文件都不在磁盘上（曲库记录与文件不一致）: " +
+      cands.slice(0, 8).map((s) => "#" + s.id + " " + s.path).join(" | "),
+  );
 }
 
 /**

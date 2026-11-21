@@ -90,8 +90,17 @@ function audioCheck(name: string, m: FrameMeasurement, minRatio: number, hint?: 
   );
 }
 
+function claimActiveOf(state: State | null): boolean {
+  if (!state) return false;
+  const v = (state as any).loop?.claimActive;
+  return v === true || (v === undefined && state.playback?.engine === "loop");
+}
+
 function mainWindowCheck(name: string, state: State, songId: number, tolMs = 1000): Check {
   const w = loopWindowOf(state);
+  if (!claimActiveOf(state)) {
+    return check(name, true, "claimActive=false: 源未接管/已回退,不要求 position ∈ [A,B)");
+  }
   if (!w) return check(name, false, "loop.window 为空(循环窗口丢失)");
   const pos = Number(state.playback?.positionMs);
   const inWindow = w.songId === songId && pos >= w.aMs - tolMs && pos <= w.bMs + tolMs;
@@ -932,6 +941,8 @@ const sEnv44: Scenario = {
   name: "锁屏 -> 解锁",
   tag: "环境",
   exclusive: true,
+  screenChanges: true,
+  visibleStateChanges: true,
   timeoutMs: 150000,
   async run(ctx) {
     const checks: Check[] = [];
@@ -1026,7 +1037,8 @@ const sEnv44: Scenario = {
           round(audioAfter.ratio * 100, 0) + "%; pos=" + String(stUnlocked.playback.positionMs),
       };
     } finally {
-      // 兜底:中途抛错时别把设备留在锁屏/灭屏状态。
+      // 兜底:中途抛错时别把设备留在锁屏/灭屏状态。先幂等亮屏，再尝试解锁。
+      await ctx.adb.wakeAndUnlock();
       const backCleanup = await ensureAwakeUnlocked(ctx, ctx.cfg.pkg);
       const stCleanup = await ctx.api.state().catch(() => null);
       ctx.evidence.step("cleanup", {
@@ -1467,6 +1479,8 @@ const sEnv49: Scenario = {
   name: "省电模式 + Doze",
   tag: "环境",
   exclusive: true,
+  screenChanges: true,
+  visibleStateChanges: true,
   timeoutMs: 180000,
   async run(ctx) {
     const checks: Check[] = [];
@@ -1587,11 +1601,10 @@ const sEnv49: Scenario = {
       const now = (await ctx.adb.shell("settings get global low_power", 15000)).trim();
       const ok =
         origLowPower === "null" || origLowPower === "" ? now === "null" || now === "" : now === origLowPower;
-      // 熄过屏就恢复亮屏解锁
-      if (screenOff) {
-        const back = await ensureAwakeUnlocked(ctx, ctx.cfg.pkg);
-        ctx.evidence.step("doze-screen-on", { ok: back.ok, detail: back.detail });
-      }
+      // 不管熄屏状态读到什么，finally 都要把屏幕恢复：用户手机不能被留在灭屏/锁屏。
+      const wake = await ctx.adb.wakeAndUnlock();
+      const back = await ensureAwakeUnlocked(ctx, ctx.cfg.pkg);
+      ctx.evidence.step("doze-screen-on", { ok: back.ok, detail: back.detail, wake });
       const stCleanup = await ctx.api.state().catch(() => null);
       ctx.evidence.step("restore-power", {
         unforceOut: (unforce.out + unforce.err).slice(0, 200),
@@ -1621,6 +1634,7 @@ const sEnv50: Scenario = {
   name: "系统重启后恢复上次循环状态",
   tag: "环境",
   long: true,
+  visibleStateChanges: true,
   timeoutMs: 480000,
   async run(ctx) {
     const checks: Check[] = [];
@@ -1735,6 +1749,7 @@ const sEnv51: Scenario = {
   key: "env-usb-charging",
   name: "充电器插拔",
   tag: "环境",
+  visibleStateChanges: true,
   timeoutMs: 120000,
   async run(ctx) {
     const checks: Check[] = [];
@@ -1808,6 +1823,7 @@ const sEnv52: Scenario = {
   key: "env-volume-keys",
   name: "音量键调整",
   tag: "环境",
+  visibleStateChanges: true,
   timeoutMs: 120000,
   async run(ctx) {
     const checks: Check[] = [];

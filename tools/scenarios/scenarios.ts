@@ -98,6 +98,10 @@ export interface Scenario {
   exclusive?: boolean;
   /** 长窗口/长稳定性场景:默认不跑，用 --long 显式触发。 */
   long?: boolean;
+  /** 会锁屏/熄屏的场景：默认 SKIP，必须 --allow-visible-state-changes 才执行。 */
+  screenChanges?: boolean;
+  /** 会改用户可见状态(锁屏/熄屏/音量/省电/充电)：默认 SKIP，且强制排到常规场景之后。 */
+  visibleStateChanges?: boolean;
   /** 覆盖单场景硬超时（长稳定性需要 10 分钟+）。 */
   timeoutMs?: number;
   run: (ctx: ScenarioCtx) => Promise<ScenarioRunResult>;
@@ -258,8 +262,19 @@ async function waitLoopGone(
   return { ok: w.ok, elapsedMs: w.elapsedMs, state: w.value };
 }
 
+function claimActiveOf(state: State | null): boolean {
+  if (!state) return false;
+  const v = (state as any).loop?.claimActive;
+  // 旧包没有 claimActive：退回 engine 口径（bridge 已保证 engine=loop 等价 claimActive）。
+  return v === true || (v === undefined && state.playback?.engine === "loop");
+}
+
 function mainWindowCheck(name: string, state: State | null, songId: number): Check {
   const w = state ? loopWindowOf(state) : null;
+  // 00027：claimActive=false 时播放头是原始媒体时间（不折返），不应要求它落在 [A,B)。
+  if (state && !claimActiveOf(state)) {
+    return check(name, true, "claimActive=false: 源未接管/已回退,不要求 position ∈ [A,B)");
+  }
   if (!w) return check(name, false, "loop.window 为空");
   const inWindow =
     w.songId === songId &&
@@ -568,11 +583,25 @@ const s5: Scenario = {
     if (exit.status !== 200) throw new Error("/loop/exit -> " + exit.status);
     const gone = await waitLoopGone(ctx, 6000);
     const latency = Date.now() - t0;
-    const st = gone.state ?? (await ctx.api.state());
-    ctx.evidence.step("loop-exit", { latencyMs: latency, window: loopWindowOf(st), repeatMode: st.playback.repeatMode });
+    // /loop/exit 切换 bridge 时会短暂 playing=false（音频随后继续）：等它稳定再判，别把过渡态当失败。
+    const resumed = await waitFor(async () => ctx.api.state(), (s) => s.playback?.playing === true, 3000, 100);
+    const st = resumed.value ?? gone.state ?? (await ctx.api.state());
+    ctx.evidence.step("loop-exit", {
+      latencyMs: latency,
+      window: loopWindowOf(st),
+      repeatMode: st.playback.repeatMode,
+      playing: st.playback.playing,
+      resumedAfterMs: resumed.elapsedMs,
+    });
     checks.push(check("退出循环模式", gone.ok, "engine=" + st.playback.engine + " 耗时 " + latency + "ms"));
     // 协议口径 /loop/exit 只清意图、不恢复 repeat（见 LoopDebugServer.handleLoopExit）；repeat 值只记证据。
-    checks.push(check("退出后仍在播放", st.playback.playing === true, "playing=" + st.playback.playing + " repeat=" + st.playback.repeatMode));
+    checks.push(
+      check(
+        "退出后仍在播放",
+        resumed.ok,
+        "playing=" + st.playback.playing + " repeat=" + st.playback.repeatMode + " (等待 " + resumed.elapsedMs + "ms)",
+      ),
+    );
     const posAfter = Number(st.playback.positionMs);
     checks.push(
       check(
