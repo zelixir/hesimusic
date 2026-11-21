@@ -80,6 +80,30 @@ class LoopClaimTest {
     }
 
     @Test
+    fun `claim stays active in tail and reports tail phase`() {
+        // issue 00028：tail 是合法阶段，claimActive 只看源/窗口/歌，不看播放位置。
+        val claim = LoopClaim(
+            songId = songId,
+            window = window,
+            sourceActive = true,
+            sourceTimeline = true,
+            phaseHint = com.zjr.hesimusic.loop.LoopPhase.TAIL,
+        )
+        assertTrue(claim.claimActive)
+        assertTrue(claim.debugFields().claimed)
+        assertTrue(claim.debugFields().claimActive)
+        assertEquals(
+            com.zjr.hesimusic.loop.LoopPhase.TAIL,
+            claim.phaseForDisplayUs(81_000_000L),
+        )
+        assertEquals(
+            com.zjr.hesimusic.loop.LoopPhase.PRELUDE,
+            claim.phaseForDisplayUs(0L),
+        )
+        assertEquals(81_000L, claim.displayPositionMs(81_000L))
+    }
+
+    @Test
     fun `invalid window never claims`() {
         val zero = LoopWindow(songId, 50_000_000L, 50_000_000L)
         val reversed = LoopWindow(songId, 80_000_000L, 50_000_000L)
