@@ -46,6 +46,16 @@ void setThreads(int n) {
 #endif
 }
 
+// v8: seam ranking is deterministic too, but pin the switch so the test never
+// depends on an ambient LOOP_ENGINE_SEAM value.
+void setSeam(int on) {
+#ifdef _WIN32
+    _putenv_s("LOOP_ENGINE_SEAM", on ? "1" : "0");
+#else
+    setenv("LOOP_ENGINE_SEAM", on ? "1" : "0", 1);
+#endif
+}
+
 uint32_t nextRand(uint32_t& state) {
     state = state * 1664525u + 1013904223u;
     return state;
@@ -230,6 +240,24 @@ void compare(const Snapshot& ref, const Snapshot& got, const std::string& label)
         check(sameDouble(a.pairs[i].loudnessDifference, b.pairs[i].loudnessDifference),
               label + " pair ld");
         check(sameDouble(a.pairs[i].score, b.pairs[i].score), label + " pair score");
+        // v8 seam fields: the seam stage must stay bitwise deterministic across
+        // thread counts (it is per-candidate local work).
+        check(sameDouble(a.pairs[i].legacyScore, b.pairs[i].legacyScore),
+              label + " pair legacyScore");
+        check(sameDouble(a.pairs[i].seamQuality, b.pairs[i].seamQuality),
+              label + " pair seamQuality");
+        check(sameDouble(a.pairs[i].seamCorrelation, b.pairs[i].seamCorrelation),
+              label + " pair seamCorrelation");
+        check(sameDouble(a.pairs[i].seamRmsJumpDb, b.pairs[i].seamRmsJumpDb),
+              label + " pair seamRmsJumpDb");
+        check(sameDouble(a.pairs[i].seamFluxRatio, b.pairs[i].seamFluxRatio),
+              label + " pair seamFluxRatio");
+        check(a.pairs[i].seamEvaluated == b.pairs[i].seamEvaluated,
+              label + " pair seamEvaluated");
+        check(a.pairs[i].refinedStartSample == b.pairs[i].refinedStartSample,
+              label + " pair refinedStartSample");
+        check(a.pairs[i].refinedEndSample == b.pairs[i].refinedEndSample,
+              label + " pair refinedEndSample");
     }
 }
 
@@ -291,6 +319,7 @@ void testDegenerate() {
 
 int main() {
     std::printf("loop_engine parallel/serial bit-exactness test\n");
+    setSeam(1); // production default: seam-aware ranking enabled
     const int sr = 44100;
     testSignal("music-12s-stereo", makeMusic(12.0, sr, 2));
     testSignal("music-6s-mono", makeMusic(6.0, sr, 1));

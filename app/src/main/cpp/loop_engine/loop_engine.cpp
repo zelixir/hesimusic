@@ -1134,13 +1134,13 @@ int64_t nearestZeroCrossing(const float* pcm, int channels, int64_t totalFrames,
 // and never inspects the waveform that is actually spliced at B->A. This stage
 // measures the splice itself and feeds a 0..1 quality into the final ranking.
 //
-// Why the *tail* windows: playback runs ... y[B-2], y[B-1], then jumps to y[A].
-// If the loop is a true repetition, y[A+i] == y[B+i], so the step y[B-1] -> y[A]
-// equals the natural step y[B-1] -> y[B]. Correlating [B-W, B) with [A-W, A)
-// therefore measures phase/waveform continuity at the cut (the best lag pins the
-// residual phase offset). Correlating [B-W, B) with [A, A+W) would instead
-// compare the end of one phrase with its beginning, which is near-zero for a
-// valid loop and would reward discontinuous cuts.
+// Why the *head* windows: after the cut, playback continues with [A, A+W).
+// If the loop is a true repetition, that equals the natural continuation
+// [B, B+W); a high normalized xcorr therefore means the listener cannot tell
+// the jump from "the song simply kept playing" (the best lag pins the residual
+// phase offset). Tail-tail was measured too (median 0.55 vs head 0.71 over the
+// six evaluation songs); the brief's tail-head pairing compares the end of one
+// phrase with the beginning of another and is not a seam criterion.
 constexpr int kSeamWindowMs = 50;       // analysis window on each side of the cut
 constexpr int kSeamMaxLagMs = 10;       // phase search range for the xcorr
 constexpr int kSeamRefineRangeMs = 30;  // sub-beat local search radius
@@ -1156,8 +1156,20 @@ bool seamEnabled() {
     return env[0] != '0';
 }
 
+// Host-tooling switch used to quantify the sub-beat stage in isolation.
+// Default ON; the app never sets it.
+bool seamRefineEnabled() {
+    const char* env = std::getenv("LOOP_ENGINE_SEAM_REFINE");
+    if (env == nullptr || env[0] == '\0') return true;
+    return env[0] != '0';
+}
+
 double seamWeight() {
-    double w = 0.30;
+    // 0.50 is the measured knee: it promotes every clearly better-seam candidate
+    // (shiny/katatsumuri/guren) while keeping the worst chroma-score drop at
+    // 0.123 and leaving the demo-confirmed unfurling loop untouched. 0.60 starts
+    // overriding that confirmed loop for a marginal seam gain.
+    double w = 0.50;
     const char* env = std::getenv("LOOP_ENGINE_SEAM_WEIGHT");
     if (env != nullptr && env[0] != '\0') {
         char* end = nullptr;
@@ -1168,7 +1180,7 @@ double seamWeight() {
 }
 
 struct SeamQuality {
-    double correlation = 0.0;  // peak normalized xcorr of [B-W,B) and [A-W,A)
+    double correlation = 0.0;  // peak normalized xcorr of [B,B+W) and [A,A+W)
     double rmsJumpDb = 0.0;    // |RMS([A,A+W)) - RMS([B-W,B))| in dB
     double fluxRatio = 1.0;    // seam spectral distance / local mean distance
     double quality = 0.0;      // blended 0..1 score
@@ -1184,26 +1196,45 @@ double rmsAt(const std::vector<double>& y, int64_t begin, int64_t end) {
 }
 
 // Normalized cross-correlation peak over lag in [-lagMax, lagMax].
-double tailCorrelation(const std::vector<double>& y, int64_t a, int64_t b, int win, int lagMax) {
-    const int64_t w = std::min<int64_t>(win, std::min(a, b));
+// Head windows: [B, B+W) is what would naturally play after the cut; [A, A+W)
+// is what actually plays after the jump. A high peak means the splice is
+// (within a residual phase shift) indistinguishable from the natural
+// continuation. Tail-tail and the brief's tail-head pairing were measured too;
+// see docs/loop-analysis-improvements.md §1.1 for the numbers.
+double seamCorrelation(const std::vector<double>& y, int64_t a, int64_t b, int win, int lagMax) {
+    const int64_t total = int64_t(y.size());
+    const int64_t w = std::min<int64_t>(win, std::min<int64_t>(total - b, total - a));
     if (w < 32) return 0.0;
     double eb = 0.0, ea = 0.0;
     for (int64_t i = 0; i < w; i++) {
-        const double vb = y[size_t(b - w + i)];
-        const double va = y[size_t(a - w + i)];
+        const double vb = y[size_t(b + i)];
+        const double va = y[size_t(a + i)];
         eb += vb * vb;
         ea += va * va;
     }
     const double denom = std::sqrt(eb * ea);
     if (denom <= 1e-9) return 0.0;
-    double best = -1.0;
-    for (int64_t lag = -lagMax; lag <= lagMax; lag++) {
+    auto corrAt = [&](int64_t lag) {
         const int64_t lo = std::max<int64_t>(0, lag);
         const int64_t hi = std::min<int64_t>(w - 1, w - 1 + lag);
         double num = 0.0;
         for (int64_t i = lo; i <= hi; i++)
-            num += y[size_t(b - w + i)] * y[size_t(a - w + i - lag)];
-        best = std::max(best, num / denom);
+            num += y[size_t(b + i)] * y[size_t(a + i - lag)];
+        return num / denom;
+    };
+    // Coarse lag sweep (step 2) then a +/-2 fine pass: the peak value is what
+    // feeds the score, and one-sample lag precision is far below audibility.
+    double best = -1.0;
+    int64_t bestLag = 0;
+    for (int64_t lag = -lagMax; lag <= lagMax; lag += 2) {
+        const double v = corrAt(lag);
+        if (v > best) { best = v; bestLag = lag; }
+    }
+    for (int64_t lag = std::max<int64_t>(-lagMax, bestLag - 2);
+         lag <= std::min<int64_t>(lagMax, bestLag + 2); lag++) {
+        if (lag == bestLag) continue;
+        const double v = corrAt(lag);
+        if (v > best) { best = v; bestLag = lag; }
     }
     return std::max(0.0, best);
 }
@@ -1268,7 +1299,7 @@ SeamQuality evaluateSeam(const std::vector<double>& y, int64_t a, int64_t b, int
     SeamQuality q;
     const int64_t win = std::max<int64_t>(64, int64_t(sr) * kSeamWindowMs / 1000);
     const int lagMax = int(std::max<int64_t>(8, int64_t(sr) * kSeamMaxLagMs / 1000));
-    q.correlation = tailCorrelation(y, a, b, int(win), lagMax);
+    q.correlation = seamCorrelation(y, a, b, int(win), lagMax);
     const double rb = rmsAt(y, b - win, b);
     const double ra = rmsAt(y, a, a + win);
     q.rmsJumpDb = (rb > 1e-9 && ra > 1e-9)
@@ -1282,9 +1313,32 @@ SeamQuality evaluateSeam(const std::vector<double>& y, int64_t a, int64_t b, int
     return q;
 }
 
-// Cheap O(short-window) seam cost used by the sub-beat local search. It mirrors
-// the full metric's dominant terms (boundary step, slope match, short-term
-// energy) without the xcorr/spectral cost, so a ±30 ms grid stays inexpensive.
+// Lag-0 normalized correlation of the two short heads (10 ms). Cheap enough to
+// run inside the local search, and strongly correlated with the full 50 ms
+// xcorr peak: without it the search drifts into quiet regions where the sample
+// step is small but the waveform is unrelated.
+double shortSeamCorrelation(const std::vector<double>& y, int64_t a, int64_t b, int sr) {
+    const int64_t total = int64_t(y.size());
+    const int64_t w = std::min<int64_t>(std::max<int64_t>(32, int64_t(sr) * 10 / 1000),
+                                        std::min<int64_t>(total - b, total - a));
+    if (w < 32) return 0.0;
+    double eb = 0.0, ea = 0.0, num = 0.0;
+    for (int64_t i = 0; i < w; i++) {
+        const double vb = y[size_t(b + i)];
+        const double va = y[size_t(a + i)];
+        eb += vb * vb;
+        ea += va * va;
+        num += vb * va;
+    }
+    const double denom = std::sqrt(eb * ea);
+    return denom > 1e-9 ? std::max(-1.0, std::min(1.0, num / denom)) : 0.0;
+}
+
+// Cheap negative seam quality used by the sub-beat local search (lower is
+// better). It mirrors the full metric's dominant terms: short-window waveform
+// correlation, short-term energy and boundary smoothness. The full metric is
+// computed only once at the anchor and once at the refined position, and the
+// caller keeps whichever is better, so the search can never regress the seam.
 double cheapSeamCost(const std::vector<double>& y, int64_t a, int64_t b, int sr) {
     const int64_t total = int64_t(y.size());
     if (a < 2 || b < 2 || a >= total || b > total || b <= a) return 1e9;
@@ -1297,7 +1351,10 @@ double cheapSeamCost(const std::vector<double>& y, int64_t a, int64_t b, int sr)
                                    (y[size_t(b - 1)] - y[size_t(b - 2)])) / local;
     const double db = (rb > 1e-9 && ra > 1e-9)
                           ? std::fabs(20.0 * std::log10(ra / rb)) : 60.0;
-    return 2.0 * step + slope + 0.5 * db;
+    const double corrScore = 0.5 * (shortSeamCorrelation(y, a, b, sr) + 1.0);
+    const double energyScore = std::exp(-db / 3.0);
+    const double smoothScore = 1.0 / (1.0 + 2.0 * step + slope);
+    return -(0.55 * corrScore + 0.30 * energyScore + 0.15 * smoothScore);
 }
 
 // Coordinate descent around the beat-aligned cut: coarse 5 ms grid over ±30 ms,
@@ -1604,6 +1661,7 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
                 std::min<size_t>(scored.size(), size_t(std::max(32, maxCandidates * 3)));
             ranked.assign(scored.begin(), scored.begin() + ptrdiff_t(seamCount));
             const double wSeam = seamWeight();
+            const bool refineOn = seamRefineEnabled();
             const int64_t minLenSamples = int64_t(minLoopFrames) * kHop;
             const int64_t maxLenSamples = int64_t(maxLoopFrames) * kHop;
             const int64_t yTotal = int64_t(y.size());
@@ -1619,34 +1677,40 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
                                                               sampleRate, a0);
                     const int64_t bSnap = nearestZeroCrossing(interleavedPcm, channels, frames,
                                                               sampleRate, b0);
-                    int64_t ya = aSnap - trimStart;
-                    int64_t yb = bSnap - trimStart;
-                    const int64_t aFirst = ya;
-                    const int64_t bFirst = yb;
-                    if (ya >= 2 && yb >= 2 && ya < yTotal && yb < yTotal && yb > ya) {
-                        refineSeam(y, sampleRate, minLenSamples, maxLenSamples, ya, yb);
-                        if (ya >= 1 && yb < yTotal && yb > ya) {
-                            const int64_t ra = nearestZeroCrossing(
-                                interleavedPcm, channels, frames, sampleRate, ya + trimStart);
-                            const int64_t rb = nearestZeroCrossing(
-                                interleavedPcm, channels, frames, sampleRate, yb + trimStart);
-                            const int64_t nya = ra - trimStart;
-                            const int64_t nyb = rb - trimStart;
-                            if (nya >= 1 && nyb < yTotal && nyb > nya) {
-                                ya = nya;
-                                yb = nyb;
-                            } else {
-                                ya = aFirst;
-                                yb = bFirst;
+                    int64_t ya = std::max<int64_t>(0, std::min<int64_t>(yTotal - 1,
+                                                                    aSnap - trimStart));
+                    int64_t yb = std::max<int64_t>(ya + 1, std::min<int64_t>(yTotal - 1,
+                                                                    bSnap - trimStart));
+                    // Full metric at the beat-aligned anchor...
+                    SeamQuality best = evaluateSeam(y, ya, yb, sampleRate);
+                    int64_t bestA = ya;
+                    int64_t bestB = yb;
+                    // ...then at the refined position; keep whichever is better so
+                    // the local search can never degrade the measured seam.
+                    if (refineOn && ya >= 2 && yb >= 2 && yb > ya && yb < yTotal) {
+                        int64_t ra = ya;
+                        int64_t rb = yb;
+                        refineSeam(y, sampleRate, minLenSamples, maxLenSamples, ra, rb);
+                        if (ra != ya || rb != yb) {
+                            const int64_t raSnap = nearestZeroCrossing(
+                                interleavedPcm, channels, frames, sampleRate, ra + trimStart);
+                            const int64_t rbSnap = nearestZeroCrossing(
+                                interleavedPcm, channels, frames, sampleRate, rb + trimStart);
+                            const int64_t rya = raSnap - trimStart;
+                            const int64_t ryb = rbSnap - trimStart;
+                            if (rya >= 0 && ryb > rya && ryb < yTotal) {
+                                const SeamQuality qr = evaluateSeam(y, rya, ryb, sampleRate);
+                                if (qr.quality > best.quality + 1e-9) {
+                                    best = qr;
+                                    bestA = rya;
+                                    bestB = ryb;
+                                }
                             }
                         }
                     }
-                    // Clamp into the trimmed stream; metrics and emitted samples agree.
-                    ya = std::max<int64_t>(0, std::min<int64_t>(yTotal - 1, ya));
-                    yb = std::max<int64_t>(ya + 1, std::min<int64_t>(yTotal - 1, yb));
-                    const SeamQuality q = evaluateSeam(y, ya, yb, sampleRate);
-                    sp.seamStart = ya + trimStart;
-                    sp.seamEnd = yb + trimStart;
+                    const SeamQuality q = best;
+                    sp.seamStart = bestA + trimStart;
+                    sp.seamEnd = bestB + trimStart;
                     sp.seamQuality = q.quality;
                     sp.seamCorrelation = q.correlation;
                     sp.seamRmsJumpDb = q.rmsJumpDb;
@@ -1687,7 +1751,10 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
             c.loudnessDifference = sp.p.ld;
             result.candidates.push_back(c);
             emitted++;
-            prog.report(0.98);
+            if (!prog.report(0.98)) { // honour a cancel that lands during emission
+                result.candidates.clear();
+                return result;
+            }
         }
         if (dbg != nullptr) {
             int count = 0;
@@ -1713,7 +1780,10 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
                 count++;
             }
         }
-        prog.report(1.0);
+        if (!prog.report(1.0)) { // final callback: cancellation still wins
+            result.candidates.clear();
+            return result;
+        }
         return result;
     } catch (...) {
         Result fail;

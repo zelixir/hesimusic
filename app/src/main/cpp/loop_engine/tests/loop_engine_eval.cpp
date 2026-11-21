@@ -157,7 +157,8 @@ double cosineDistance(const std::vector<double>& a, const std::vector<double>& b
 }
 
 struct SeamMetrics {
-    double corr = 0.0;       // peak normalized xcorr of the tail windows
+    double tailCorr = 0.0;   // peak normalized xcorr of the tail windows
+    double headCorr = 0.0;   // peak normalized xcorr of the head windows
     double rmsJumpDb = 0.0;  // |rms after A - rms before B| in dB
     double fluxRatio = 1.0;  // seam spectral distance / local mean distance
     double stepNorm = 0.0;   // boundary sample step / local rms
@@ -193,7 +194,33 @@ SeamMetrics measureSeam(const std::vector<float>& x, int64_t a, int64_t b, int s
                 }
                 best = std::max(best, num / denom);
             }
-            m.corr = best;
+            m.tailCorr = best;
+        }
+    }
+
+    // --- head-head: after the jump vs the natural continuation (B..B+W vs A..A+W)
+    const int64_t wh = std::min<int64_t>(win, std::min(total - b, total - a));
+    if (wh >= 32) {
+        double eb = 0.0, ea = 0.0;
+        for (int64_t i = 0; i < wh; i++) {
+            const double vb = double(x[size_t(b + i)]);
+            const double va = double(x[size_t(a + i)]);
+            eb += vb * vb;
+            ea += va * va;
+        }
+        const double denom = std::sqrt(eb * ea);
+        if (denom > 1e-9) {
+            double best = -1.0;
+            for (int64_t lag = -lagMax; lag <= lagMax; lag++) {
+                const int64_t lo = std::max<int64_t>(0, lag);
+                const int64_t hi = std::min<int64_t>(wh - 1, wh - 1 + lag);
+                double num = 0.0;
+                for (int64_t i = lo; i <= hi; i++) {
+                    num += double(x[size_t(b + i)]) * double(x[size_t(a + i - lag)]);
+                }
+                best = std::max(best, num / denom);
+            }
+            m.headCorr = best;
         }
     }
 
@@ -232,7 +259,7 @@ SeamMetrics measureSeam(const std::vector<float>& x, int64_t a, int64_t b, int s
     m.fluxRatio = seamDist / std::max(localMean, 1e-4);
 
     // --- blend (identical formula in loop_engine.cpp so old/new are comparable)
-    const double corrScore = std::max(0.0, std::min(1.0, (m.corr - 0.25) / 0.75));
+    const double corrScore = std::max(0.0, std::min(1.0, (m.headCorr - 0.25) / 0.75));
     const double energyScore = std::exp(-m.rmsJumpDb / 3.0);
     const double timbreScore = 1.0 / (1.0 + std::max(0.0, m.fluxRatio - 1.0));
     m.seamScore = 0.50 * corrScore + 0.30 * energyScore + 0.20 * timbreScore;
@@ -283,14 +310,28 @@ int main(int argc, char** argv) {
         const SeamMetrics m = measureSeam(wav.mono, c.loopStart, c.loopEnd, wav.sampleRate);
         std::printf("%s{\"i\":%zu,\"start\":%lld,\"end\":%lld,\"startMs\":%.3f,"
                     "\"endMs\":%.3f,\"lenMs\":%.3f,\"score\":%.6f,\"nd\":%.6f,"
-                    "\"ld\":%.6f,\"corr\":%.6f,\"rmsJumpDb\":%.4f,"
+                    "\"ld\":%.6f,\"tailCorr\":%.6f,\"headCorr\":%.6f,\"rmsJumpDb\":%.4f,"
                     "\"fluxRatio\":%.4f,\"stepNorm\":%.6f,\"seamScore\":%.6f}",
                     i > 0 ? "," : "", i, (long long)c.loopStart, (long long)c.loopEnd,
                     1000.0 * double(c.loopStart) / double(wav.sampleRate),
                     1000.0 * double(c.loopEnd) / double(wav.sampleRate),
                     1000.0 * double(c.loopEnd - c.loopStart) / double(wav.sampleRate),
-                    c.score, c.noteDistance, c.loudnessDifference, m.corr, m.rmsJumpDb,
+                    c.score, c.noteDistance, c.loudnessDifference, m.tailCorr, m.headCorr, m.rmsJumpDb,
                     m.fluxRatio, m.stepNorm, m.seamScore);
+    }
+    std::printf("],\"debugPairs\":[");
+    for (size_t i = 0; i < dbg.pairs.size(); i++) {
+        const loop_engine::debug::PairInfo& p = dbg.pairs[i];
+        std::printf("%s{\"startFrame\":%d,\"endFrame\":%d,\"anchorStart\":%lld,"
+                    "\"anchorEnd\":%lld,\"loopStart\":%lld,\"loopEnd\":%lld,"
+                    "\"legacyScore\":%.6f,\"seamQuality\":%.6f,\"seamCorrelation\":%.6f,"
+                    "\"seamRmsJumpDb\":%.4f,\"seamFluxRatio\":%.4f,\"seamEvaluated\":%d}",
+                    i > 0 ? "," : "", p.startFrame, p.endFrame,
+                    (long long)(int64_t(p.startFrame) * 512 + dbg.trimOffset),
+                    (long long)(int64_t(p.endFrame) * 512 + dbg.trimOffset),
+                    (long long)p.loopStart, (long long)p.loopEnd, p.legacyScore, p.seamQuality,
+                    p.seamCorrelation, p.seamRmsJumpDb, p.seamFluxRatio,
+                    p.seamEvaluated ? 1 : 0);
     }
     std::printf("]}\n");
     return 0;
