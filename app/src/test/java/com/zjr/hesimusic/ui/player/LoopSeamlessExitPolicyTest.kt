@@ -2,8 +2,12 @@ package com.zjr.hesimusic.ui.player
 
 import androidx.media3.common.Player
 import com.zjr.hesimusic.loop.LoopIntent
+import com.zjr.hesimusic.loop.LoopWindow
+import com.zjr.hesimusic.service.LoopClaimStore
+import com.zjr.hesimusic.service.LoopExitReason
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -149,32 +153,74 @@ class LoopSeamlessExitPolicyTest {
         assertEquals("01:10–02:10", LoopSeamlessExitPolicy.loopRangeLabel(window))
     }
 
+    private val window = LoopWindow(7L, 10_000_000L, 50_000_000L)
+
+    private fun outcome(
+        keepPlainSingleLoop: Boolean,
+        writes: List<LoopSeamlessExitPolicy.ModeWrite>,
+    ) = LoopExitOutcome(
+        songId = 7L,
+        keepPlainSingleLoop = keepPlainSingleLoop,
+        writes = writes,
+        window = window,
+        previousRepeatMode = Player.REPEAT_MODE_ONE,
+        previousShuffleEnabled = false,
+    )
+
     @Test
-    fun exit_outcome_notice_says_restored_mode() {
-        val restore = LoopExitOutcome(
-            songId = 7L,
+    fun user_exit_publishes_user_exit_notice_and_consumes_once() {
+        val exit = outcome(
             keepPlainSingleLoop = false,
             writes = listOf(
                 LoopSeamlessExitPolicy.ModeWrite.Repeat(Player.REPEAT_MODE_ALL),
                 LoopSeamlessExitPolicy.ModeWrite.Shuffle(false),
             ),
         )
-        val notice = restore.toNotice(nowMs = 123L)
-        assertEquals(LoopNoticeKind.EXITED, notice.kind)
-        assertTrue(notice.message.contains("已退出无缝循环"))
-        assertTrue(notice.message.contains("列表循环"))
-        assertTrue(notice.id.contains("user-exit"))
-        assertTrue(notice.id.contains("123"))
+        val notice = exit.toExitNotice(nowMs = 123L)
+        assertEquals(LoopExitReason.USER_EXIT, notice.reason)
+        assertEquals(Player.REPEAT_MODE_ALL, notice.nextRepeatMode)
+        assertFalse(notice.nextShuffleEnabled)
+        assertTrue("summary 必须带 user-exit", notice.summary().contains("user-exit"))
 
-        val keep = LoopExitOutcome(
-            songId = 7L,
+        LoopClaimStore.clearExitNotice()
+        LoopClaimStore.publishExit(notice)
+        assertEquals(notice, LoopClaimStore.consumeExitNotice())
+        assertNull("consume 是一次性的", LoopClaimStore.consumeExitNotice())
+    }
+
+    @Test
+    fun user_exit_ui_feed_is_exited_and_shown_only_once() {
+        val exit = outcome(
             keepPlainSingleLoop = true,
             writes = listOf(
                 LoopSeamlessExitPolicy.ModeWrite.Shuffle(false),
                 LoopSeamlessExitPolicy.ModeWrite.Repeat(Player.REPEAT_MODE_ONE),
             ),
         )
-        val keepNotice = keep.toNotice(nowMs = 124L)
-        assertTrue(keepNotice.message.contains("普通单曲循环"))
+        LoopClaimStore.clearExitNotice()
+        LoopClaimStore.publishExit(exit.toExitNotice(nowMs = 124L))
+
+        val ui = ServiceLoopExitNoticeFeed.consumeFor(7L)!!
+        assertEquals(LoopNoticeKind.EXITED, ui.kind)
+        assertTrue("提示里也要能截图到原因码", ui.message.contains("user-exit"))
+        assertTrue(ui.message.contains("已退出无缝循环"))
+        assertNull("同一条 service notice 不能被消费两次", ServiceLoopExitNoticeFeed.consumeFor(7L))
+
+        // UI 只弹一次：markShown 后同一 id 不再入队。
+        val seen = HashSet<String>()
+        val center = LoopNoticeCenter(
+            seen = object : LoopNoticeSeenStore {
+                override fun isSeen(id: String, nowMs: Long): Boolean = id in seen
+                override fun mark(id: String, nowMs: Long) {
+                    seen += id
+                }
+            },
+            now = { 1L },
+        )
+        center.offer(ui)
+        assertEquals(1, center.notices.value.size)
+        center.markShown(ui.id)
+        center.offer(ui)
+        assertTrue("同一退出事件不得复弹", center.notices.value.isEmpty())
     }
 }

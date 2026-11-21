@@ -7,6 +7,9 @@ import androidx.media3.common.Player
 import com.zjr.hesimusic.loop.LoopIntent
 import com.zjr.hesimusic.loop.LoopModePreference
 import com.zjr.hesimusic.loop.LoopWindow
+import com.zjr.hesimusic.service.LoopClaimStore
+import com.zjr.hesimusic.service.LoopExitNotice
+import com.zjr.hesimusic.service.LoopExitReason
 import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.utils.TimeFormatter
 import dagger.hilt.EntryPoint
@@ -101,23 +104,37 @@ internal object LoopSeamlessExitPolicy {
     }
 }
 
-/** 一次退出动作的结果，用于生成同一条用户提示。 */
+/**
+ * 一次退出动作的结果。
+ *
+ * 退出提示不再由 UI 本地生成：统一发布 [LoopExitNotice]（reason=USER_EXIT），
+ * 由 [LoopClaimStore.consumeExitNotice] → ServiceLoopExitNoticeFeed → LoopNoticeCenter
+ * 走同一条通道，避免 service 与 UI 两套提示。
+ */
 internal data class LoopExitOutcome(
     val songId: Long,
     val keepPlainSingleLoop: Boolean,
     val writes: List<LoopSeamlessExitPolicy.ModeWrite>,
+    /** 退出前的生效窗口（回退态可能为 null）。 */
+    val window: LoopWindow?,
+    /** 退出前播放器的 repeat/shuffle（无缝态通常是 ONE/false）。 */
+    val previousRepeatMode: Int,
+    val previousShuffleEnabled: Boolean,
 ) {
-    fun toNotice(nowMs: Long): LoopNotice {
-        val repeat = writes.filterIsInstance<LoopSeamlessExitPolicy.ModeWrite.Repeat>()
-            .lastOrNull()?.mode ?: Player.REPEAT_MODE_OFF
-        val shuffle = writes.filterIsInstance<LoopSeamlessExitPolicy.ModeWrite.Shuffle>()
-            .lastOrNull()?.enabled ?: false
-        val mode = if (keepPlainSingleLoop) "普通单曲循环" else modeLabel(repeat, shuffle)
-        return LoopNotice(
-            id = "user-exit:" + songId + ":" + nowMs,
+    fun toExitNotice(nowMs: Long): LoopExitNotice {
+        val nextRepeat = writes.filterIsInstance<LoopSeamlessExitPolicy.ModeWrite.Repeat>()
+            .lastOrNull()?.mode ?: previousRepeatMode
+        val nextShuffle = writes.filterIsInstance<LoopSeamlessExitPolicy.ModeWrite.Shuffle>()
+            .lastOrNull()?.enabled ?: previousShuffleEnabled
+        return LoopExitNotice(
             songId = songId,
-            kind = LoopNoticeKind.EXITED,
-            message = "已退出无缝循环（当前：" + mode + "）",
+            reason = LoopExitReason.USER_EXIT,
+            window = window,
+            previousRepeatMode = previousRepeatMode,
+            nextRepeatMode = nextRepeat,
+            previousShuffleEnabled = previousShuffleEnabled,
+            nextShuffleEnabled = nextShuffle,
+            notifiedAtMs = nowMs,
         )
     }
 }
@@ -145,6 +162,10 @@ internal object LocalLoopSeamlessExitGateway : LoopSeamlessExitGateway {
     ): LoopExitOutcome? {
         val armed = loopIntent.armed.value ?: return null
         val writes = LoopSeamlessExitPolicy.exitWrites(armed, keepPlainSingleLoop)
+        // 退出前的可见事实：窗口（用于日志/提示）、播放器当前模式。
+        val window = LoopClaimStore.claimFor(armed.songId).window
+        val previousRepeat = viewModel.uiState.value.repeatMode
+        val previousShuffle = viewModel.uiState.value.shuffleModeEnabled
         // 先清意图：协调器随后的 refresh 会把 window 置 null，并按展示位置还原 SOURCE item。
         loopIntent.clear()
         for (write in writes) {
@@ -153,7 +174,14 @@ internal object LocalLoopSeamlessExitGateway : LoopSeamlessExitGateway {
                 is LoopSeamlessExitPolicy.ModeWrite.Shuffle -> viewModel.setShuffleModeEnabled(write.enabled)
             }
         }
-        return LoopExitOutcome(armed.songId, keepPlainSingleLoop, writes)
+        return LoopExitOutcome(
+            songId = armed.songId,
+            keepPlainSingleLoop = keepPlainSingleLoop,
+            writes = writes,
+            window = window,
+            previousRepeatMode = previousRepeat,
+            previousShuffleEnabled = previousShuffle,
+        )
     }
 }
 
@@ -165,15 +193,14 @@ internal object LocalLoopSeamlessExitGateway : LoopSeamlessExitGateway {
 internal fun exitSeamless(
     viewModel: MusicViewModel,
     loopIntent: LoopIntent,
-    center: LoopNoticeCenter,
     keepPlainSingleLoop: Boolean,
     nowMs: Long = System.currentTimeMillis(),
 ): Boolean {
     val outcome = LocalLoopSeamlessExitGateway.exit(viewModel, loopIntent, keepPlainSingleLoop)
         ?: return false
-    center.offer(outcome.toNotice(nowMs))
-    // semantics-state 的 LoopExitReason 目前没有 USER_EXIT；等它补上后在这里补一次
-    // LoopClaimStore.publishExit(...)，让 service 侧日志/调试口也能看到“谁退出了”。
+    // D05：统一由 service 侧发布 USER_EXIT；UI 的 LoopNoticeHost 会一次性消费并提示。
+    // 不再在这里 offer 本地 EXITED notice，避免两套提示。
+    LoopClaimStore.publishExit(outcome.toExitNotice(nowMs))
     return true
 }
 

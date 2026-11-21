@@ -336,7 +336,6 @@ fun LoopScreen(
                             exitSeamless(
                                 viewModel = musicViewModel,
                                 loopIntent = loopIntent,
-                                center = loopNoticeCenter,
                                 keepPlainSingleLoop = false,
                             )
                         }
@@ -356,7 +355,6 @@ fun LoopScreen(
                 exitSeamless(
                     viewModel = musicViewModel,
                     loopIntent = loopIntent,
-                    center = loopNoticeCenter,
                     keepPlainSingleLoop = false,
                 )
             }

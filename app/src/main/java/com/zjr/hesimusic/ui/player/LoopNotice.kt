@@ -124,7 +124,8 @@ internal fun exitNoticeMessage(notice: LoopExitNotice): String {
         LoopExitReason.CONFIRMATION_REVOKED -> "分析结果已取消，已退出无缝循环"
         LoopExitReason.RESULT_DELETED -> "分析结果已删除，已退出无缝循环"
         LoopExitReason.RESTORE_UNAVAILABLE -> "上次的无缝循环未能恢复，已按普通播放"
-        // 契约里还会补 USER_EXIT；新增枚举值不应让 UI 编译失败。
+        LoopExitReason.USER_EXIT -> "已退出无缝循环"
+        // 新增枚举值不应让 UI 编译失败。
         else -> "已退出无缝循环"
     }
     return why + "（" + notice.reason.wire + "，当前：" + mode + "）"
@@ -133,7 +134,7 @@ internal fun exitNoticeMessage(notice: LoopExitNotice): String {
 internal fun LoopExitNotice.toLoopNotice(): LoopNotice = LoopNotice(
     id = "exit:" + songId + ":" + reason.wire + ":" + notifiedAtMs,
     songId = songId,
-    kind = LoopNoticeKind.DEMOTED,
+    kind = if (reason == LoopExitReason.USER_EXIT) LoopNoticeKind.EXITED else LoopNoticeKind.DEMOTED,
     message = exitNoticeMessage(this),
 )
 

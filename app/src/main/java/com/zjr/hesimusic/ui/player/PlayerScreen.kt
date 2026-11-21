@@ -32,10 +32,10 @@ import androidx.media3.common.Player
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.zjr.hesimusic.data.mapper.mediaIdToSongId
+import com.zjr.hesimusic.loop.LoopPhase
 import com.zjr.hesimusic.loop.LoopPosition
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.service.LoopClaimStore
-import com.zjr.hesimusic.ui.common.LoopSliderMarkerOverlay
 import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.utils.TimeFormatter
 import kotlin.math.abs
@@ -65,6 +65,14 @@ fun PlayerScreen(
     val loopClaim = remember(currentSongId, claimRevision) {
         LoopClaimStore.claimFor(currentSongId)
     }
+    // 阶段只看权威展示位置（与 /state.loop.phase 同一口径）：
+    // prelude=前奏、loop=循环段、tail=尾奏；claim 未生效时 phase=null。
+    val loopPhase = loopClaim.phaseForDisplayUs(uiState.currentPosition * 1_000L)
+    val bandPhase = loopPhase ?: if (loopClaim.claimActive) LoopPhase.LOOP else null
+    val loopRangeLabel = loopClaim.effectiveWindow?.let {
+        LoopSeamlessExitPolicy.loopRangeLabel(it)
+    }
+    val loopStatusText = loopPhaseStatusText(loopPhase, loopRangeLabel)
     val loopNoticeCenter = remember(context) { AppLoopNoticeCenter.get(context) }
     val loopIntent = rememberLoopIntent()
     val armedLoop by loopIntent.armed.collectAsState()
@@ -84,7 +92,6 @@ fun PlayerScreen(
                 exitSeamless(
                     viewModel = viewModel,
                     loopIntent = loopIntent,
-                    center = loopNoticeCenter,
                     keepPlainSingleLoop = false,
                 )
             }
@@ -276,8 +283,9 @@ fun PlayerScreen(
                         valueRange = 0f..safeDuration.toFloat(),
                         interactionSource = sliderInteractionSource,
                     )
-                    LoopSliderMarkerOverlay(
+                    LoopPhaseMarkerOverlay(
                         window = loopWindowState,
+                        phase = bandPhase,
                         durationMs = uiState.duration,
                         modifier = Modifier.matchParentSize(),
                     )
@@ -316,9 +324,7 @@ fun PlayerScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            text = loopClaim.effectiveWindow?.let { window ->
-                                "无缝循环中 · " + (LoopSeamlessExitPolicy.loopRangeLabel(window) ?: "")
-                            } ?: "无缝循环未生效",
+                            text = loopStatusText,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.primary,
                         )
@@ -327,7 +333,6 @@ fun PlayerScreen(
                                 exitSeamless(
                                     viewModel = viewModel,
                                     loopIntent = loopIntent,
-                                    center = loopNoticeCenter,
                                     keepPlainSingleLoop = false,
                                 )
                             },
@@ -356,7 +361,6 @@ fun PlayerScreen(
                             exitSeamless(
                                 viewModel = viewModel,
                                 loopIntent = loopIntent,
-                                center = loopNoticeCenter,
                                 keepPlainSingleLoop = true,
                             )
                         }
