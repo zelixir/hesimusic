@@ -9,9 +9,11 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import com.zjr.hesimusic.data.mapper.mediaIdToSongId
 import com.zjr.hesimusic.loop.LoopIntent
+import com.zjr.hesimusic.loop.LoopPhase
 import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.LoopAudioController
+import com.zjr.hesimusic.loop.audio.source.LoopSourceItemTag
 import com.zjr.hesimusic.loop.audio.source.LoopSourcePauseGate
 
 /**
@@ -64,6 +66,10 @@ class LoopSessionPlayer(
     private val handler = Handler(Looper.getMainLooper())
     private val seekCoalescer = RapidSeekCoalescer(RapidSeekCoalescer.DEFAULT_QUIET_MS)
 
+    /** #90：暂停态 next 的绕回分支会紧跟一次 play()，吞掉这一次（500ms 后失效）。 */
+    private var suppressNextPlayAfterPausedWrap = false
+    private val clearPausedWrapSuppression = Runnable { suppressNextPlayAfterPausedWrap = false }
+
     /** 挂起的 seek 落地（静默期结束触发）。 */
     private val seekFlushRunnable = Runnable { flushPendingSeek() }
 
@@ -81,6 +87,12 @@ class LoopSessionPlayer(
     }
 
     override fun play() {
+        if (suppressNextPlayAfterPausedWrap) {
+            suppressNextPlayAfterPausedWrap = false
+            handler.removeCallbacks(clearPausedWrapSuppression)
+            Log.i(TAG, "paused wrap: auto play() suppressed (stay paused)")
+            return
+        }
         LoopSourcePauseGate.resume()
         super.play()
     }
@@ -105,10 +117,11 @@ class LoopSessionPlayer(
         if (isSourceItem(snapshot)) {
             // T → 媒体时间：整曲口径下 prelude/tail 直通、[A,B) 折返；不是 sentinel T。
             val timelineMs = super.getCurrentPosition()
+            val fullDurationUs = sourceFullDurationUs()
             val displayUs = LoopSessionProjection.sourceDisplayUs(
                 timelineMs,
                 window,
-                audio.fullDurationUs,
+                fullDurationUs,
             )
             // UI 的二次折返需要知道"B 之后是尾奏还是外推"，记录权威 T/展示位置。
             LoopPlaybackPhaseRuntime.update(
@@ -116,7 +129,7 @@ class LoopSessionPlayer(
                 timelineUs = timelineMs * LoopSessionProjection.US_PER_MS,
                 displayUs = displayUs,
                 window = window,
-                fullDurationUs = audio.fullDurationUs,
+                fullDurationUs = fullDurationUs,
             )
             return displayUs / LoopSessionProjection.US_PER_MS
         }
@@ -130,15 +143,16 @@ class LoopSessionPlayer(
         val window = claim.window
         if (!claim.claimActive || window == null) return super.getBufferedPosition()
         if (isSourceItem(snapshot)) {
+            val fullDurationUs = sourceFullDurationUs()
             val currentDisplayUs = LoopSessionProjection.sourceDisplayUs(
                 super.getCurrentPosition(),
                 window,
-                audio.fullDurationUs,
+                fullDurationUs,
             )
             val bufferedUs = LoopSessionProjection.sourceDisplayUs(
                 super.getBufferedPosition(),
                 window,
-                audio.fullDurationUs,
+                fullDurationUs,
             )
             val atLeastCurrent = maxOf(bufferedUs, currentDisplayUs)
             val durationUs = projectedDurationUs(window)
@@ -226,11 +240,27 @@ class LoopSessionPlayer(
     // 回退都走 seekToDefaultPosition（见 MusicViewModel.skipToNext）。这里同样先退场，
     // 否则"下一首"在单曲队列里只会原地重播并一直留在旧循环。
     override fun seekToDefaultPosition() {
-        navigateOutsideLoop { super.seekToDefaultPosition() }
+        val exited = navigateOutsideLoop { super.seekToDefaultPosition() }
+        if (exited && !playWhenReady) armPausedWrapPlaySuppression()
     }
 
     override fun seekToDefaultPosition(mediaItemIndex: Int) {
-        navigateOutsideLoop { super.seekToDefaultPosition(mediaItemIndex) }
+        val exited = navigateOutsideLoop { super.seekToDefaultPosition(mediaItemIndex) }
+        if (exited && !playWhenReady) armPausedWrapPlaySuppression()
+    }
+
+    /**
+     * #90 暂停中 next 的"绕回"分支会紧跟一次 play()（UI skipToNext 与 debug 回退都是这样），
+     * 于是暂停态按下一首会自己开播。这里吞掉**紧随其后的一次** play()：
+     * - 只在"刚刚因 next/prev 退出循环 + 当时是暂停"时武装；
+     * - 500ms 内没有 play() 就自动失效（不会长期吞用户操作）；
+     * - 一次即消费，用户再按播放仍能立刻生效。
+     */
+    private fun armPausedWrapPlaySuppression() {
+        suppressNextPlayAfterPausedWrap = true
+        handler.removeCallbacks(clearPausedWrapSuppression)
+        handler.postDelayed(clearPausedWrapSuppression, PAUSED_WRAP_PLAY_SUPPRESS_MS)
+        Log.i(TAG, "paused wrap: suppress the auto play() that follows next/prev")
     }
 
     // ------------------------------------------------------------------ 进循环保留队列
@@ -317,7 +347,7 @@ class LoopSessionPlayer(
     /**
      * 循环命中时先退场再执行 [nativeCommand]；未命中则直接执行（完全保持原生语义）。
      */
-    private fun navigateOutsideLoop(nativeCommand: () -> Unit) {
+    private fun navigateOutsideLoop(nativeCommand: () -> Unit): Boolean {
         val armed = loopIntent?.armed?.value
         val songId = currentMediaItem?.mediaId?.let { mediaIdToSongId(it) }
         val claimActive = snapshot().claim.claimActive
@@ -329,7 +359,7 @@ class LoopSessionPlayer(
             )
         ) {
             nativeCommand()
-            return
+            return false
         }
         val wasPlaying = playWhenReady
         val indexBefore = currentMediaItemIndex
@@ -354,6 +384,7 @@ class LoopSessionPlayer(
                 " repeat=" + repeatMode + " state=" + playbackState +
                 " pwr=" + playWhenReady,
         )
+        return true
     }
 
     // ------------------------------------------------------------------ #111 seek 合并
@@ -419,20 +450,36 @@ class LoopSessionPlayer(
         if (!claim.claimActive || window == null || mediaItemIndex != currentMediaItemIndex) {
             super.seekTo(mediaItemIndex, positionMs)
         } else if (isSourceItem(snapshot)) {
+            // SOURCE 整曲时间轴的时长以 tag 为兜底：controller.fullDurationUs 在换源/复位
+            // 的短窗口里可能是 0；此时若按 legacy 投影，B+ 会被折回环带，"seek 到 tail"
+            // 就变成"在 loop 里出声"（场景 #64/#66 的 30% 内容）。
+            val fullDurationUs = sourceFullDurationUs()
             val targetT = LoopSessionProjection.sourceTimelineUsForDisplay(
                 displayUs = positionMs * LoopSessionProjection.US_PER_MS,
                 currentTimelineUs = super.getCurrentPosition() * LoopSessionProjection.US_PER_MS,
                 window = window,
-                fullDurationUs = audio.fullDurationUs,
+                fullDurationUs = fullDurationUs,
+            )
+            val seekPhase = LoopPhase.ofDisplayUs(
+                positionMs * LoopSessionProjection.US_PER_MS,
+                window,
+            )
+            Log.i(
+                TAG,
+                "source seek displayMs=" + positionMs + " targetT=" + targetT +
+                    " seekPhase=" + seekPhase?.wire +
+                    " fullDurationUs=" + fullDurationUs +
+                    " window=" + window,
             )
             super.seekTo(mediaItemIndex, targetT / LoopSessionProjection.US_PER_MS)
-            // seek 目标就是新的权威位置：tail 立即被视为 tail，进度条不会先折回 A。
+            // seek 是最强意图信号：>B 的落点必须立刻把 phase hint 设成 TAIL，
+            // 不能等下一次 MediaSession 位置事件。自然播放跨 B 的外推仍由 loop hint 兜底。
             LoopPlaybackPhaseRuntime.update(
                 songId = claim.songId,
                 timelineUs = targetT,
                 displayUs = positionMs * LoopSessionProjection.US_PER_MS,
                 window = window,
-                fullDurationUs = audio.fullDurationUs,
+                fullDurationUs = fullDurationUs,
             )
         } else {
             val rawUs = LoopSessionProjection.seekUs(
@@ -474,6 +521,19 @@ class LoopSessionPlayer(
         return Snapshot(claim, isReplaying)
     }
 
+    /**
+     * SOURCE 整曲时间轴的整曲时长（µs）：优先 controller，缺失时回退当前 item tag。
+     *
+     * 00028/#64：controller.fullDurationUs 会在换源/复位窗口短暂为 0；若此时按 0 走
+     * legacy 投影，seek 到 B 之后会被钳回环带，表现为 "phase=loop、尾奏只出 30% 内容"。
+     */
+    private fun sourceFullDurationUs(): Long {
+        val fromController = audio.fullDurationUs
+        if (fromController > 0L) return fromController
+        val tag = currentMediaItem?.localConfiguration?.tag as? LoopSourceItemTag
+        return tag?.fullDurationUs ?: 0L
+    }
+
     /** 引擎原始位置（µs）：重放期取 sink 推进的位置，否则取播放器自身位置。 */
     private fun currentRawUs(isReplaying: Boolean): Long = LoopSessionProjection.rawUs(
         isReplaying = isReplaying,
@@ -506,6 +566,9 @@ class LoopSessionPlayer(
         private const val GATE_PAUSE_RECHECK_MS = 400L
         private const val GATE_PAUSE_RECHECK_LATE_MS = 1500L
         private const val GATE_PAUSE_RECHECK_ULTIMATE_MS = 5_000L
+
+        /** #90 暂停绕回后吞掉紧随 play() 的时间窗（超时自动失效）。 */
+        private const val PAUSED_WRAP_PLAY_SUPPRESS_MS = 500L
     }
 }
 
