@@ -148,10 +148,49 @@ class LoopSourceFallbackTest {
     }
 
     @Test
-    fun `invalid registration is ignored`() {
+    fun `null song or window is ignored`() {
         LoopSourceFallback.reportUnavailable(0L, window, LoopSourceFallback.Reason.FILE_MISSING)
         LoopSourceFallback.reportUnavailable(7L, null, LoopSourceFallback.Reason.FILE_MISSING)
-        LoopSourceFallback.reportUnavailable(7L, LoopWindow(7L, 1L, 1L), LoopSourceFallback.Reason.WINDOW_INVALID)
+        // 窗口不属于该歌：不能把 A 歌的失败登记到 B 歌上。
+        LoopSourceFallback.reportUnavailable(
+            7L,
+            LoopWindow(9L, 1L, 2L),
+            LoopSourceFallback.Reason.FILE_MISSING,
+        )
         assertEquals(0, LoopSourceFallback.failureCount())
+    }
+
+    @Test
+    fun `invalid window is registered as window invalid`() {
+        // 00027/P0-3：WINDOW_INVALID 也必须走同一张登记表，否则每次 refresh 反复 evaluate。
+        val broken = LoopWindow(7L, 50_000_000L, 10_000_000L)
+        LoopSourceFallback.reportUnavailable(
+            songId = 7L,
+            window = broken,
+            reason = LoopSourceFallback.Reason.WINDOW_INVALID,
+            detail = "b<=a",
+        )
+
+        assertTrue(LoopSourceFallback.isUnavailable(7L, broken))
+        assertEquals(LoopSourceFallback.Reason.WINDOW_INVALID, LoopSourceFallback.reasonOf(7L))
+        assertEquals(
+            LoopSourceFallback.Reason.WINDOW_INVALID,
+            LoopSourceFallback.reasonFor(7L, broken),
+        )
+        // 别的窗口不受影响。
+        assertFalse(LoopSourceFallback.isUnavailable(7L, window))
+        assertNull(LoopSourceFallback.reasonFor(7L, window))
+    }
+
+    @Test
+    fun `all five fallback reasons share one registration path`() {
+        for (reason in LoopSourceFallback.Reason.values()) {
+            LoopSourceFallback.reset()
+            LoopSourceFallback.reportUnavailable(7L, window, reason, detail = reason.logName)
+
+            assertTrue("reason=" + reason, LoopSourceFallback.isUnavailable(7L, window))
+            assertEquals("reason=" + reason, reason, LoopSourceFallback.reasonFor(7L, window))
+            assertEquals("reason=" + reason, reason, LoopSourceFallback.reasonOf(7L))
+        }
     }
 }

@@ -123,7 +123,10 @@ object LoopSourceFallback {
     /** 登记「这个窗口的 SOURCE 不可用」；同一窗口只影响自己，换窗口自动重新判定。 */
     @Synchronized
     fun reportUnavailable(songId: Long, window: LoopWindow?, reason: Reason, detail: String = "") {
-        if (songId <= 0L || window == null || !window.isValid()) return
+        // 00027/P0-3：WINDOW_INVALID 也是回退原因之一。原实现把非法窗口直接丢掉，
+        // 导致 reason/compact claim 无记录、每次 refresh 反复 evaluate 刷日志。
+        // 这里按 (songId, start, end) 原样登记；是否合法由调用方/claim 再判。
+        if (songId <= 0L || window == null || window.songId != songId) return
         val failure = Failure(reason, window.loopStartUs, window.loopEndUs)
         failures[songId] = failure
         latest = failure
@@ -147,13 +150,24 @@ object LoopSourceFallback {
         return Reason.BUILD_FAILED
     }
 
+    /**
+     * 该窗口被登记的回退原因；没有登记 / 窗口已变化 → null。
+     *
+     * 与 [isUnavailable] 同口径：非法窗口同样可以命中（WINDOW_INVALID 需要被看见）。
+     */
+    @Synchronized
+    fun reasonFor(songId: Long?, window: LoopWindow?): Reason? {
+        if (songId == null || songId <= 0L || window == null) return null
+        val failure = failures[songId] ?: return null
+        return failure.reason.takeIf {
+            failure.startUs == window.loopStartUs && failure.endUs == window.loopEndUs
+        }
+    }
+
     /** 该窗口是否已被判定为 SOURCE 不可用（窗口变化后为 false，可重试）。 */
     @Synchronized
-    fun isUnavailable(songId: Long?, window: LoopWindow?): Boolean {
-        if (songId == null || songId <= 0L || window == null || !window.isValid()) return false
-        val failure = failures[songId] ?: return false
-        return failure.startUs == window.loopStartUs && failure.endUs == window.loopEndUs
-    }
+    fun isUnavailable(songId: Long?, window: LoopWindow?): Boolean =
+        reasonFor(songId, window) != null
 
     /** 换窗口/换歌时清掉登记（允许下一次重试）。 */
     @Synchronized
