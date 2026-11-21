@@ -726,7 +726,11 @@ object LoopPageMatrix {
         )
         return Expectation.Transition(
             state,
-            listOf(LoopPageEffect.StartPrefill(window(aMs, bMs))),
+            listOf(
+                // 场景 #86:分析完成后把新窗口同步给预览播放器。
+                LoopPageEffect.ApplyWindow(window(aMs, bMs)),
+                LoopPageEffect.StartPrefill(window(aMs, bMs)),
+            ),
         )
     }
 
@@ -914,12 +918,17 @@ object LoopPageMatrix {
         for ((stateKey, state) in STATES) {
             val ready = state as? LoopPageState.Ready ?: continue
 
+            // 场景 #86:Ready 中重新分析必须先停住预览(看不见的预览声)。
             expect(
                 stateKey,
                 "ManualReanalyze",
                 Expectation.Transition(
                     LoopPageState.Analyzing(AnalysisPhase.DECODING, 0f),
-                    listOf(LoopPageEffect.RestartAnalysis),
+                    listOf(
+                        LoopPageEffect.Pause,
+                        LoopPageEffect.CancelPrefill,
+                        LoopPageEffect.RestartAnalysis,
+                    ),
                 ),
             )
             expect(stateKey, "SelectCandidate(1)", selectExpected(ready))

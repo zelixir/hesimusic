@@ -67,8 +67,11 @@ class LoopPageAnalysisDoneSelectedTest {
         assertEquals(DragState.Idle, ready.drag)
         assertEquals(0L, ready.positionMs)
         assertEquals(
-            "仍要为选中候选启动预填(否则无声)",
-            listOf(LoopPageEffect.StartPrefill(ready.window())),
+            "仍要为选中候选启动预填(否则无声),并同步新窗口给预览(场景 #86)",
+            listOf(
+                LoopPageEffect.ApplyWindow(ready.window()),
+                LoopPageEffect.StartPrefill(ready.window()),
+            ),
             effects,
         )
     }
@@ -94,7 +97,13 @@ class LoopPageAnalysisDoneSelectedTest {
         assertEquals("默认仍是 score 最优的第 0 个", 0, ready.selectedCandidate)
         assertEquals(expectMs(list[0].startSamples), ready.aMs)
         assertEquals(expectMs(list[0].endSamples), ready.bMs)
-        assertEquals(listOf(LoopPageEffect.StartPrefill(ready.window())), effects)
+        assertEquals(
+            listOf(
+                LoopPageEffect.ApplyWindow(ready.window()),
+                LoopPageEffect.StartPrefill(ready.window()),
+            ),
+            effects,
+        )
     }
 
     @Test
@@ -189,6 +198,7 @@ class LoopPageAnalysisDoneSelectedTest {
         assertEquals(0, ready.selectedCandidate)
         assertEquals(0L, ready.aMs)
         assertEquals(600_000L, ready.bMs)
-        assertEquals(emptyList<LoopPageEffect>(), effects)
+        // 无候选时也要把(0..duration)窗口同步给预览播放器(场景 #86)。
+        assertEquals(listOf(LoopPageEffect.ApplyWindow(ready.window())), effects)
     }
 }

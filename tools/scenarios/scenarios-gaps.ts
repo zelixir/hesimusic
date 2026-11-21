@@ -246,6 +246,42 @@ async function tapTextInView(ctx: ScenarioCtx, label: string, scrollTimes = 2): 
   return false;
 }
 
+/**
+ * 点文本按钮，并在**真正 input tap 之前**立即采样一次预览位置。
+ *
+ * 为什么不用 ctx.uiTap：uiTap 内部要 uiautomator dump + 等 bounds 稳定，实测从采样到
+ * 真正 tap 可能隔 6~7 秒；预览在播放时播放头一直前进，而「当前位置→B」用的是**点按那一刻**
+ * 的位置。用 dump 之前的位置对账会看到 B 比采样值大好几秒（场景 #85 的假失败，
+ * 2026-11-21 证据：采样 40287 → tap 在 6.4s 后 → B=46062，差值 5775ms 与时间差吻合）。
+ *
+ * 本 helper 在 tap 前最后一个动作才采样位置，把漂移压到 adb tap 的往返(~几十 ms)以内。
+ */
+async function tapTextAtLivePosition(
+  ctx: ScenarioCtx,
+  label: string,
+  scrollTimes = 2,
+): Promise<{ ok: boolean; positionMs: number | null }> {
+  for (let attempt = 0; attempt <= scrollTimes; attempt++) {
+    if (attempt > 0) await scrollPage(ctx, "down");
+    else await sleep(350);
+    const dump = await ctx.adb.uiDump();
+    if (dump.error) continue;
+    const { width, height } = await ctx.adb.screenSize();
+    const node =
+      dump.nodes.find((n) => n.text.trim() === label) ?? dump.nodes.find((n) => n.text.includes(label));
+    if (!node) continue;
+    const b = node.bounds;
+    if (b.top < 0 || b.bottom > height || b.left < 0 || b.right > width) continue;
+    if (b.top < 60 || b.bottom > height - 20) continue;
+    // tap 前最后一个动作：立即采样（中间不再插入 dump/scroll/sleep）。
+    const snap = await previewSnap(ctx);
+    const positionMs = snap ? Number(snap.liveDisplayMs ?? snap.displayMs ?? 0) : null;
+    await ctx.adb.tap((b.left + b.right) / 2, (b.top + b.bottom) / 2);
+    return { ok: true, positionMs };
+  }
+  return { ok: false, positionMs: null };
+}
+
 /** 预览输出帧"停稳"（连续两次采样不变），用于暂停静音判据。 */
 async function previewFramesSettled(
   ctx: ScenarioCtx,
@@ -894,7 +930,18 @@ const g84: Scenario = {
     } else {
       const stopped = await waitPreview(ctx, (s) => s.isPlaying === false, 6000);
       checks.push(check("点停止后不再播放", stopped.ok, "6s 内未停止"));
-      await sleep(600);
+      // 停止 = pause + seek 回起点;音频侧 in-flight 帧(硬件尾帧,文档口径 50~100ms)
+      // 会在点击后几十毫秒才落定。必须先等"帧数停稳(最多 1.5s)"再量 Δ,否则会把
+      // 正常尾帧误判成"stop 没停住 sink"(2026-11-21 全量跑:点完立即量 Δ=4079f≈92.5ms@44.1k)。
+      const stopSettled = await previewFramesSettled(ctx, 1000);
+      checks.push(
+        check(
+          "停止尾帧落定(≤1s)",
+          stopSettled.ok,
+          "frames=" + stopSettled.frames + " 耗时=" + stopSettled.elapsedMs + "ms",
+          stopSettled.ok ? undefined : "停止后 1s 内帧数仍在变化:疑似 stop 没有真正停住 sink",
+        ),
+      );
       const snapStop = await previewSnap(ctx);
       const posStop = Number(snapStop?.displayMs ?? -1);
       const expectStart = Math.max(0, a0 - 300);
@@ -907,7 +954,7 @@ const g84: Scenario = {
         ),
       );
       const stillSilent = await measurePreviewFrames(ctx.api, 1000, sr);
-      checks.push(check("停止后无输出", stillSilent.deltaFrames === 0, "Δ=" + stillSilent.deltaFrames + "f/" + stillSilent.spanMs + "ms"));
+      checks.push(check("停止后无输出(尾帧落定后)", stillSilent.deltaFrames === 0, "Δ=" + stillSilent.deltaFrames + "f/" + stillSilent.spanMs + "ms"));
     }
 
     const snapEnd = await previewSnap(ctx);
@@ -957,8 +1004,13 @@ const g85: Scenario = {
       await ctx.previewSeek(target);
       const landed = await waitPreview(ctx, (s) => Math.abs(Number(s.liveDisplayMs ?? s.displayMs) - target) <= 1200, 5000);
       checks.push(check("改 B 前 seek 到目标", landed.ok, "display=" + landed.snap?.liveDisplayMs + " target=" + target));
-      const displayAtTap = Number(landed.snap?.liveDisplayMs ?? landed.snap?.displayMs ?? target);
-      await ctx.uiTap("当前位置→B");
+      // 关键：位置必须在**真正 tap 前**采样。uiTap 内部有数秒的 dump/稳定等待，
+      // 拿 dump 前的采样对账会把"播放头正常前进"误判成"B 没改到当前位置"(场景 #85)。
+      const tapSetB = await tapTextAtLivePosition(ctx, "当前位置→B");
+      if (!tapSetB.ok) throw newSkip("「当前位置→B」按钮在可视区内点不到(页面已滚动到底仍不可见)");
+      const displayAtTap = tapSetB.positionMs ??
+        Number(landed.snap?.liveDisplayMs ?? landed.snap?.displayMs ?? target);
+      ctx.evidence.step("tap-set-b", { positionAtTap: displayAtTap, sampledBeforeTap: tapSetB.positionMs !== null });
       const changed = await waitPreview(
         ctx,
         (s) => Math.abs(Number(s.bMs) - displayAtTap) <= 1800 && Number(s.bMs) < b0 - 1000,
@@ -971,7 +1023,9 @@ const g85: Scenario = {
           "改 B 立即生效",
           changed.ok,
           "B=" + snap1?.bMs + " (点按瞬间位置≈" + Math.round(displayAtTap) + ", 原 B=" + b0 + ")",
-          !changed.ok ? "「当前位置→B」没有改到窗口:检查 setBFromCurrent/CommitWindow 的 samples 口径" : undefined,
+          !changed.ok
+            ? "「当前位置→B」没有改到窗口:B 应等于 tap 前最后采样的位置;若仍差好几秒,检查采样点是否又在慢操作之前"
+            : undefined,
         ),
       );
       checks.push(check("改 B 后 A 不变(±300ms)", snap1 != null && Math.abs(Number(snap1.aMs) - a0) <= 300, "A=" + snap1?.aMs + " 原 A=" + a0));

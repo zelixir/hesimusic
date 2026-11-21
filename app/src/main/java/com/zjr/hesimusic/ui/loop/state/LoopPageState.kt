@@ -286,10 +286,20 @@ object LoopPageReducer {
             return state to listOf(LoopPageEffect.NavigateBack)
         }
         if (event is LoopPageEvent.ManualReanalyze) {
-            return if (state is LoopPageState.Analyzing) {
-                noEffects(state)
-            } else {
-                LoopPageState.Analyzing(AnalysisPhase.DECODING, 0f) to
+            return when (state) {
+                is LoopPageState.Analyzing -> noEffects(state)
+                is LoopPageState.Ready -> {
+                    // 场景 #86:Ready 中重新分析 = 页面切去分析骨架,旧预览必须**立刻停住**,
+                    // 否则用户看不见预览页,却能听到它在继续写帧(看不见的预览声)。
+                    // Pause 停音频输出并关 SOURCE 闸门;CancelPrefill 停后台预填解码。
+                    LoopPageState.Analyzing(AnalysisPhase.DECODING, 0f) to listOf(
+                        LoopPageEffect.Pause,
+                        LoopPageEffect.CancelPrefill,
+                        LoopPageEffect.RestartAnalysis,
+                    )
+                }
+                // Loading/Failed 没有预览可停(从未 Ready 过),保持原行为。
+                else -> LoopPageState.Analyzing(AnalysisPhase.DECODING, 0f) to
                     listOf(LoopPageEffect.RestartAnalysis)
             }
         }
@@ -380,10 +390,11 @@ object LoopPageReducer {
             drag = DragState.Idle,
             sourceMode = event.sourceMode,
         )
-        val effects = if (chosen != null && !event.sourceMode) {
-            listOf(LoopPageEffect.StartPrefill(ready.window()))
-        } else {
-            emptyList()
+        // 场景 #86:重新分析完成后窗口可能变了。必须把新窗口应用到预览播放器,
+        // 否则下一次 play 会沿用旧 A/B(页面显示新候选、耳朵却听旧区间)。
+        val effects = mutableListOf<LoopPageEffect>(LoopPageEffect.ApplyWindow(ready.window()))
+        if (chosen != null && !event.sourceMode) {
+            effects += LoopPageEffect.StartPrefill(ready.window())
         }
         return ready to effects
     }
