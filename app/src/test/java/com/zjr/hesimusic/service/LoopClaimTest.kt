@@ -231,4 +231,13 @@ class LoopClaimTest {
         assertFalse(LoopClaimStore.isInstalled())
         assertFalse(LoopClaimStore.claimFor(songId).claimActive)
     }
+
+    @Test
+    fun `a failing provider degrades to a plain claim instead of crashing`() {
+        LoopClaimStore.install { error("boom") }
+        val claim = LoopClaimStore.claimFor(songId)
+        assertFalse(claim.claimActive)
+        assertNull(claim.window)
+        assertFalse(claim.sourceActive)
+    }
 }

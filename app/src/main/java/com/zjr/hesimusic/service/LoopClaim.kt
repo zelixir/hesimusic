@@ -232,9 +232,19 @@ object LoopClaimStore {
 
     fun isInstalled(): Boolean = provider != null
 
-    /** 当前 songId 的 claim；provider 未装/无当前歌时返回未生效。 */
-    fun claimFor(songId: Long?): LoopClaim =
-        provider?.invoke(songId) ?: LoopClaim.none(songId)
+    /**
+     * 当前 songId 的 claim；provider 未装/无当前歌/解析异常时返回未生效。
+     *
+     * 读 claim 是**只读**路径：任何异常都不能让播放/UI 崩，最坏退化为“普通播放”。
+     */
+    fun claimFor(songId: Long?): LoopClaim {
+        val p = provider ?: return LoopClaim.none(songId)
+        return try {
+            p(songId)
+        } catch (_: Throwable) {
+            LoopClaim.none(songId)
+        }
+    }
 
     /** 标记 claim 可能变化（不改变 provider）。 */
     fun invalidate() {
