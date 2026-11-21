@@ -2135,7 +2135,22 @@ const s111: Scenario = {
         5000,
         100,
       );
-      const stAfter = landed.value ?? (await ctx.api.state());
+      // 落地后允许最多 1.5s 收敛：MediaController 对每次 seek 会乐观 mask 成 BUFFERING，
+      // 单次正常 seek 实测 t+44ms playing=false、t+135ms 恢复 —— 这不是卡死。
+      // 判据要求：位置=最后目标，且 1.5s 内回到 playing=true。
+      const tLanded = Date.now();
+      const recovered = await waitFor(
+        async () => ctx.api.state(),
+        (s) => {
+          const pos = Number(s.playback.positionMs);
+          return s.playback?.playing === true &&
+            pos >= lastTarget - 800 && pos <= lastTarget + 4000;
+        },
+        1500,
+        50,
+      );
+      const recoveryMs = recovered.ok ? Date.now() - tLanded : -1;
+      const stAfter = recovered.value ?? landed.value ?? (await ctx.api.state());
       const posAfter = Number(stAfter.playback.positionMs);
       const readT0 = Date.now();
       await ctx.api.state();
@@ -2143,6 +2158,8 @@ const s111: Scenario = {
       ctx.evidence.step("main-rapid-seek-after", {
         landed: landed.ok,
         elapsedMs: landed.elapsedMs,
+        recovered: recovered.ok,
+        recoveryMs,
         positionMs: posAfter,
         lastTarget,
         playing: stAfter.playback?.playing,
@@ -2157,7 +2174,15 @@ const s111: Scenario = {
           landed.ok ? undefined : "20 次连发后最后一次 seek 没生效:命令通道被堵",
         ),
       );
-      checks.push(check("最终仍在播放", stAfter.playback?.playing === true, "playing=" + stAfter.playback?.playing + " buffering=" + stAfter.playback?.buffering));
+      checks.push(
+        check(
+          "落地后 1.5s 内恢复播放",
+          recovered.ok,
+          "playing=" + stAfter.playback?.playing + " buffering=" + stAfter.playback?.buffering +
+            " 恢复耗时=" + (recoveryMs < 0 ? ">1500" : recoveryMs) + "ms",
+          recovered.ok ? undefined : "最后一次 seek 落地后 1.5s 仍停在 buffering:播放器没恢复",
+        ),
+      );
       checks.push(check("落定后 /state 读取未卡死(≤800ms)", stateLatency <= 800, "读取耗时 " + stateLatency + "ms"));
       checks.push(
         check(

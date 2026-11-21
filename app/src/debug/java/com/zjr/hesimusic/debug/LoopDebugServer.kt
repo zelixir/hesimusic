@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import com.zjr.hesimusic.data.model.Song
@@ -22,6 +23,7 @@ import com.zjr.hesimusic.service.LoopClaimStore
 import com.zjr.hesimusic.service.LoopSourceFallback
 import com.zjr.hesimusic.service.LoopWindowRules
 import com.zjr.hesimusic.service.MainPlayerRouting
+import com.zjr.hesimusic.service.MusicNavigationPolicy
 import com.zjr.hesimusic.loop.analysis.AnalysisState
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
 import com.zjr.hesimusic.loop.analysis.LoopCandidateKt
@@ -1087,12 +1089,12 @@ object LoopDebugServer {
                 linkedMapOf("playing" to playing)
             }
             "next" -> {
-                p.command { controller -> controller.seekToNext() }
-                linkedMapOf("ok" to true, "action" to "next")
+                val pathTaken = p.command { controller -> seekNextForDebug(controller) }
+                linkedMapOf("ok" to true, "action" to "next", "path" to pathTaken)
             }
             "previous" -> {
-                p.command { controller -> controller.seekToPrevious() }
-                linkedMapOf("ok" to true, "action" to "previous")
+                val pathTaken = p.command { controller -> seekPreviousForDebug(controller) }
+                linkedMapOf("ok" to true, "action" to "previous", "path" to pathTaken)
             }
             "seek" -> {
                 val requested = body.requireLong("positionMs")
@@ -1136,6 +1138,66 @@ object LoopDebugServer {
             }
             else -> throw HttpError(404, "unknown player command: $action")
         }
+    }
+
+    /**
+     * /player/next 的导航回退（与真实 UI 的 MusicViewModel.skipToNext 同路径）。
+     *
+     * 真机 1271/1272：SOURCE item 重建后 controller 的 availableCommands 会丢
+     * COMMAND_SEEK_TO_NEXT（已有不变量 controller-available-commands-missing），
+     * 此时直接 controller.seekToNext() 在客户端就是 no-op —— debug 端点看起来"执行了"
+     * 但请求根本没到会话层。这里按"命令可用性 → 下一项 index → 首尾绕回"逐级回退，
+     * 保证 debug 端点与用户点"下一首"的行为一致。
+     */
+    private fun seekNextForDebug(controller: Player): String {
+        val action = DebugNavigationFallback.next(
+            hasNext = controller.hasNextMediaItem(),
+            canSeekToNext = controller.isCommandAvailable(Player.COMMAND_SEEK_TO_NEXT),
+            canSeekToNextMediaItem = controller.isCommandAvailable(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM),
+            nextMediaItemIndex = controller.nextMediaItemIndex,
+            canSeekDefault = controller.isCommandAvailable(Player.COMMAND_SEEK_TO_DEFAULT_POSITION),
+            repeatMode = controller.repeatMode,
+            mediaItemCount = controller.mediaItemCount,
+        )
+        when (action) {
+            DebugNavigationFallback.SEEK_TO_NEXT -> controller.seekToNext()
+            DebugNavigationFallback.SEEK_TO_NEXT_MEDIA_ITEM -> controller.seekToNextMediaItem()
+            DebugNavigationFallback.SEEK_DEFAULT_NEXT ->
+                controller.seekToDefaultPosition(controller.nextMediaItemIndex)
+            // 单曲队列/最后一项：与 UI 一致地回到开头；LoopSessionPlayer 会在
+            // seekToDefaultPosition 上先退出旧循环（不会留在旧 A/B）。
+            DebugNavigationFallback.WRAP_TO_START -> {
+                controller.seekToDefaultPosition(0)
+                if (!controller.isPlaying) controller.play()
+            }
+            else -> Unit
+        }
+        return action
+    }
+
+    /** /player/previous 的同一套回退（命令不可用时仍能真的换项/绕回）。 */
+    private fun seekPreviousForDebug(controller: Player): String {
+        val action = DebugNavigationFallback.previous(
+            hasPrevious = controller.hasPreviousMediaItem(),
+            canSeekToPrevious = controller.isCommandAvailable(Player.COMMAND_SEEK_TO_PREVIOUS),
+            canSeekToPreviousMediaItem = controller.isCommandAvailable(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM),
+            previousMediaItemIndex = controller.previousMediaItemIndex,
+            canSeekDefault = controller.isCommandAvailable(Player.COMMAND_SEEK_TO_DEFAULT_POSITION),
+            repeatMode = controller.repeatMode,
+            mediaItemCount = controller.mediaItemCount,
+        )
+        when (action) {
+            DebugNavigationFallback.SEEK_TO_PREVIOUS -> controller.seekToPrevious()
+            DebugNavigationFallback.SEEK_TO_PREVIOUS_MEDIA_ITEM -> controller.seekToPreviousMediaItem()
+            DebugNavigationFallback.SEEK_DEFAULT_PREVIOUS ->
+                controller.seekToDefaultPosition(controller.previousMediaItemIndex)
+            DebugNavigationFallback.WRAP_TO_END -> {
+                controller.seekToDefaultPosition(controller.mediaItemCount - 1)
+                if (!controller.isPlaying) controller.play()
+            }
+            else -> Unit
+        }
+        return action
     }
 
     /**
@@ -2037,5 +2099,77 @@ object LoopDebugServer {
         is Number -> value.toLong()
         is String -> value.trim().toLongOrNull()
         else -> null
+    }
+}
+
+/**
+ * /player/next|previous 的**回退决策**（纯函数，单测 DebugNavigationFallbackTest）。
+ *
+ * 为什么需要它：MediaController 对某些时间线（SOURCE item 重建后、单曲队列等）会缺
+ * COMMAND_SEEK_TO_NEXT / COMMAND_SEEK_TO_PREVIOUS，直接 seekToNext() 在客户端 no-op，
+ * 请求根本到不了会话层。debug 端点必须像真实 UI 一样逐级回退：
+ * 命令 → 对应 MediaItem 命令 → 显式默认位置 → 首尾绕回。
+ */
+internal object DebugNavigationFallback {
+
+    const val SEEK_TO_NEXT = "seek-to-next"
+    const val SEEK_TO_NEXT_MEDIA_ITEM = "seek-to-next-media-item"
+    const val SEEK_DEFAULT_NEXT = "seek-default-next"
+    const val WRAP_TO_START = "wrap-to-start"
+    const val NOOP = "noop"
+
+    const val SEEK_TO_PREVIOUS = "seek-to-previous"
+    const val SEEK_TO_PREVIOUS_MEDIA_ITEM = "seek-to-previous-media-item"
+    const val SEEK_DEFAULT_PREVIOUS = "seek-default-previous"
+    const val WRAP_TO_END = "wrap-to-end"
+
+    fun next(
+        hasNext: Boolean,
+        canSeekToNext: Boolean,
+        canSeekToNextMediaItem: Boolean,
+        nextMediaItemIndex: Int,
+        canSeekDefault: Boolean,
+        repeatMode: Int,
+        mediaItemCount: Int,
+    ): String {
+        if (hasNext && canSeekToNext) return SEEK_TO_NEXT
+        if (hasNext && canSeekToNextMediaItem) return SEEK_TO_NEXT_MEDIA_ITEM
+        if (hasNext && nextMediaItemIndex != C.INDEX_UNSET && canSeekDefault) {
+            return SEEK_DEFAULT_NEXT
+        }
+        if (!hasNext && MusicNavigationPolicy.shouldWrapToStart(
+                hasNext = hasNext,
+                repeatMode = repeatMode,
+                mediaItemCount = mediaItemCount,
+            )
+        ) {
+            return WRAP_TO_START
+        }
+        return NOOP
+    }
+
+    fun previous(
+        hasPrevious: Boolean,
+        canSeekToPrevious: Boolean,
+        canSeekToPreviousMediaItem: Boolean,
+        previousMediaItemIndex: Int,
+        canSeekDefault: Boolean,
+        repeatMode: Int,
+        mediaItemCount: Int,
+    ): String {
+        if (hasPrevious && canSeekToPrevious) return SEEK_TO_PREVIOUS
+        if (hasPrevious && canSeekToPreviousMediaItem) return SEEK_TO_PREVIOUS_MEDIA_ITEM
+        if (hasPrevious && previousMediaItemIndex != C.INDEX_UNSET && canSeekDefault) {
+            return SEEK_DEFAULT_PREVIOUS
+        }
+        if (!hasPrevious && MusicNavigationPolicy.shouldWrapToEnd(
+                hasPrevious = hasPrevious,
+                repeatMode = repeatMode,
+                mediaItemCount = mediaItemCount,
+            )
+        ) {
+            return WRAP_TO_END
+        }
+        return NOOP
     }
 }

@@ -205,6 +205,17 @@ class LoopSessionPlayer(
         navigateOutsideLoop { super.seekToPreviousMediaItem() }
     }
 
+    // 单曲队列/最后一项时，真实 UI 的 skipToNext/skipToPrevious 与 debug /player/next 的
+    // 回退都走 seekToDefaultPosition（见 MusicViewModel.skipToNext）。这里同样先退场，
+    // 否则"下一首"在单曲队列里只会原地重播并一直留在旧循环。
+    override fun seekToDefaultPosition() {
+        navigateOutsideLoop { super.seekToDefaultPosition() }
+    }
+
+    override fun seekToDefaultPosition(mediaItemIndex: Int) {
+        navigateOutsideLoop { super.seekToDefaultPosition(mediaItemIndex) }
+    }
+
     /**
      * 循环命中时先退场再执行 [nativeCommand]；未命中则直接执行（完全保持原生语义）。
      */
