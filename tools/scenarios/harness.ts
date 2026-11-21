@@ -12,7 +12,8 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -831,6 +832,141 @@ export async function waitFor<T>(
     await sleep(intervalMs);
   }
   return { ok: false, value, elapsedMs: Date.now() - t0, polled };
+}
+
+// ---------------------------------------------------------------------------
+// 设备独占锁（跨工具协作）
+// ---------------------------------------------------------------------------
+
+/**
+ * 设备侧锁协议（任何人/工具都可读写，纯文件，无需共享代码）：
+ *
+ *   /sdcard/.hesi-device-lock.json   统一锁：{owner, runId, startedAt, host, pid}
+ *   /sdcard/.hesi-scenario-lock      场景套件兼容标记（内容=runId）
+ *   /sdcard/.hesi-cost-lock          耗电/CPU 类测量工具的标记（存在即视为对方占用）
+ *   /sdcard/.hesi-engine-cost-lock   同上（兼容不同命名）
+ *
+ * 规则：
+ * - 开跑前读统一锁与成本锁：有新鲜的他人锁 → 拒绝开跑（--force-lock 可覆盖）；
+ * - 自己的锁写统一锁 + .hesi-scenario-lock；
+ * - 结束（含异常/超时）删除自己的锁；进程被硬杀留下的锁，超过 3h 视为过期；
+ * - 其它工具应检查 /sdcard/.hesi-device-lock.json 与 /sdcard/.hesi-scenario-lock，
+ *   并在自己的测量期间写 .hesi-cost-lock（协议见 docs/testing-scenarios.md §1.6）。
+ */
+export interface DeviceLockInfo {
+  owner: string;
+  runId: string;
+  startedAt: string;
+  host: string;
+  pid: number;
+}
+
+export const DEVICE_LOCK_PATHS = {
+  unified: "/sdcard/.hesi-device-lock.json",
+  scenario: "/sdcard/.hesi-scenario-lock",
+  foreign: ["/sdcard/.hesi-cost-lock", "/sdcard/.hesi-engine-cost-lock"],
+};
+
+async function readRemoteText(adb: Adb, remotePath: string): Promise<string | null> {
+  const r = await adb.run(["shell", "cat " + remotePath]);
+  if (r.code !== 0) return null;
+  const text = r.out.trim();
+  return text.length > 0 ? text : null;
+}
+
+async function existsRemote(adb: Adb, remotePath: string): Promise<boolean> {
+  const r = await adb.run(["shell", "ls " + remotePath]);
+  return r.code === 0 && !/No such file|Permission denied/i.test(r.out + r.err);
+}
+
+async function writeRemoteText(adb: Adb, remotePath: string, content: string): Promise<void> {
+  const tmp = path.join(os.tmpdir(), "hesi-lock-" + process.pid + "-" + Date.now() + ".json");
+  writeFileSync(tmp, content, "utf8");
+  try {
+    const r = await adb.run(["push", tmp, remotePath]);
+    if (r.code !== 0) throw new Error("adb push " + remotePath + " 失败: " + (r.err || r.out).slice(0, 200));
+  } finally {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // 本地临时文件清理失败不影响设备锁
+    }
+  }
+}
+
+export async function acquireDeviceLock(
+  adb: Adb,
+  options: { owner: string; runId: string; force?: boolean; staleMs?: number },
+): Promise<{ info: DeviceLockInfo; warnings: string[] }> {
+  const warnings: string[] = [];
+  const staleMs = options.staleMs ?? 3 * 60 * 60 * 1000;
+
+  for (const marker of DEVICE_LOCK_PATHS.foreign) {
+    if (await existsRemote(adb, marker)) {
+      if (!options.force) {
+        throw new Error(
+          "设备被其它测量工具占用: " + marker + " 存在(耗电/CPU 测量进行中)。等它结束,或 --force-lock 覆盖",
+        );
+      }
+      warnings.push("忽略外部锁 " + marker + " (--force-lock)");
+    }
+  }
+
+  const existing = await readRemoteText(adb, DEVICE_LOCK_PATHS.unified);
+  if (existing) {
+    let parsed: DeviceLockInfo | null = null;
+    try {
+      parsed = JSON.parse(existing) as DeviceLockInfo;
+    } catch {
+      parsed = null;
+    }
+    const startedMs = parsed?.startedAt ? Date.parse(parsed.startedAt) : NaN;
+    const fresh = Number.isFinite(startedMs) ? Date.now() - startedMs < staleMs : true;
+    if (fresh && parsed?.runId === options.runId) {
+      warnings.push("发现同一 runId 的旧锁(上次异常退出?)，直接接管");
+    } else if (fresh && !options.force) {
+      throw new Error(
+        "设备被另一个场景执行器占用: owner=" + (parsed?.owner ?? "unknown") +
+          " runId=" + (parsed?.runId ?? "unparsable") + " startedAt=" + (parsed?.startedAt ?? "?") +
+          "。等它结束,或 --force-lock 覆盖",
+      );
+    } else {
+      warnings.push("接管过期/无法解析的锁: " + existing.replace(/\s+/g, " ").slice(0, 200) + (options.force ? " (--force-lock)" : ""));
+    }
+  }
+
+  const info: DeviceLockInfo = {
+    owner: options.owner,
+    runId: options.runId,
+    startedAt: new Date().toISOString(),
+    host: process.env.COMPUTERNAME ?? os.hostname(),
+    pid: process.pid,
+  };
+  await writeRemoteText(adb, DEVICE_LOCK_PATHS.unified, JSON.stringify(info, null, 2) + "\n");
+  await adb.shell("echo " + options.runId + " > " + DEVICE_LOCK_PATHS.scenario);
+  return { info, warnings };
+}
+
+export async function releaseDeviceLock(adb: Adb, runId: string): Promise<{ released: boolean; reason?: string }> {
+  const existing = await readRemoteText(adb, DEVICE_LOCK_PATHS.unified);
+  if (!existing) {
+    await adb.shell("rm -f " + DEVICE_LOCK_PATHS.scenario);
+    return { released: true, reason: "lock already gone" };
+  }
+  let parsed: DeviceLockInfo | null = null;
+  try {
+    parsed = JSON.parse(existing) as DeviceLockInfo;
+  } catch {
+    parsed = null;
+  }
+  if (parsed?.runId && parsed.runId !== runId) {
+    return {
+      released: false,
+      reason: "锁已被其它 run 接管(owner=" + parsed.owner + " runId=" + parsed.runId + "),不删",
+    };
+  }
+  await adb.shell("rm -f " + DEVICE_LOCK_PATHS.unified + " " + DEVICE_LOCK_PATHS.scenario);
+  return { released: true };
 }
 
 // ---------------------------------------------------------------------------

@@ -30,7 +30,10 @@ import {
   Adb,
   Api,
   Evidence,
+  DEVICE_LOCK_PATHS,
+  acquireDeviceLock,
   check,
+  releaseDeviceLock,
   selfActivity,
   compactState,
   displayWidth,
@@ -43,7 +46,7 @@ import {
   waitFor,
   writeJson,
 } from "./harness";
-import type { Cfg, Check, SongInfo, State } from "./harness";
+import type { Cfg, Check, DeviceLockInfo, SongInfo, State } from "./harness";
 import { SCENARIOS, SkipError } from "./scenarios";
 import type { PreviewSeekResult, Scenario, ScenarioCtx, ScenarioRunResult } from "./scenarios";
 
@@ -66,7 +69,10 @@ interface Opts {
   songUnconfirmed: number;
   songLong: number;
   longOnly: boolean;
+  preflightOnly: boolean;
   allowNonSource: boolean;
+  noLock: boolean;
+  forceLock: boolean;
   allow: string[];
 }
 
@@ -86,7 +92,10 @@ function parseArgs(argv: string[]): Opts {
     songUnconfirmed: 0,
     songLong: 0,
     longOnly: false,
+    preflightOnly: false,
     allowNonSource: false,
+    noLock: false,
+    forceLock: false,
     allow: [],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -110,6 +119,9 @@ function parseArgs(argv: string[]): Opts {
     else if (a === "--song-long") opts.songLong = Number(next()) || 0;
     else if (a === "--long") opts.longOnly = true;
     else if (a === "--allow-non-source") opts.allowNonSource = true;
+    else if (a === "--preflight") opts.preflightOnly = true;
+    else if (a === "--no-lock") opts.noLock = true;
+    else if (a === "--force-lock") opts.forceLock = true;
     else if (a === "--allow-invariant") opts.allow.push(next());
     else if (a === "--help" || a === "-h") {
       printHelp();
@@ -129,6 +141,9 @@ function printHelp(): void {
       "  bun run tools/scenarios/run-scenarios.ts [--device b1e84dad] [--only 1,2,9] [--skip-ui]",
       "  bun run tools/scenarios/run-scenarios.ts --long   # 长窗口(>200s) 10 分钟稳定性(不放进常规 18 条)",
       "  --allow-non-source  跳过 SOURCE 路线前置检查(仅用于显式研究 M3;出声判据会报不可用)",
+      "  --preflight         只做环境/路线自检后退出(不起播、不动播放状态)",
+      "  --no-lock           不加设备独占锁(默认会写 /sdcard/.hesi-device-lock.json)",
+      "  --force-lock        忽略他人的设备锁/成本锁(危险,仅调试用)",
       "  powershell -NoProfile -File tools/scenarios/run-scenarios.ps1 ...",
       "产物: e2e-artifacts/scenarios/<时间戳>/report.md + report.json + evidence/*.json",
     ].join("\n"),
@@ -352,6 +367,28 @@ async function main(): Promise<number> {
   };
   const adb = new Adb(adbExe, device);
   const api = new Api(cfg, adb);
+  const runId = stamp() + "-" + process.pid;
+  let lockInfo: DeviceLockInfo | null = null;
+  try {
+  if (!opts.noLock) {
+    const acquired = await acquireDeviceLock(adb, {
+      owner: "scenario-suite",
+      runId,
+      force: opts.forceLock,
+    });
+    lockInfo = acquired.info;
+    console.log("device lock: " + DEVICE_LOCK_PATHS.unified + " runId=" + runId);
+    for (const w of acquired.warnings) console.warn("lock: " + w);
+    const cleanupOnSignal = () => {
+      releaseDeviceLock(adb, runId)
+        .catch(() => null)
+        .finally(() => process.exit(130));
+    };
+    process.once("SIGINT", cleanupOnSignal);
+    process.once("SIGTERM", cleanupOnSignal);
+  } else {
+    console.warn("--no-lock: 未写设备独占锁(其它测量工具无法感知)");
+  }
 
   console.log("== 环境 ==");
   console.log("adb: " + adbExe);
@@ -433,9 +470,17 @@ const pid0 = await adb.pidof(cfg.pkg);
     }
     console.error("   --allow-non-source: 继续,但出声判据会报“探针不可用”。");
   } else if (routeSource === null) {
+    if (opts.preflightOnly) {
+      console.error("!! 前置自检失败: 3s 内没采到 invariantProbe.routeSource,无法确认 SOURCE");
+      return 2;
+    }
     console.warn("警告: 3s 内没采到 invariantProbe.routeSource,无法确认 SOURCE;继续(出声判据可能不可用)。");
   } else {
     console.log("routeSource: true (主播放器 SOURCE)");
+  }
+  if (opts.preflightOnly) {
+    console.log("preflight OK: routeSource=true, pkg=" + cfg.pkg + " v" + version.versionCode + "/" + version.versionName);
+    return 0;
   }
   const runStartEpochSec = Math.floor(Date.now() / 1000) - 5;
   const startedAt = new Date();
@@ -978,6 +1023,17 @@ const pid0 = await adb.pidof(cfg.pkg);
     crashScan.oom.length > 0 ||
     finalPid === null;
   return bad ? 1 : 0;
+  } finally {
+    if (lockInfo) {
+      try {
+        const rel = await releaseDeviceLock(adb, runId);
+        if (rel.released) console.log("device lock released");
+        else console.warn("device lock not released: " + rel.reason);
+      } catch (e: any) {
+        console.warn("device lock release failed: " + (e?.message ?? e));
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

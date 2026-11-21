@@ -33,13 +33,15 @@ bun run tools/scenarios/run-scenarios.ts
 | ~~~--only 1,2,9~~~ | 只跑指定场景 |
 | ~~~--list~~~ | 列出场景编号 |
 | ~~~--skip-ui~~~ | 跳过依赖 uiautomator 的场景（6/7/9/10/11/15/16） |
-| ~~~--exclusive~~~ | 只跑独占组（6/7/9/10/11/15/18，见 §1.5） |
+| ~~~--exclusive~~~ | 只跑独占组（6/7/9/10/11/15/18，见 §1.6） |
 | ~~~--non-exclusive~~~ | 只跑其余场景（可在有人用的设备上先跑） |
 | ~~~--timeout 150000~~~ | 单场景硬超时（默认 150s） |
 | ~~~--song / --song-short / --song-unconfirmed / --song-long~~~ | 覆盖自动选歌 |
 | ~~~--long~~~ | 只跑长窗口 10 分钟稳定性（场景 19，默认不跑；见 §9） |
 | ~~~--allow-invariant <code>~~~ | 临时允许某个不变量 code（也可写进 allow-invariants.json） |
 | ~~~--allow-non-source~~~ | 跳过 SOURCE 路线前置检查（仅用于显式研究 M3；出声判据会报不可用） |
+| ~~~--no-lock~~~ | 不写设备独占锁（调试用；其它测量工具无法感知） |
+| ~~~--force-lock~~~ | 忽略他人的设备锁/成本锁（危险；会打断别人的测量） |
 
 ### 前置条件
 
@@ -97,7 +99,44 @@ e2e-artifacts/scenarios/<yyyyMMdd-HHmmss>/
 预览 seek 直接 SKIP；场景 7 的 LOOP_ONLY/SEAM、场景 9 的接缝检查会显式记一条“走 SOURCE 路线”判据，
 避免 M3 下用位置推进代理误判 PASS。
 
-### 1.5 如何独占跑（推荐流程）
+### 1.5 设备独占锁（跨工具协议）
+
+口头协调不可靠，执行器现在会在**任何设备交互之前**写锁文件：
+
+| 路径 | 用途 |
+|---|---|
+| ~~~/sdcard/.hesi-device-lock.json~~~ | 统一锁，JSON：~~~{"owner":"scenario-suite","runId":"...","startedAt":"ISO","host":"PC","pid":123}~~~ |
+| ~~~/sdcard/.hesi-scenario-lock~~~ | 场景套件兼容标记（内容 = runId） |
+| ~~~/sdcard/.hesi-cost-lock~~~ / ~~~/sdcard/.hesi-engine-cost-lock~~~ | 耗电/CPU 类测量工具写的标记；存在即视为对方占用 |
+
+行为：
+
+- 开跑前先读统一锁与成本锁：
+  - 有**新鲜的他人锁** / 成本标记 → 拒绝开跑（exit 2），提示 owner/runId/startedAt；
+  - 锁超过 **3h** 视为过期（进程被硬杀留下的），可接管并打印警告；
+  - ~~~--force-lock~~~ 可强制覆盖（会打断别人，慎用）；~~~--no-lock~~~ 不写锁（仅调试）。
+- 自己的锁在**结束/异常/超时**时删除（finally + SIGINT/SIGTERM 清理）；只删 runId 匹配的锁。
+- ~~~--preflight~~~ 也会短暂拿锁再释放，避免自检期间被别人插进来。
+
+其它测量工具（engine-cost / battery-gate）建议按同一协议接入：
+
+~~~powershell
+# 1) 开跑前拒绝：看到场景锁就不跑
+if ((adb shell ls /sdcard/.hesi-device-lock.json 2>$null) -notmatch "No such file") { throw "scenario-suite holding device" }
+
+# 2) 自己的测量期间写成本标记（内容自定，建议含 owner/startedAt）
+adb shell "echo battery-gate @ $(date +%s) > /sdcard/.hesi-cost-lock"
+try {
+  # ... 10 分钟 CPU/耗电采集 ...
+} finally {
+  adb shell rm -f /sdcard/.hesi-cost-lock
+}
+~~~
+
+场景执行器看到 ~~~.hesi-cost-lock~~~ 存在会直接拒绝开跑；反过来也请 engine-cost 检查场景锁。
+手工清理残留锁：~~~adb shell rm -f /sdcard/.hesi-device-lock.json /sdcard/.hesi-scenario-lock~~~。
+
+### 1.6 如何独占跑（推荐流程）
 
 本套件会切页面、改窗口、暂停播放；与其它 agent/手工操作并发时：
 
@@ -491,4 +530,20 @@ bytes = (B - A) 秒 × sampleRate × channels × 2
 
 注意：主播放器超过 heap/10 会直接回退普通播放（不循环），不要把这种窗口拿去做"长窗口循环稳定性"；
 场景 19 用 210s（约 37MB@44.1k）留在常见 heap/10 预算内，就是为避免这条回退干扰稳定性判定。
+
+---
+
+## 10. 单跑记录（1267 / 2026-11-21）
+
+设备：b1e84dad，pkg 1267 / 2.3.5，routeSource=true（前置检查通过）。
+
+| 时间 | 命令 | 结果 |
+|---|---|---|
+| 11:35 | ~~~--preflight~~~ | routeSource=true, v1267/2.3.5 |
+| 11:37:14–11:37:20 | ~~~--only 12~~~ | PASS：39944 → 41409（2406ms），engine=exo，循环标记不串歌 |
+| 11:37:27–11:38:07 | ~~~--only 7~~~ | PASS：FULL display=1788（≈0+1.8s，上一轮 19325）；LOOP_ONLY/SEAM SOURCE 101%/100%；FULL/FREE 走 M3′（位置推进代理通过） |
+
+> 这两次单跑落在 baseline-cost A 轮 CPU 采集窗口内（约 11:37:14–11:38:07，共 53s/600s）；
+> 若 CPU 曲线出现台阶，可按这个窗口剔除。之后按约定停手，直到收到 device yours 再跑全量。
+> 单跑报告：e2e-artifacts/scenarios/20261121-113714/report.md、20261121-113727/report.md。
 
