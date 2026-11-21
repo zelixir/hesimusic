@@ -70,12 +70,18 @@ data class LoopEngineInfo(
             val fallbackReason = claim.fallbackReason
                 ?: LoopSourceFallback.reasonFor(effectiveSongId, effectiveWindow)
                 ?: if (!LoopClaimStore.isInstalled()) LoopSourceFallback.latestReason() else null
+            // true/false = 有当前 claim 证据；null = 空闲/还没放歌 → 维持“按配置显示引擎”。
+            val claimEvidence: Boolean? = when {
+                claim.window != null || claim.sourceActive -> claim.claimActive
+                fallbackReason != null -> false
+                else -> null
+            }
             return of(
                 sourceMode = LoopSourceMode.isSource(),
                 mainEnabled = LoopSourceMainPlayer.enabled,
                 bandBytes = if (claim.claimActive) lastBandBytes else 0L,
                 fallbackReason = fallbackReason?.logName,
-                claimActive = claim.claimActive,
+                claimActive = claimEvidence,
             )
         }
 
@@ -89,23 +95,30 @@ data class LoopEngineInfo(
             bandBytes: Long = 0L,
             fallbackReason: String? = null,
             loopPath: String? = null,
-            claimActive: Boolean = false,
+            /** true/false = 当前 claim 的明确真值；null = 空闲/无证据，按配置显示。 */
+            claimActive: Boolean? = null,
         ): LoopEngineInfo {
             val sourceRoute = sourceMode && mainEnabled
-            val useSource = sourceRoute && claimActive && fallbackReason.isNullOrBlank()
+            val useSource = sourceRoute && fallbackReason.isNullOrBlank() &&
+                (claimActive == null || claimActive)
             val path = loopPath ?: when {
                 useSource -> PATH_SOURCE
-                claimActive -> PATH_M3
+                claimActive == true -> PATH_M3
+                claimActive == false -> PATH_NONE
+                !sourceMode -> PATH_M3
+                !fallbackReason.isNullOrBlank() -> PATH_NONE
                 else -> PATH_NONE
             }
             return LoopEngineInfo(
                 engine = when {
                     useSource -> ENGINE_SOURCE_RING
-                    claimActive -> ENGINE_M3_PRIME
-                    else -> ENGINE_NONE
+                    claimActive == true -> ENGINE_M3_PRIME
+                    claimActive == false -> ENGINE_NONE
+                    fallbackReason != null -> ENGINE_NONE
+                    else -> ENGINE_M3_PRIME
                 },
                 loopPath = path,
-                bandBytes = if (claimActive) bandBytes.coerceAtLeast(0L) else 0L,
+                bandBytes = if (useSource) bandBytes.coerceAtLeast(0L) else 0L,
                 fallbackReason = fallbackReason?.takeIf { it.isNotBlank() },
             )
         }
