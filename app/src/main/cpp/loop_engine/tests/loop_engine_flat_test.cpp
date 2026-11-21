@@ -1,11 +1,12 @@
 // Host-side contract test for the flat record returned by loop_jni.cpp
 // (loop_engine::flattenCandidates, candidate_flat.h).
 //
-// v8 appended seamQuality as the 6th double of every candidate record. This
-// test pins the part old consumers rely on: the first five fields keep their
-// positions and values, the record grows 5 -> 6 doubles, and the seam stage
-// being disabled (LOOP_ENGINE_SEAM=0) writes 0.0 (the "unknown" sentinel)
-// instead of a stale/garbage value.
+// v8 appended seamQuality as the 6th double, v8.1 appended legacyScore as the
+// 7th. This test pins the contract old consumers rely on: the first five fields
+// keep their positions and values, the record grows 5 -> 6 -> 7 doubles,
+// legacyScore is the pre-blend score (score == 0.5*legacy + 0.5*seam with the
+// default weight), and the seam stage being disabled (LOOP_ENGINE_SEAM=0)
+// writes 0.0 as the seam "unknown" sentinel while legacyScore == score.
 //
 // Build/run (host, no Android device needed):
 //   cmake -S app/src/main/cpp/loop_engine/tests -B build/loop-engine-tests
@@ -38,8 +39,12 @@ void check(bool cond, const std::string& what) {
 void setSeam(int on) {
 #ifdef _WIN32
     _putenv_s("LOOP_ENGINE_SEAM", on ? "1" : "0");
+    // Pin the default blend weight (0.50) so the fused-score identity is stable
+    // even if the developer shell exported LOOP_ENGINE_SEAM_WEIGHT.
+    _putenv_s("LOOP_ENGINE_SEAM_WEIGHT", "");
 #else
     setenv("LOOP_ENGINE_SEAM", on ? "1" : "0", 1);
+    unsetenv("LOOP_ENGINE_SEAM_WEIGHT");
 #endif
 }
 
@@ -79,7 +84,8 @@ std::vector<float> makeMusic(double seconds, int sr) {
 }
 
 loop_engine::LoopCandidate makeCandidate(int64_t start, int64_t end, double score,
-                                        double noteDistance, double loudness, double seam) {
+                                        double noteDistance, double loudness, double seam,
+                                        double legacy) {
     loop_engine::LoopCandidate c;
     c.loopStart = start;
     c.loopEnd = end;
@@ -87,10 +93,11 @@ loop_engine::LoopCandidate makeCandidate(int64_t start, int64_t end, double scor
     c.noteDistance = noteDistance;
     c.loudnessDifference = loudness;
     c.seamQuality = seam;
+    c.legacyScore = legacy;
     return c;
 }
 
-// Field 0..4 must stay exactly the pre-v8 record; field 5 is the new seamQuality.
+// Field 0..4 must stay exactly the pre-v8 record; 5 = seamQuality, 6 = legacyScore.
 void checkRecord(const std::vector<double>& flat, size_t index,
                  const loop_engine::LoopCandidate& c, const std::string& label) {
     const size_t base = index * size_t(loop_engine::kFlatFieldsPerCandidate);
@@ -99,16 +106,17 @@ void checkRecord(const std::vector<double>& flat, size_t index,
     check(flat[base + 2] == c.score, label + " field2 score unchanged");
     check(flat[base + 3] == c.noteDistance, label + " field3 noteDistance unchanged");
     check(flat[base + 4] == c.loudnessDifference, label + " field4 loudnessDifference unchanged");
-    check(flat[base + 5] == c.seamQuality, label + " field5 seamQuality appended");
+    check(flat[base + 5] == c.seamQuality, label + " field5 seamQuality appended by v8");
+    check(flat[base + 6] == c.legacyScore, label + " field6 legacyScore appended by v8.1");
 }
 
 void testManualLayout() {
     loop_engine::Result r;
-    r.candidates.push_back(makeCandidate(76792, 3544053, 0.987, 0.12, 0.34, 0.86));
-    r.candidates.push_back(makeCandidate(100, 200, 0.5, 0.2, 0.3, 0.0));
+    r.candidates.push_back(makeCandidate(76792, 3544053, 0.923, 0.12, 0.34, 0.86, 0.987));
+    r.candidates.push_back(makeCandidate(100, 200, 0.5, 0.2, 0.3, 0.0, 0.5));
     const std::vector<double> flat = loop_engine::flattenCandidates(r);
-    check(flat.size() == 2 * 6, "2 candidates -> 12 doubles (was 10 before v8)");
-    check(flat.size() % loop_engine::kFlatFieldsPerCandidate == 0, "record stride is 6");
+    check(flat.size() == 2 * 7, "2 candidates -> 14 doubles (was 10 before v8)");
+    check(flat.size() % loop_engine::kFlatFieldsPerCandidate == 0, "record stride is 7");
     checkRecord(flat, 0, r.candidates[0], "manual[0]");
     checkRecord(flat, 1, r.candidates[1], "manual[1]");
 
@@ -123,14 +131,19 @@ void testAnalyzedLayout(const std::vector<float>& pcm, int sr) {
         loop_engine::analyze(pcm.data(), 1, frames, sr, 10);
     check(!on.candidates.empty(), "seam on: analysis returns candidates");
     const std::vector<double> flatOn = loop_engine::flattenCandidates(on);
-    check(flatOn.size() == on.candidates.size() * 6, "seam on: flat length is 6 x N");
+    check(flatOn.size() == on.candidates.size() * 7, "seam on: flat length is 7 x N");
     check(flatOn.size() == on.candidates.size() * size_t(loop_engine::kFlatFieldsPerCandidate),
           "seam on: flat length matches kFlatFieldsPerCandidate");
     int measured = 0;
     for (size_t i = 0; i < on.candidates.size(); i++) {
         const loop_engine::LoopCandidate& c = on.candidates[i];
-        checkRecord(flatOn, i, c, "seamOn[" + std::to_string(i) + "]");
-        check(c.seamQuality >= 0.0 && c.seamQuality <= 1.0, "seamQuality in [0,1]");
+        const std::string label = "seamOn[" + std::to_string(i) + "]";
+        checkRecord(flatOn, i, c, label);
+        check(c.seamQuality >= 0.0 && c.seamQuality <= 1.0, label + " seamQuality in [0,1]");
+        check(c.legacyScore >= 0.0 && c.legacyScore <= 1.0, label + " legacyScore in [0,1]");
+        // Engine contract: fused score = (1-w)*legacy + w*seam with w = 0.50.
+        check(std::fabs(c.score - (0.5 * c.legacyScore + 0.5 * c.seamQuality)) < 1e-12,
+              label + " score is the 0.5/0.5 blend of legacy and seam");
         if (c.seamQuality > 0.0) measured++;
     }
     check(measured > 0, "seam on: at least one candidate has a measured seam");
@@ -141,11 +154,14 @@ void testAnalyzedLayout(const std::vector<float>& pcm, int sr) {
     setSeam(1);
     check(!off.candidates.empty(), "seam off: analysis still returns candidates");
     const std::vector<double> flatOff = loop_engine::flattenCandidates(off);
-    check(flatOff.size() == off.candidates.size() * 6, "seam off: flat length is 6 x N");
+    check(flatOff.size() == off.candidates.size() * 7, "seam off: flat length is 7 x N");
     for (size_t i = 0; i < off.candidates.size(); i++) {
-        checkRecord(flatOff, i, off.candidates[i], "seamOff[" + std::to_string(i) + "]");
+        const std::string label = "seamOff[" + std::to_string(i) + "]";
+        checkRecord(flatOff, i, off.candidates[i], label);
         check(off.candidates[i].seamQuality == 0.0,
-              "seam off: seamQuality is the 0.0 unknown sentinel");
+              label + " seamQuality is the 0.0 unknown sentinel");
+        check(off.candidates[i].legacyScore == off.candidates[i].score,
+              label + " seam off: legacyScore == score (no blend happened)");
     }
 }
 

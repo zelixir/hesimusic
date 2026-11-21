@@ -37,8 +37,8 @@ data class RestoredCandidates(
  *   严格相等会把同一个窗口误判成"用户拖过",于是插入合成候选、真机显示「候选(11)」;
  * - 解析成功但行内窗口**不命中**(用户拖过 A/B)→ 把行内窗口作为**第 0 个合成候选插入**,
  *   列表变成 `[saved] + parsed`,selectedIndex = 0;合成候选的 score/noteDistance/loudnessDifference
- *   取行里已有的值(即该窗口自己保存的分数),绝不造 0;seamQuality 行里未存 → 0(未知),
- *   UI 只显示相似度、不显示接缝百分比。
+ *   取行里已有的值(即该窗口自己保存的分数),绝不造 0;seamQuality/legacyScore 行里未存
+ *   → 0(未知),UI 回退显示综合分、不显示接缝百分比。
  */
 object LoopCandidateRestore {
 
@@ -67,8 +67,10 @@ object LoopCandidateRestore {
             score = row.score,
             noteDistance = row.noteDistance,
             loudnessDifference = row.loudnessDifference,
-            // song_loop 行不存 seamQuality:合成候选按"未知"处理(0),不臆造接缝分。
+            // song_loop 行不存 seamQuality/legacyScore:合成候选按"未知"处理(0),
+            // 不臆造接缝分或纯相似度。
             seamQuality = 0.0,
+            legacyScore = 0.0,
         )
         val stored = LoopCandidatesJson.decode(row.candidatesJson)
         if (stored.isNullOrEmpty()) {

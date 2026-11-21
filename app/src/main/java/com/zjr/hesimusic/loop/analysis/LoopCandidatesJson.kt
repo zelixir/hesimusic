@@ -10,11 +10,13 @@ package com.zjr.hesimusic.loop.analysis
  * 格式(稳定、与字段一一对应,顺序即引擎给出的 score 降序):
  * ```json
  * [{"startSamples":123,"endSamples":456,"score":0.9,"noteDistance":0.1,
- *   "loudnessDifference":0.2,"seamQuality":0.86}]
+ *   "loudnessDifference":0.2,"seamQuality":0.86,"legacyScore":0.94}]
  * ```
  *
- * v8 在尾部追加 `seamQuality`(0..1,接缝质量);旧 JSON 没有该字段时按 0(=未知)
- * 读入,不改 Room schema(candidatesJson 是 TEXT 列,无需迁移)。
+ * v8 在尾部追加 `seamQuality`(0..1,接缝质量),v8.1 再追加 `legacyScore`(融合前的
+ * 纯和弦相似度)。seam 关闭时引擎保证 legacyScore == score(排序未融合,两者都是旧语义分)。
+ * 老 JSON 缺字段时按 0(=未知)读入:缺 legacy → UI 回退显示综合分;缺 seam → UI 不显示接缝。
+ * 不改 Room schema(candidatesJson 是 TEXT 列,无需迁移)。
  *
  * 契约:
  * - [encode]:非有限 double(NaN/±Inf,理论上不会出现)编码为 `0.0`,保证输出永远是合法 JSON;
@@ -30,6 +32,7 @@ object LoopCandidatesJson {
     private const val FIELD_NOTE = "noteDistance"
     private const val FIELD_LOUDNESS = "loudnessDifference"
     private const val FIELD_SEAM = "seamQuality"
+    private const val FIELD_LEGACY = "legacyScore"
 
     /** 候选列表 → JSON 字符串;空列表得到 `[]`。 */
     fun encode(candidates: List<LoopCandidateKt>): String {
@@ -46,6 +49,8 @@ object LoopCandidatesJson {
                 .append(formatDouble(candidate.loudnessDifference))
             sb.append(',').append('"').append(FIELD_SEAM).append("\":")
                 .append(formatDouble(candidate.seamQuality))
+            sb.append(',').append('"').append(FIELD_LEGACY).append("\":")
+                .append(formatDouble(candidate.legacyScore))
             sb.append('}')
         }
         sb.append(']')
@@ -114,6 +119,7 @@ object LoopCandidatesJson {
             var noteDistance = 0.0
             var loudnessDifference = 0.0
             var seamQuality = 0.0 // 旧 JSON 没有该字段 → 0(未知),UI 不显示接缝
+            var legacyScore = 0.0 // 旧 JSON 没有该字段 → 0(未知),UI 回退显示综合分
             skipWs()
             if (peek() == '}') {
                 pos++
@@ -132,6 +138,7 @@ object LoopCandidatesJson {
                     FIELD_NOTE -> noteDistance = readDouble()
                     FIELD_LOUDNESS -> loudnessDifference = readDouble()
                     FIELD_SEAM -> seamQuality = readDouble()
+                    FIELD_LEGACY -> legacyScore = readDouble()
                     else -> skipValue()
                 }
                 skipWs()
@@ -151,6 +158,7 @@ object LoopCandidatesJson {
                             noteDistance = noteDistance,
                             loudnessDifference = loudnessDifference,
                             seamQuality = seamQuality,
+                            legacyScore = legacyScore,
                         )
                     }
 

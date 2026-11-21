@@ -9,7 +9,8 @@ import android.widget.Toast
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -707,6 +708,7 @@ private fun ResultContent(
                         bMs = candidateBMs,
                         durationMs = durationMs,
                         score = candidate.score,
+                        legacyScore = candidate.legacyScore,
                         noteDistance = candidate.noteDistance,
                         loudnessDifference = candidate.loudnessDifference,
                         seamQuality = candidate.seamQuality,
@@ -750,7 +752,8 @@ private fun modeHint(mode: PreviewMode): String = when (mode) {
     PreviewMode.FREE -> "自由播放,不循环(适合完整听一遍)"
 }
 
-/** 候选弹层行:序号 + A→B 时间 + 占比/指标;点击应用并关闭。 */
+/** 候选弹层行:序号 + A→B 时间 + 占比/指标;点击应用并关闭,长按看排序依据。 */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CandidateRow(
     index: Int,
@@ -760,12 +763,15 @@ private fun CandidateRow(
     bMs: Long,
     durationMs: Long,
     score: Double,
+    /** 融合前相似度;0/未知时回退显示"综合分"(见 [candidateMetricsText])。 */
+    legacyScore: Double,
     noteDistance: Double,
     loudnessDifference: Double,
-    /** 接缝质量;0/未知时第二行只显示相似度(见 [candidateMetricsText])。 */
+    /** 接缝质量;0/未知时第二行不显示接缝。 */
     seamQuality: Double,
     onClick: () -> Unit,
 ) {
+    var showRankingInfo by remember { mutableStateOf(false) }
     val ratio = if (durationMs > 0L) {
         ((bMs - aMs).toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
     } else {
@@ -774,7 +780,10 @@ private fun CandidateRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = { showRankingInfo = true },
+            )
             .padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -813,9 +822,10 @@ private fun CandidateRow(
                     maxLines = 1,
                 )
                 Text(
-                    // 相似度 + 接缝;seamQuality 未知(0/老数据)时只显示相似度。
+                    // 相似度(legacyScore)+ 接缝;seam 未知时不显示接缝,legacy 未知时回退综合分。
                     candidateMetricsText(
                         score = score,
+                        legacyScore = legacyScore,
                         noteDistance = noteDistance,
                         loudnessDifference = loudnessDifference,
                         seamQuality = seamQuality,
@@ -831,6 +841,17 @@ private fun CandidateRow(
         if (isSelected) {
             Icon(Icons.Filled.Check, contentDescription = "当前候选", tint = MaterialTheme.colorScheme.primary)
         }
+    }
+    // 长按:解释"为什么它排在这里"——排序用的是融合分,不是相似度或接缝单项。
+    if (showRankingInfo) {
+        AlertDialog(
+            onDismissRequest = { showRankingInfo = false },
+            title = { Text("排序依据") },
+            text = { Text(candidateRankingText(score, legacyScore, seamQuality)) },
+            confirmButton = {
+                TextButton(onClick = { showRankingInfo = false }) { Text("知道了") }
+            },
+        )
     }
 }
 

@@ -19,8 +19,9 @@ endif()
 find_package(Threads REQUIRED)
 target_link_libraries(loop_engine_parallel_test PRIVATE Threads::Threads)
 
-# Flat JNI record layout contract: 6 doubles per candidate ([start, end, score,
-# noteDistance, loudnessDifference, seamQuality]); old 5 fields keep positions.
+# Flat JNI record layout contract: 7 doubles per candidate ([start, end, score,
+# noteDistance, loudnessDifference, seamQuality, legacyScore]); old fields keep
+# positions and the pre-blend similarity is carried separately from the blend.
 add_executable(loop_engine_flat_test
     loop_engine_flat_test.cpp
     ../loop_engine.cpp

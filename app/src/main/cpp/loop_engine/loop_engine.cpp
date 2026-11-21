@@ -1786,6 +1786,9 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
             // 0.0 when !useSeam (legacy A/B path): kept as the "not measured"
             // sentinel that JNI/UI map to "unknown", never a real seam 0%.
             c.seamQuality = sp.seamQuality;
+            // Pre-blend similarity. In the !useSeam path the loop above already
+            // set sp.legacyScore = sp.score, so legacy == score there by design.
+            c.legacyScore = sp.legacyScore;
             result.candidates.push_back(c);
             emitted++;
             if (!prog.report(0.98)) { // honour a cancel that lands during emission

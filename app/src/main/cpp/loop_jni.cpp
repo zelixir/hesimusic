@@ -47,10 +47,11 @@ bool progressTrampoline(float fraction, void* userData) {
     return true;
 }
 
-// 共享实现:mono PCM → analyze → DoubleArray(按 score 降序平铺 6 元组:
-// [loopStart, loopEnd, score, noteDistance, loudnessDifference, seamQuality])。
-// 前 5 个字段的位置与语义未变(v8 只在尾部追加);seamQuality=0 表示接缝阶段
-// 未运行(LOOP_ENGINE_SEAM=0 / 边界回退),UI 按"未知"处理。
+// 共享实现:mono PCM → analyze → DoubleArray(按 score 降序平铺 7 元组:
+// [loopStart, loopEnd, score, noteDistance, loudnessDifference, seamQuality,
+//  legacyScore])。前 5 个字段的位置与语义未变(v8/v8.1 只在尾部追加);
+// seamQuality=0 表示接缝阶段未运行(LOOP_ENGINE_SEAM=0 / 边界回退),UI 按
+// "未知"处理;seam 关闭时 legacyScore == score(此时 score 就是旧语义分)。
 jdoubleArray analyzeImpl(JNIEnv* env, jfloatArray monoPcm, jint sampleRate,
                          jint maxCandidates, jobject sinkLocalRef) {
     jdoubleArray empty = env->NewDoubleArray(0);

@@ -18,7 +18,7 @@ class LoopCandidatesTest {
     }
 
     @Test
-    fun `长度非 5 或 6 的倍数整体拒绝`() {
+    fun `长度非 5、6 或 7 的倍数整体拒绝`() {
         // 11 = 2 组 + 1 个残缺值:不猜测截断语义,整体返回空。
         val flat = DoubleArray(11) { it.toDouble() }
         assertTrue(LoopCandidates.parse(flat).isEmpty())
@@ -65,6 +65,42 @@ class LoopCandidatesTest {
         assertEquals(0.12, c.noteDistance, 0.0)
         assertEquals(0.34, c.loudnessDifference, 0.0)
         assertEquals("seamQuality 是新增的第 6 个字段", 0.86, c.seamQuality, 0.0)
+        assertEquals("6 字段过渡格式没透出 legacy → 未知(0)", 0.0, c.legacyScore, 0.0)
+    }
+
+    @Test
+    fun `七字段候选映射 legacyScore 与 seamQuality_前 5 个字段位置不变`() {
+        val flat = doubleArrayOf(76792.0, 3544053.0, 0.923, 0.12, 0.34, 0.86, 0.987)
+        val list = LoopCandidates.parse(flat)
+        assertEquals(1, list.size)
+        val c = list[0]
+        assertEquals(76792L, c.startSamples)
+        assertEquals(3544053L, c.endSamples)
+        assertEquals("score 仍是第 3 个字段(融合分)", 0.923, c.score, 0.0)
+        assertEquals(0.12, c.noteDistance, 0.0)
+        assertEquals(0.34, c.loudnessDifference, 0.0)
+        assertEquals("第 6 个字段 seamQuality", 0.86, c.seamQuality, 0.0)
+        assertEquals("第 7 个字段 legacyScore(融合前相似度)", 0.987, c.legacyScore, 0.0)
+    }
+
+    @Test
+    fun `多候选七字段保持配对且按 score 降序`() {
+        val flat = doubleArrayOf(
+            10.0, 20.0, 0.7, 0.5, 0.6, 0.71, 0.69,
+            30.0, 40.0, 0.9, 0.2, 0.3, 0.92, 0.88,
+            50.0, 60.0, 0.5, 0.4, 0.4, 0.55, 0.45,
+        )
+        val list = LoopCandidates.parse(flat)
+        assertEquals(3, list.size)
+        assertEquals(30L, list[0].startSamples)
+        assertEquals(0.92, list[0].seamQuality, 0.0)
+        assertEquals(0.88, list[0].legacyScore, 0.0)
+        assertEquals(10L, list[1].startSamples)
+        assertEquals(0.71, list[1].seamQuality, 0.0)
+        assertEquals(0.69, list[1].legacyScore, 0.0)
+        assertEquals(50L, list[2].startSamples)
+        assertEquals(0.55, list[2].seamQuality, 0.0)
+        assertEquals(0.45, list[2].legacyScore, 0.0)
     }
 
     @Test
@@ -96,18 +132,32 @@ class LoopCandidatesTest {
         assertEquals(30L, list[0].startSamples)
         assertEquals(0.9, list[0].score, 0.0)
         assertEquals(0.0, list[0].seamQuality, 0.0)
+        assertEquals("5 字段的 score 就是旧语义分 → legacy=score", 0.9, list[0].legacyScore, 0.0)
         assertEquals(10L, list[1].startSamples)
         assertEquals(0.0, list[1].seamQuality, 0.0)
+        assertEquals(0.8, list[1].legacyScore, 0.0)
     }
 
     @Test
-    fun `公倍数长度 30 按当前六字段契约解释`() {
-        // 30 = 5×6 = 6×5,歧义时优先当前契约(同版本 JNI 与解析器不会混用)。
+    fun `公倍数长度 30 按六字段过渡契约解释`() {
+        // 30 = 5×6 = 6×5,但不是 7 的倍数 → 在 6/5 之间优先 6(同版本 JNI 与解析器不会混用)。
         val flat = DoubleArray(30) { it.toDouble() }
         val list = LoopCandidates.parse(flat)
         assertEquals(5, list.size)
         // 第 5 条记录 score=26 最高排第一,其第 6 个 double 是 29(seamQuality)。
         assertEquals("第 6 个 double 是每条记录自己的 seamQuality", 29.0, list[0].seamQuality, 0.0)
+        assertEquals("6 字段过渡格式的 legacy 未知", 0.0, list[0].legacyScore, 0.0)
+    }
+
+    @Test
+    fun `公倍数长度 35 按当前七字段契约解释`() {
+        // 35 = 5×7,歧义时优先更大的新契约(同版本 JNI 与解析器不会混用)。
+        val flat = DoubleArray(35) { it.toDouble() }
+        val list = LoopCandidates.parse(flat)
+        assertEquals(5, list.size)
+        // 第 5 条记录 score=30 最高排第一;seam 是 33,legacy 是 34。
+        assertEquals(33.0, list[0].seamQuality, 0.0)
+        assertEquals(34.0, list[0].legacyScore, 0.0)
     }
 
     @Test
@@ -121,6 +171,20 @@ class LoopCandidatesTest {
         assertEquals(2, list.size)
         assertEquals(0.0, list[0].seamQuality, 0.0)
         assertEquals(0.0, list[1].seamQuality, 0.0)
+    }
+
+    @Test
+    fun `非有限 legacyScore 归一为 0 未知`() {
+        val list = LoopCandidates.parse(
+            doubleArrayOf(
+                1.0, 2.0, 0.7, 0.1, 0.2, 0.8, Double.NaN,
+                3.0, 4.0, 0.6, 0.1, 0.2, 0.5, Double.NEGATIVE_INFINITY,
+            ),
+        )
+        assertEquals(2, list.size)
+        assertEquals(0.0, list[0].legacyScore, 0.0)
+        assertEquals(0.0, list[1].legacyScore, 0.0)
+        assertEquals("legacy 未知不影响 seam", 0.8, list[0].seamQuality, 0.0)
     }
 
     @Test

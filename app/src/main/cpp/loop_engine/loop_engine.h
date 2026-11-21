@@ -22,6 +22,12 @@ struct LoopCandidate {
     // (LOOP_ENGINE_SEAM=0) or the candidate bounds fell back, and the UI treats
     // it as unknown instead of rendering a misleading "seam 0%".
     double seamQuality = 0.0;
+    // v8.1 pre-seam (legacy) chroma-sequence ranking score, i.e. the old score
+    // semantics. Appended as the 7th JNI field so the UI can show "similarity"
+    // and "seam" separately instead of only the blend. When the seam stage is
+    // off, ranking never blends, so legacyScore == score (the emitted value is
+    // the pre-v8 score and both fields carry it).
+    double legacyScore = 0.0;
 };
 
 struct Result {

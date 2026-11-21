@@ -57,6 +57,14 @@ data class LoopCandidateKt(
      * 只显示相似度,不显示"接缝 0%"以免误导;老 JSON 缺该字段时同样按 0 读入。
      */
     val seamQuality: Double = 0.0,
+    /**
+     * 接缝融合**之前**的旧语义排序分(纯和弦序列相似度,0..1,越大越像)。
+     *
+     * UI 的「相似度」用它,而不是 [score](融合分)。0.0 = **未知**(老 JSON / 6 字段
+     * 过渡格式 / 用户手动微调后的合成候选),此时 UI 回退显示「综合分 = score」。
+     * seam 关闭时引擎保证 legacyScore == score(排序未融合,两者都是旧语义分)。
+     */
+    val legacyScore: Double = 0.0,
 )
 
 /**

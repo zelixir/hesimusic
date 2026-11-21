@@ -9,14 +9,17 @@ namespace loop_engine {
 // Flat double layout returned across JNI (loop_jni.cpp) and parsed by
 // LoopCandidates.kt. One record per candidate, score-descending input order:
 //
-//   [loopStart, loopEnd, score, noteDistance, loudnessDifference, seamQuality]
+//   [loopStart, loopEnd, score, noteDistance, loudnessDifference,
+//    seamQuality, legacyScore]
 //
-// v8 appended seamQuality as the 6th element ("add, never remove"): the first
-// five positions/meanings are unchanged, so a reader that consumes whole
-// 6-double records still sees the pre-v8 fields at their old offsets.
+// v8 appended seamQuality; v8.1 appended legacyScore (the pre-blend, pre-v8
+// score semantics). Appends are strictly "add, never remove/reorder": the first
+// five positions/meanings are unchanged, so fields keep their old offsets.
 // seamQuality is 0.0 when the seam stage did not run (LOOP_ENGINE_SEAM=0 or
-// bounds fallback); Kotlin/UI treats 0 as "unknown", never as a real 0%.
-constexpr int kFlatFieldsPerCandidate = 6;
+// bounds fallback); legacyScore equals score in that path because ranking never
+// blends (both carry the pre-v8 score). Kotlin treats seamQuality 0 as
+// "unknown", never as a real 0%.
+constexpr int kFlatFieldsPerCandidate = 7;
 
 inline std::vector<double> flattenCandidates(const Result& result) {
     std::vector<double> flat;
@@ -28,6 +31,7 @@ inline std::vector<double> flattenCandidates(const Result& result) {
         flat.push_back(candidate.noteDistance);
         flat.push_back(candidate.loudnessDifference);
         flat.push_back(candidate.seamQuality);
+        flat.push_back(candidate.legacyScore);
     }
     return flat;
 }
