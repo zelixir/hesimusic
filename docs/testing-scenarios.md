@@ -33,12 +33,13 @@ bun run tools/scenarios/run-scenarios.ts
 | ~~~--only 1,2,9~~~ | 只跑指定场景 |
 | ~~~--list~~~ | 列出场景编号 |
 | ~~~--skip-ui~~~ | 跳过依赖 uiautomator 的场景（6/7/9/10/11/15/16） |
-| ~~~--exclusive~~~ | 只跑独占组（6/7/9/10/11/15/18，见 §1.6） |
+| ~~~--exclusive~~~ | 只跑独占组（6/7/9/10/11/15/18，见 §1.7） |
 | ~~~--non-exclusive~~~ | 只跑其余场景（可在有人用的设备上先跑） |
 | ~~~--timeout 150000~~~ | 单场景硬超时（默认 150s） |
 | ~~~--song / --song-short / --song-unconfirmed / --song-long~~~ | 覆盖自动选歌 |
 | ~~~--long~~~ | 只跑长窗口 10 分钟稳定性（场景 19，默认不跑；见 §9） |
 | ~~~--allow-invariant <code>~~~ | 临时允许某个不变量 code（也可写进 allow-invariants.json） |
+| ~~~--allow-visible-state-changes~~~ | 允许 44/49/51/52 等改用户可见状态的场景；默认 SKIP 并强制排最后（旧别名 --allow-screen-changes） |
 | ~~~--allow-non-source~~~ | 跳过 SOURCE 路线前置检查（仅用于显式研究 M3；出声判据会报不可用） |
 | ~~~--no-lock~~~ | 不写设备独占锁（调试用；其它测量工具无法感知） |
 | ~~~--force-lock~~~ | 忽略他人的设备锁/成本锁（危险；会打断别人的测量） |
@@ -81,9 +82,16 @@ e2e-artifacts/scenarios/<yyyyMMdd-HHmmss>/
 | CONTAMINATED | 场景执行期间检测到外部改动（另一个 agent / 手工 / 重装 APK），结果不可信 | 独占窗口重跑；不计入 FAIL |
 | PENDING | 已知依赖未落地（如 jump-fill / media3 原生 seek 成本），当前数值超出目标但不算 FAIL | 依赖落地后自动按严格判据复核 |
 
-### 1.4 SOURCE 路线前置自检
+### 1.4 开跑前置自检（屏幕 / 音量 / SOURCE）
 
-开跑前（拉歌曲列表之前）会检查主播放器路线：
+开跑前（拉歌曲列表之前）依次检查：
+
+1. **屏幕**：~~~KEYCODE_WAKEUP + wm dismiss-keyguard~~~ → 复查 ~~~mWakefulness~~~；
+   仍不是 Awake 直接 exit 2。**若 keyguard 仍 showing（有安全锁屏 secure=true）也 exit 2**，
+   提示用户先解锁并关闭自动锁屏——harness 不会尝试 PIN/密码，锁屏下 am start/uiautomator 全部不可用。
+2. **媒体音量**：读 ~STREAM_MUSIC~，不是 0 → ~~~cmd audio volume --stream 3 --set 0~~~ 读回确认；
+   仍不为 0 直接 exit 2。之后每场景 finally 再验一次（见 §1.6）。
+3. **主播放器路线**：
 
 - ~~~routeSource=true~~~ → 打印 ~~~routeSource: true (主播放器 SOURCE)~~~ 后继续。
 - ~~~routeSource=false~~~ → **直接中止，exit 2**，并打印：
@@ -136,7 +144,37 @@ try {
 场景执行器看到 ~~~.hesi-cost-lock~~~ 存在会直接拒绝开跑；反过来也请 engine-cost 检查场景锁。
 手工清理残留锁：~~~adb shell rm -f /sdcard/.hesi-device-lock.json /sdcard/.hesi-scenario-lock~~~。
 
-### 1.6 如何独占跑（推荐流程）
+### 1.6 设备可见状态红线（硬规则）
+
+**不得让设备在测试结束后处于非默认可见状态（关屏 / 静音 / 省电 / 飞行）。**
+被测设备是用户正在使用的手机，不是测试机。
+
+1. **媒体音量必须全程为 0**（用户要求）：
+   - 开跑前读 ~~~dumpsys audio~~~ 的 STREAM_MUSIC 音量；不是 0 → ~~~cmd audio volume --stream 3 --set 0~~~
+     （旧 ROM 回退 ~~~media volume --stream 3 --set 0~~~），读回确认；仍不为 0 → **exit 2 拒绝开跑**；
+   - 每条场景 **finally 再读一次**，不是 0 就强制归零并记 ~~~volumeRestore~~~；仍失败该场景记 FAIL；
+   - 全量收尾再验一次，结果写进报告“收尾媒体音量”；
+   - 音量 0 不影响输出帧计数，出声判据照旧有效。
+2. **屏幕必须 Awake，且不能带 keyguard**：
+   - 每条场景前读 ~~~mWakefulness~~~；非 Awake → ~~~KEYCODE_WAKEUP + wm dismiss-keyguard~~~，
+     等 1s 复查；仍非 Awake → 该场景 **SKIP**，原因写 ~~~screen off, cannot drive UI~~~，
+     绝不在关屏下继续（锁屏后 am start / uiautomator 全废，会把后面全部拖挂）；
+   - 只有 **secure=false** 的滑动锁屏才尝试 MENU/上滑自动解锁；**secure=true（有 PIN/图案）必须用户自己解**，
+     开跑前置检查会直接 exit 2，不会尝试猜密码；
+   - 每条场景 finally 幂等执行 ~~~KEYCODE_WAKEUP + wm dismiss-keyguard~~~（约 200ms），
+     结果写 ~~~screenRestore~~~；关屏/仍有 keyguard 记一条 FAIL；
+   - 开跑前与收尾各验一次；报告里有“屏幕/音量恢复（每场景）”表。
+3. **主动关屏/锁屏只允许 44/49**，且默认 SKIP，必须 ~~~--allow-visible-state-changes~~~；
+   其它任何场景禁止 ~~~KEYCODE_SLEEP~~~ / 关屏 / 改亮度 / 改飞行/网络。
+4. **改用户可见状态的场景默认关闭且强制排最后**：
+   - 44（锁屏）、49（Doze，需熄屏 + 省电）、51（充电状态）、52（音量键）标记 ~~~VISIBLE~~~；
+   - 不开开关 → 报告 SKIP（原因写明“会改用户可见状态”）；
+   - 开了开关也会被 runner **强制排到所有常规场景之后**，避免锁屏把后面的 UI 场景全拖挂；
+   - 50（重启）同样是可见状态变化，且属于 ~~~--long~~~ + ~~~HESI_ENV_REBOOT=1~~~ 单独跑。
+5. 场景自己的恢复义务：49 的 ~~~low_power~~~ / Doze、51 的 ~~~dumpsys battery reset~~~、
+   52 的原音量恢复都必须写在 finally，并与 ~~~volumeRestore/screenRestore~~~ 一起进证据。
+
+### 1.7 如何独占跑（推荐流程）
 
 本套件会切页面、改窗口、暂停播放；与其它 agent/手工操作并发时：
 
@@ -212,7 +250,7 @@ powershell -NoProfile -File tools/scenarios/run-scenarios.ps1 --non-exclusive
 
 | 播放器 | 探针 | 口径 |
 |---|---|---|
-| 主播放器 | ~~~/state.invariantProbe.writtenFrames~~~ | AudioSink 交给 delegate 的累计帧数；采样器 500ms 一次（PlaybackInvariantMonitor）。用 ~~~probe.atMs~~~ 差算真实跨度，避免采样相位差被当成丢帧 |
+| 主播放器 | ~~~/state.invariantProbe.writtenFrames~~~ | AudioSink 交给 delegate 的累计帧数。判定采样器每 500ms 一次（PlaybackInvariantMonitor），但 `writtenFrames`/`atMs` 在 **/state 读取时实时刷新**（00028/#105），Δframes/ΔatMs 可直接当真实跨度。纪律：**快照周期不得大于判据阈值**——旧实现 500ms 快照 > 400ms 阈值时"帧数不涨"无法区分真断流与采样间隙（#105 的 452/488ms 即假阳性） |
 | 结果页预览 | ~~~/debug/preview.snapshot.outputFrames~~~ | 预览 controller 自己的 TapAudioSink 写出帧数，100ms 轮询（实时计数，不受 500ms 采样限制） |
 
 - 出声判定：窗口内 ~~~Δframes / (sampleRate × 秒数) ≥ 0.85~~~（部分宽松场景 0.8），报告里给出实际百分比。
@@ -233,7 +271,8 @@ powershell -NoProfile -File tools/scenarios/run-scenarios.ps1 --non-exclusive
 
 - 主播放器：出声率窗口（≈1/0.9 秒粒度）+ 位置单调（seek 后不回弹、退出循环不回跳）。
 - 结果页/接缝：100ms 采样 ~~~outputFrames~~~，相邻样本不增长视为停顿，最长停顿 ≤300ms 判通过
-  （场景 15）。500ms 的 invariantProbe 做不到这个粒度，所以场景 15 必须走预览探针。
+  （场景 15）。预览走独立 controller，故仍用 100ms 的 `outputFrames`；主播放器的
+  `invariantProbe.writtenFrames` 已实时刷新（见 3.1），场景 #105 的 0.5s 窗口可直接用它判停顿。
 
 ### 3.4 "不违反不变量"
 
@@ -482,8 +521,10 @@ powershell -NoProfile -File tools/scenarios/run-scenarios.ps1 --long
   Java Heap/PSS；每 60s 额外测 2s 输出帧。
 - 判据：10 分钟保持 engine=loop+playing；位置始终在 [A,B]；seamCount 增长 ≥2；周期性出声；
   degradeCount 不增长；heap 曲线 ≥15 点且斜率/前后半均值不超阈值；跑满 ≥540s；无 OOM/崩溃。
-- 若中途 engine=exo / window=null：先看窗口 PCM 是否超过**主播放器**预算 heap/10（见 §9.2），
-  超预算会回退普通播放（主播放器不会回退到分块实现）。
+- 若中途 engine=exo / window=null：先看窗口 PCM 是否超过**主播放器**预算 heap/6（见 §9.2），
+  超预算会回退普通播放（主播放器不会回退到分块实现）。00027 起 UI 不会再把普通播放的
+  进度条折回 [A,B)（display 透传、A/B 标记不画），所以"看起来在循环、实际没循环"会直接暴露成
+  engine=exo + 位置越过 B。
 
 ### 9.2 整窗 PCM 预算与"分块回退"怎么造
 
@@ -498,7 +539,7 @@ bytes = (B - A) 秒 × sampleRate × channels × 2
 
 | 播放器 | 环带预算 | 超过预算的行为 |
 |---|---|---|
-| 主播放器 | heap / 10 | 预检 RING_TOO_LARGE → 回退"普通播放/不循环"，不是分块 |
+| 主播放器 | heap / 6（00027 起，与预览一致） | 预检 RING_TOO_LARGE → 回退"普通播放/不循环"，不是分块；display 透传、A/B 标记不画 |
 | 结果页预览 | heap / 6 | LoopingPcmExtractorMediaSource 回退 **1 秒块 + 块缓存**（分块路径） |
 
 所以"分块回退路径"要在**结果页预览**上造，而不是主播放器。
@@ -529,8 +570,10 @@ bytes = (B - A) 秒 × sampleRate × channels × 2
 5. 判定：出现 "fallback reason=SIZE" 且出声/环回正常 = 分块回退路径可用；
    若首声 > 500ms 或 seek playout > 300ms，按场景 9/10 的口径记录（属于长窗口路径的成本，不是常规回归）。
 
-注意：主播放器超过 heap/10 会直接回退普通播放（不循环），不要把这种窗口拿去做"长窗口循环稳定性"；
-场景 19 用 210s（约 37MB@44.1k）留在常见 heap/10 预算内，就是为避免这条回退干扰稳定性判定。
+注意：主播放器超过 heap/6 会直接回退普通播放（不循环），不要把这种窗口拿去做"长窗口循环稳定性"；
+场景 19 用 210s（约 37MB@44.1k）留在常见 heap/6 预算内，就是为避免这条回退干扰稳定性判定。
+00027 的复现/回归请用 **Shiny Up（41126，238s/42.0MB）**：旧 heap/10 下它刚好超预算 1.7MB，
+正好覆盖"窗口在、源没建成、UI 不再折返"这条路径。
 
 ---
 

@@ -59,6 +59,9 @@ import com.zjr.hesimusic.service.LoopSessionProjection
  * 每 500ms 在主线程采一次事实，交给 core/invariants 的纯逻辑判定，命中就
  * Log.e + 写入 [InvariantRegistry]（GET /state 的 invariants 数组）。
  *
+ * /state.invariantProbe 的 `writtenFrames`/`atMs` 在读取时实时刷新（见 [lastSampleMap]），
+ * 采样周期只约束"判定窗口"，不约束"测量分辨率"。
+ *
  * 两类不变量：
  * - 既有 00020/00021：暂停仍写 / 播放静音 / 循环投影 vs 普通源；
  * - docs/exoplayer-assumptions-verified.md §12.2 的 12 条 UNDEFINED 运行时断言
@@ -71,7 +74,15 @@ internal object PlaybackInvariantMonitor {
 
     private const val TAG = "LoopInvariant"
 
-    /** 采样周期：任务约定 500ms。 */
+    /**
+     * 判定采样周期：任务约定 500ms。
+     *
+     * 纪律：**快照周期不得大于判据阈值**。判定器需要稳定的 500ms 采样窗口（暂停尾帧、
+     * 连续 N 次确认等语义都建立在它上面），但对外读数（/state.invariantProbe）不能
+     * 冻结在这个周期上：否则"两帧之间最长 500ms 不增长"会被误读成播放停顿，
+     * 任何小于 500ms 的停顿判据都恒为假（场景 #105 的 452/488ms 就是这么来的）。
+     * 所以 [lastSampleMap] 在返回时再用实时计数覆盖 writtenFrames/atMs。
+     */
     private const val SAMPLE_INTERVAL_MS = 500L
 
     /**
@@ -236,8 +247,32 @@ internal object PlaybackInvariantMonitor {
         emptyList()
     }
 
-    /** GET /state.invariantProbe：最近一次采样明细（排障用；未采样为 null）。 */
-    fun lastSampleMap(): Map<String, Any?>? = lastSample
+    /**
+     * GET /state.invariantProbe：最近一次采样明细（排障用；未采样为 null）。
+     *
+     * 00028(#105)：`writtenFrames` / `atMs` **在返回时实时刷新**（其余字段仍是最近
+     * 一次完整采样的值，判定器口径不变）：
+     * - 采样器 500ms 才更新一次快照，直接返回会让 Δframes 变成 0~500ms 的平台；
+     * - 平台 ≥ 停顿阈值（例如 #105 的 400ms）时，"帧数没涨"完全无法区分
+     *   "音频真断流"和"只是没到下一次采样"；
+     * - 实时覆盖后 Δframes/ΔatMs 仍是同一时刻的两个量，比值口径自洽
+     *   （harness 的 measureFrames / engine-cost-gate 都按 atMs 差算跨度）。
+     *
+     * 计数来自 [AudioOutputFrames]（AudioSink 交给 delegate 的累计帧数），本方法只读。
+     */
+    fun lastSampleMap(): Map<String, Any?>? {
+        val cached = lastSample ?: return null
+        val d = entry ?: return cached
+        val liveFrames = try {
+            AudioOutputFrames.totalFrames(d.loopAudioController())
+        } catch (_: Throwable) {
+            return cached
+        }
+        return LinkedHashMap(cached).apply {
+            put("atMs", System.currentTimeMillis())
+            put("writtenFrames", liveFrames)
+        }
+    }
 
     /**
      * 故障注入（仅 debug）：用合成采样喂**真实**判定器，验证

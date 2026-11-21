@@ -11,6 +11,11 @@
 >
 > 结果读取：`GET /state.invariants`（最近 10 条，同 code 连续累加 count）与
 > `GET /state.invariantProbe`（最近一次采样的原始事实）。判定命中同时 `Log.e`（tag `LoopInvariant`）。
+>
+> 测量口径（00028/#105）：判定采样周期是 500ms，但 `/state.invariantProbe` 的
+> `writtenFrames` 与 `atMs` 在**读取时**用实时计数/当前时间覆盖，其余字段仍来自最近一次
+> 完整采样。纪律：**快照周期不得大于任何停顿判据的阈值**（旧实现 500ms 快照 > 400ms 阈值时，
+> “帧数不涨”无法区分真断流与采样间隙，#105 的 452/488ms 假阳性即由此而来）。
 
 ## 怎么注入（真机一条命令）
 

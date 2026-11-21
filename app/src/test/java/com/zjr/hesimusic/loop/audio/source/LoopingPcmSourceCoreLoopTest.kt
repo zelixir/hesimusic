@@ -3,8 +3,11 @@ package com.zjr.hesimusic.loop.audio.source
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /** 循环读、按需解码、块预取、首块延迟结构（纯 JVM）。 */
 class LoopingPcmSourceCoreLoopTest {
@@ -93,6 +96,52 @@ class LoopingPcmSourceCoreLoopTest {
         assertTrue(core.pumpDecode()) // block 2
         assertFalse("prefetch window must stop at k+2", core.pumpDecode())
         assertEquals(setOf(0, 1, 2), core.cache.readyIndices())
+    }
+
+    @Test
+    fun `single block window never prefetches itself and never redecodes across wraps`() {
+        // #105：0.5s 窗口在块路径下 blockCount=1。预取窗口再大（生产 6 / 规划 3）也不能
+        // 变成"永远预取自己"——wrappedBlock 全部落回当前块并被跳过，闸门是"前沿"语义。
+        LoopSourcePauseGate.reset()
+        try {
+            val tl = LoopingPcmTestSupport.timeline(aUs = 0L, bUs = 500_000L, sr = 1_000, ch = 1)
+            assertEquals(1, tl.blockCount)
+            val provider = LoopingPcmTestSupport.provider(tl)
+            val core = LoopingPcmSourceCore(tl, provider, prefetchBlocks = 6)
+
+            assertTrue(core.pumpDecode())
+            assertEquals(1, core.readyBlockCount())
+            assertEquals(1L, core.decodeCallCount())
+
+            // 前沿为空（唯一的块就是播放头）→ 闸门必须为 false，否则预取会反复踢自己。
+            assertFalse("blockCount=1 时 needsDecode 必须为 false", core.needsDecode())
+            assertFalse("不得把块 0 再解一遍", core.pumpDecode())
+            assertNull("没有前沿块 → 视为 END_OF_SOURCE", core.nextLoadPositionUs())
+
+            // 生产用的预取器直接跑一轮：readyBlockCount(1) < targetBlocks(6) 恒为真，
+            // 但 needsDecode=false 必须让它立即退出，不得空转/自踢。
+            val executor = Executors.newSingleThreadExecutor()
+            val prefetcher = LoopPcmPrefetcher(core, executor, targetBlocks = 6)
+            try {
+                prefetcher.kick()
+                executor.shutdown()
+                assertTrue(
+                    "预取器必须立即退出(不可自踢空转)",
+                    executor.awaitTermination(2, TimeUnit.SECONDS),
+                )
+                assertEquals("不得因为 readyBlockCount<target 而重解块 0", 1L, core.decodeCallCount())
+            } finally {
+                prefetcher.release()
+            }
+
+            // 读 3 圈（1500 帧）：回绕只在块 0 内取模，不产生新解码、不淘汰、不跳过。
+            LoopingPcmTestSupport.readExact(core, 1_500, maxFramesPerRead = 97)
+            assertEquals("回绕不得重新解码", 1L, core.decodeCallCount())
+            assertEquals("唯一的块是播放头，不能被淘汰", setOf(0), core.cache.readyIndices())
+            assertEquals(0L, core.skippedBlocks())
+        } finally {
+            LoopSourcePauseGate.reset()
+        }
     }
 
     @Test
