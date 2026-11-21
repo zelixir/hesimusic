@@ -211,6 +211,51 @@ class LoopClaimTest {
     }
 
     @Test
+    fun `paused ab change cannot claim until the new source is installed`() {
+        // #108 时序：暂停中把 A/B 从 old 改到 new；runtime.window 已是 new，
+        // 但 SOURCE 还没重建完（installed 仍是 old）——claim 必须保持 false。
+        val oldWindow = LoopWindow(songId, 17_496_000L, 50_167_000L)
+        val newWindow = LoopWindow(songId, 40_496_000L, 50_167_000L)
+
+        val changing = LoopClaimResolver.resolve(
+            songId = songId,
+            runtimeWindow = newWindow,
+            audioWindow = null,
+            installedWindow = oldWindow,
+            isReplaying = false,
+            sourceRoute = true,
+            sourceUnavailable = false,
+        )
+        assertFalse("新窗口还没装好时不能声称循环", changing.claimActive)
+        assertEquals(newWindow, changing.window)
+        assertEquals(41_807L, changing.displayPositionMs(41_807L))
+
+        val resumed = LoopClaimResolver.resolve(
+            songId = songId,
+            runtimeWindow = newWindow,
+            audioWindow = null,
+            installedWindow = newWindow,
+            isReplaying = false,
+            sourceRoute = true,
+            sourceUnavailable = false,
+        )
+        assertTrue("新 source 装好后才生效", resumed.claimActive)
+        assertEquals(40_496L, resumed.displayPositionMs(50_167L))
+
+        // M3′：暂停中改 A/B，音频层窗口已写入即真（环回在 sink 层）。
+        val m3 = LoopClaimResolver.resolve(
+            songId = songId,
+            runtimeWindow = newWindow,
+            audioWindow = newWindow,
+            installedWindow = null,
+            isReplaying = false,
+            sourceRoute = false,
+            sourceUnavailable = false,
+        )
+        assertTrue(m3.claimActive)
+    }
+
+    @Test
     fun `store serves the installed provider and invalidates on demand`() {
         assertFalse(LoopClaimStore.isInstalled())
         assertFalse(LoopClaimStore.claimFor(songId).claimActive)
