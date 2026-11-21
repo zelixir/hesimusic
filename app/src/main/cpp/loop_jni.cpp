@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "loop_engine/candidate_flat.h"
 #include "loop_engine/loop_engine.h"
 
 #define LOG_TAG "LoopJni"
@@ -46,7 +47,10 @@ bool progressTrampoline(float fraction, void* userData) {
     return true;
 }
 
-// 共享实现:mono PCM → analyze → DoubleArray(按 score 降序平铺 5 元组)。
+// 共享实现:mono PCM → analyze → DoubleArray(按 score 降序平铺 6 元组:
+// [loopStart, loopEnd, score, noteDistance, loudnessDifference, seamQuality])。
+// 前 5 个字段的位置与语义未变(v8 只在尾部追加);seamQuality=0 表示接缝阶段
+// 未运行(LOOP_ENGINE_SEAM=0 / 边界回退),UI 按"未知"处理。
 jdoubleArray analyzeImpl(JNIEnv* env, jfloatArray monoPcm, jint sampleRate,
                          jint maxCandidates, jobject sinkLocalRef) {
     jdoubleArray empty = env->NewDoubleArray(0);
@@ -106,17 +110,10 @@ jdoubleArray analyzeImpl(JNIEnv* env, jfloatArray monoPcm, jint sampleRate,
                     /* maxCandidates = */ static_cast<int>(maxCandidates),
                     /* onProgress = */ progress);
 
-            const size_t count = analysis.candidates.size();
-            if (count > 0) {
-                std::vector<jdouble> flat;
-                flat.reserve(count * 5);
-                for (const loop_engine::LoopCandidate& candidate : analysis.candidates) {
-                    flat.push_back(static_cast<jdouble>(candidate.loopStart));
-                    flat.push_back(static_cast<jdouble>(candidate.loopEnd));
-                    flat.push_back(static_cast<jdouble>(candidate.score));
-                    flat.push_back(static_cast<jdouble>(candidate.noteDistance));
-                    flat.push_back(static_cast<jdouble>(candidate.loudnessDifference));
-                }
+            // 平铺布局由 candidate_flat.h 单点定义(宿主单测可直接验证 6 字段契约)。
+            const std::vector<double> flat = loop_engine::flattenCandidates(analysis);
+            static_assert(sizeof(jdouble) == sizeof(double), "jdouble must be a C++ double");
+            if (!flat.empty()) {
                 result = env->NewDoubleArray(static_cast<jsize>(flat.size()));
                 if (result != nullptr) {
                     env->SetDoubleArrayRegion(result, 0, static_cast<jsize>(flat.size()), flat.data());

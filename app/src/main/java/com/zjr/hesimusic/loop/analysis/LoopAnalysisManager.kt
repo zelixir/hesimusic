@@ -46,9 +46,17 @@ sealed interface AnalysisState {
 data class LoopCandidateKt(
     val startSamples: Long,
     val endSamples: Long,
+    /** 引擎排序分(v8 起为"相似度 + 接缝"的融合分,0..1,越大越好)。 */
     val score: Double,
     val noteDistance: Double,
     val loudnessDifference: Double,
+    /**
+     * 接缝质量(0..1,越大越顺):B→A 拼接处 50ms 波形相关 + 短时响度跳变 + 频谱通量突变。
+     *
+     * 0.0 = **未知**(接缝阶段未运行 / 老数据 / 用户手动微调后的合成候选),UI 此时
+     * 只显示相似度,不显示"接缝 0%"以免误导;老 JSON 缺该字段时同样按 0 读入。
+     */
+    val seamQuality: Double = 0.0,
 )
 
 /**

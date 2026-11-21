@@ -19,7 +19,8 @@ class LoopCandidatesJsonTest {
         score: Double = 0.5,
         noteDistance: Double = 0.1,
         loudnessDifference: Double = 0.2,
-    ) = LoopCandidateKt(start, end, score, noteDistance, loudnessDifference)
+        seamQuality: Double = 0.0,
+    ) = LoopCandidateKt(start, end, score, noteDistance, loudnessDifference, seamQuality)
 
     @Test
     fun `十候选往返顺序与字段完全一致`() {
@@ -30,6 +31,7 @@ class LoopCandidatesJsonTest {
                 score = 0.99 - index * 0.01,
                 noteDistance = 0.01 * index,
                 loudnessDifference = 0.02 * index,
+                seamQuality = 0.90 - index * 0.05,
             )
         }
         val encoded = LoopCandidatesJson.encode(candidates)
@@ -48,8 +50,8 @@ class LoopCandidatesJsonTest {
         assertEquals(
             "单候选的编码格式是落库契约的一部分,改动需同步迁移/测试",
             "[{\"startSamples\":100,\"endSamples\":200,\"score\":0.9," +
-                "\"noteDistance\":0.1,\"loudnessDifference\":0.2}]",
-            LoopCandidatesJson.encode(listOf(candidate(100L, 200L, 0.9, 0.1, 0.2))),
+                "\"noteDistance\":0.1,\"loudnessDifference\":0.2,\"seamQuality\":0.86}]",
+            LoopCandidatesJson.encode(listOf(candidate(100L, 200L, 0.9, 0.1, 0.2, 0.86))),
         )
         assertEquals("空列表编码为空数组", "[]", LoopCandidatesJson.encode(emptyList()))
     }
@@ -125,6 +127,21 @@ class LoopCandidatesJsonTest {
     }
 
     @Test
+    fun `老 JSON 缺少 seamQuality 时解码为 0 未知_无需迁移`() {
+        val raw = "[{\"startSamples\":100,\"endSamples\":200,\"score\":0.9," +
+            "\"noteDistance\":0.1,\"loudnessDifference\":0.2}]"
+        val decoded = LoopCandidatesJson.decode(raw)
+        assertEquals(1, decoded!!.size)
+        assertEquals("老数据没有接缝分 → 0(UI 不显示接缝)", 0.0, decoded[0].seamQuality, 0.0)
+    }
+
+    @Test
+    fun `seamQuality 写入后往返一致`() {
+        val withSeam = candidate(100L, 200L, score = 0.7, seamQuality = 0.86)
+        assertEquals(withSeam, LoopCandidatesJson.decode(LoopCandidatesJson.encode(listOf(withSeam)))!!.single())
+    }
+
+    @Test
     fun `非有限浮点被编码成0而不是非法json`() {
         val weird = candidate(
             start = 10L,
@@ -132,12 +149,14 @@ class LoopCandidatesJsonTest {
             score = Double.NaN,
             noteDistance = Double.POSITIVE_INFINITY,
             loudnessDifference = Double.NEGATIVE_INFINITY,
+            seamQuality = Double.NaN,
         )
         val encoded = LoopCandidatesJson.encode(listOf(weird))
         assertTrue("NaN/Inf 不得进入 JSON: $encoded", !encoded.contains("NaN"))
         assertTrue(!encoded.contains("Infinity"))
         val decoded = LoopCandidatesJson.decode(encoded)
         assertEquals(0.0, decoded!!.single().score, 0.0)
+        assertEquals(0.0, decoded.single().seamQuality, 0.0)
     }
 
     @Test

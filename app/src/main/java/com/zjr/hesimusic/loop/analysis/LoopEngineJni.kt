@@ -11,8 +11,9 @@ object LoopEngineJni {
     init { System.loadLibrary("hesimusic_jni") }
 
     /** mono PCM → 候选,无进度回调。返回 DoubleArray =
-     *  [startSamples, endSamples, score, noteDistance, loudnessDifference] × N,
-     *  按 score 降序;失败返回空数组 */
+     *  [startSamples, endSamples, score, noteDistance, loudnessDifference, seamQuality] × N,
+     *  按 score 降序;失败返回空数组。v8 只在尾部追加第 6 个字段,前 5 个位置/语义不变;
+     *  seamQuality=0 表示接缝阶段未运行(未知),旧 5 字段数组仍可被 [LoopCandidates] 解析。 */
     external fun analyzePcm(monoPcm: FloatArray, sampleRate: Int, maxCandidates: Int): DoubleArray
 
     /**

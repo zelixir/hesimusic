@@ -19,6 +19,20 @@ endif()
 find_package(Threads REQUIRED)
 target_link_libraries(loop_engine_parallel_test PRIVATE Threads::Threads)
 
+# Flat JNI record layout contract: 6 doubles per candidate ([start, end, score,
+# noteDistance, loudnessDifference, seamQuality]); old 5 fields keep positions.
+add_executable(loop_engine_flat_test
+    loop_engine_flat_test.cpp
+    ../loop_engine.cpp
+    ../fft.cpp
+)
+target_include_directories(loop_engine_flat_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_compile_features(loop_engine_flat_test PRIVATE cxx_std_17)
+if(NOT MSVC)
+    target_compile_options(loop_engine_flat_test PRIVATE -O2)
+endif()
+target_link_libraries(loop_engine_flat_test PRIVATE Threads::Threads)
+
 # Offline evaluation CLI: reads a WAV, runs the engine, and prints candidates
 # plus an independent seam-quality measurement (host only, not shipped).
 add_executable(loop_engine_eval

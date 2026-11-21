@@ -12,9 +12,16 @@ namespace loop_engine {
 struct LoopCandidate {
     int64_t loopStart = 0;         // inclusive; sample index on the input-rate mono stream
     int64_t loopEnd = 0;           // exclusive
-    double score = 0.0;            // higher is better
+    double score = 0.0;            // higher is better; v8 fused ranking score (0..1)
     double noteDistance = 0.0;     // chroma distance, lower is better
     double loudnessDifference = 0.0;
+    // v8 seam quality (0..1, higher = the B->A splice is closer to "the song kept
+    // playing"). Appended as the 6th field of the flat JNI record (see
+    // candidate_flat.h); the first five fields keep their pre-v8 meaning and
+    // order. 0.0 is the "not measured" sentinel: the seam stage is off
+    // (LOOP_ENGINE_SEAM=0) or the candidate bounds fell back, and the UI treats
+    // it as unknown instead of rendering a misleading "seam 0%".
+    double seamQuality = 0.0;
 };
 
 struct Result {

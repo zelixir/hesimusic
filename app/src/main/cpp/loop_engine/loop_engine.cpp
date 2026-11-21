@@ -1783,6 +1783,9 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
             c.score = sp.score;
             c.noteDistance = sp.p.nd;
             c.loudnessDifference = sp.p.ld;
+            // 0.0 when !useSeam (legacy A/B path): kept as the "not measured"
+            // sentinel that JNI/UI map to "unknown", never a real seam 0%.
+            c.seamQuality = sp.seamQuality;
             result.candidates.push_back(c);
             emitted++;
             if (!prog.report(0.98)) { // honour a cancel that lands during emission

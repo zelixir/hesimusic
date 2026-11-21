@@ -154,10 +154,6 @@ private fun fmtGrid(sec: Double): String {
     return String.format(Locale.US, "%d:%02d", m, (v - m * 60).toInt())
 }
 
-private fun fmt2(v: Double): String = String.format(Locale.US, "%.2f", v)
-
-private fun fmt3(v: Double): String = String.format(Locale.US, "%.3f", v)
-
 /** 网格刻度友好步长(刻度数 <= 14)。 */
 private fun niceStep(durationSec: Double): Double {
     for (step in listOf(1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0)) {
@@ -713,6 +709,7 @@ private fun ResultContent(
                         score = candidate.score,
                         noteDistance = candidate.noteDistance,
                         loudnessDifference = candidate.loudnessDifference,
+                        seamQuality = candidate.seamQuality,
                         onClick = {
                             viewModel.dispatch(LoopPageEvent.SelectCandidate(index))
                             showCandidateSheet = false
@@ -765,6 +762,8 @@ private fun CandidateRow(
     score: Double,
     noteDistance: Double,
     loudnessDifference: Double,
+    /** 接缝质量;0/未知时第二行只显示相似度(见 [candidateMetricsText])。 */
+    seamQuality: Double,
     onClick: () -> Unit,
 ) {
     val ratio = if (durationMs > 0L) {
@@ -814,8 +813,13 @@ private fun CandidateRow(
                     maxLines = 1,
                 )
                 Text(
-                    "score " + fmt2(score) + " · 音高距离 " + fmt3(noteDistance) +
-                        " · 响度比 " + fmt2(loudnessDifference),
+                    // 相似度 + 接缝;seamQuality 未知(0/老数据)时只显示相似度。
+                    candidateMetricsText(
+                        score = score,
+                        noteDistance = noteDistance,
+                        loudnessDifference = loudnessDifference,
+                        seamQuality = seamQuality,
+                    ),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,

@@ -340,6 +340,7 @@ class LoopViewModel @Inject constructor(
                 score = source?.score ?: 0.0,
                 noteDistance = source?.noteDistance ?: 0.0,
                 loudnessDifference = source?.loudnessDifference ?: 0.0,
+                seamQuality = source?.seamQuality ?: 0.0,
             )
             viewModelScope.launch {
                 val ok = try {
