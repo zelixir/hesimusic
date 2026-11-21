@@ -34,7 +34,6 @@ class LoopSessionPlayer(
     ) {
         val window: LoopWindow? get() = claim.window
         val sourceUnavailable: Boolean get() = !claim.sourceActive
-        val claimActive: Boolean get() = claim.claimActive
     }
 
     override fun play() {
