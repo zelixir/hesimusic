@@ -82,6 +82,68 @@ class LoopingPcmTimelineTest {
     }
 
     @Test
+    fun `whole timeline starts at prelude and folds only after B`() {
+        val tl = LoopingPcmTestSupport.timeline(
+            aUs = 10_000_000L,
+            bUs = 30_000_000L,
+            sr = 1_000,
+            fullDurationUs = 40_000_000L,
+        )
+        assertTrue(tl.wholeTimeline)
+        assertEquals(0L, tl.entryOffsetUs)
+        assertEquals(0L, tl.readerStartOffsetFrames())
+        // prelude：媒体时间直通
+        assertEquals(5_000_000L, tl.mediaUs(5_000_000L))
+        assertEquals(5_000L, tl.frameAtTimeline(5_000_000L))
+        // 首轮/后续轮：只在 [A,B) 折返
+        assertEquals(10_000_000L, tl.mediaUs(10_000_000L))
+        assertEquals(29_999_000L, tl.mediaUs(29_999_000L))
+        assertEquals(10_000_000L, tl.mediaUs(30_000_000L))
+        assertEquals(12_000_000L, tl.mediaUs(32_000_000L))
+        assertEquals(10_000L, tl.frameAtTimeline(30_000_000L))
+        assertEquals(12_000L, tl.frameAtTimeline(32_000_000L))
+        // tail：线性直通，不折返
+        val tailT = LoopWholeTimeline.TAIL_BASE_US
+        assertEquals(30_000_000L, tl.mediaUs(tailT))
+        assertEquals(35_000_000L, tl.mediaUs(tailT + 5_000_000L))
+        assertEquals(35_000L, tl.frameAtTimeline(tailT + 5_000_000L))
+        assertEquals(40_000L, tl.durationFrames)
+        assertEquals(10_000L, tl.tailFrames)
+        // tail 终点 -> 下一个 epoch 的 prelude 0（T 连续，不倒退）
+        val span = tl.epochSpanUs
+        assertEquals(LoopWholeTimeline.TAIL_BASE_US + 10_000_000L, span)
+        assertEquals(0L, tl.mediaUs(span))
+        assertEquals(0L, tl.frameAtTimeline(span))
+        assertEquals(5_000_000L, tl.mediaUs(span + 5_000_000L))
+        assertEquals(span, tl.nextEpochStartUs(span - 1L))
+    }
+
+    @Test
+    fun `whole timeline phase is derived from absolute media position`() {
+        val tl = LoopingPcmTestSupport.timeline(
+            aUs = 10_000_000L,
+            bUs = 30_000_000L,
+            sr = 1_000,
+            fullDurationUs = 40_000_000L,
+        )
+        assertEquals(com.zjr.hesimusic.loop.LoopPhase.PRELUDE, tl.phaseAt(2_000_000L))
+        assertEquals(com.zjr.hesimusic.loop.LoopPhase.LOOP, tl.phaseAt(12_000_000L))
+        assertEquals(com.zjr.hesimusic.loop.LoopPhase.LOOP, tl.phaseAt(32_000_000L))
+        assertEquals(
+            com.zjr.hesimusic.loop.LoopPhase.TAIL,
+            tl.phaseAt(LoopWholeTimeline.TAIL_BASE_US + 1L),
+        )
+        assertEquals(
+            com.zjr.hesimusic.loop.LoopPhase.PRELUDE,
+            tl.phaseAt(tl.epochSpanUs),
+        )
+        assertEquals(
+            com.zjr.hesimusic.loop.LoopPhase.LOOP,
+            tl.phaseAt(tl.epochSpanUs + 12_000_000L),
+        )
+    }
+
+    @Test
     fun `cache key changes with window song rate and channels`() {
         val base = LoopingPcmTestSupport.timeline()
         val same = LoopingPcmTestSupport.timeline()

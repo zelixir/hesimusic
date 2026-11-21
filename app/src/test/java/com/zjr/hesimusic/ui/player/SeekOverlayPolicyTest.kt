@@ -26,6 +26,28 @@ class SeekOverlayPolicyTest {
     }
 
     @Test
+    fun `整曲时间轴下 seek 到 B 之后 overlay 期望就是目标位置`() {
+        // issue 00028：tail 是合法阶段，不能按 [A,B) 折回 A。
+        assertEquals(
+            "B+5s 落 tail，期望 = 目标",
+            55_000L,
+            SeekOverlayPolicy.expectedDisplayMs(55_000L, window, wholeTimeline = true),
+        )
+        assertEquals(
+            "A 之前前奏，期望 = 目标",
+            10_000L,
+            SeekOverlayPolicy.expectedDisplayMs(10_000L, window, wholeTimeline = true),
+        )
+        assertEquals(
+            "区间内期望 = 目标",
+            30_000L,
+            SeekOverlayPolicy.expectedDisplayMs(30_000L, window, wholeTimeline = true),
+        )
+        // M3′ 旧口径保持不变。
+        assertEquals(20_000L, SeekOverlayPolicy.expectedDisplayMs(50_000L, window))
+    }
+
+    @Test
     fun `收敛判定容差为 1200ms`() {
         assertTrue("完全一致算收敛", SeekOverlayPolicy.hasConverged(30_000L, 30_000L))
         assertTrue("正向恰好 1200ms 算收敛", SeekOverlayPolicy.hasConverged(31_200L, 30_000L))

@@ -1,5 +1,6 @@
 package com.zjr.hesimusic.service
 
+import com.zjr.hesimusic.loop.LoopPhase
 import com.zjr.hesimusic.loop.LoopPosition
 import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.LoopWindow
@@ -32,6 +33,13 @@ data class LoopClaim(
     val sourceActive: Boolean,
     /** 未生效原因；sourceActive=true 时为 null。五种回退原因共用。 */
     val fallbackReason: LoopSourceFallback.Reason? = null,
+    /**
+     * true = 位置已经是 SOURCE 整曲时间轴投影后的展示值（prelude/loop/tail 都合法）。
+     * UI 二次折返时 tail 必须原样保留，不能把 B 之后的尾奏折回 A。
+     */
+    val sourceTimeline: Boolean = false,
+    /** 最近一次权威展示位置对应的阶段（来自 [LoopPlaybackPhaseRuntime]），仅用于 UI 折返边界。 */
+    val phaseHint: LoopPhase? = null,
 ) {
 
     /**
@@ -59,6 +67,12 @@ data class LoopClaim(
         ) {
             return rawPositionMs
         }
+        // SOURCE 整曲时间轴：服务层给的位置已经是展示值。tail 阶段必须原样保留；
+        // loop 阶段仍折返一次，吸收 MediaController 跨 B 的本地外推（幂等）。
+        if (sourceTimeline) {
+            if (phaseHint == LoopPhase.TAIL) return rawPositionMs.coerceAtLeast(0L)
+            return LoopPosition.displayUs(rawPositionMs * 1_000L, w) / 1_000L
+        }
         return LoopPosition.displayUs(rawPositionMs * 1_000L, w) / 1_000L
     }
 
@@ -73,6 +87,13 @@ data class LoopClaim(
      * 回退时尤其不能透传 SOURCE 的 TIME_UNSET。
      */
     fun durationUs(fullDurationUs: Long): Long = fullDurationUs.coerceAtLeast(0L)
+
+    /**
+     * 当前循环阶段（prelude/loop/tail），由**播放器展示位置**判定，不是第二套事实源。
+     * claim 未生效/窗口非法返回 null。
+     */
+    fun phaseForDisplayUs(displayUs: Long): LoopPhase? =
+        if (claimActive) LoopPhase.ofDisplayUs(displayUs, effectiveWindow) else null
 
     /**
      * /state.loop 的一等字段契约（claim 真值）。claimed = “有意图窗口”，
@@ -171,11 +192,18 @@ object LoopClaimResolver {
             sourceActive -> null
             else -> fallbackReason
         }
+        val effectiveSongId = usableWindow?.songId ?: songId
         return LoopClaim(
-            songId = usableWindow?.songId ?: songId,
+            songId = effectiveSongId,
             window = usableWindow,
             sourceActive = sourceActive,
             fallbackReason = reason,
+            sourceTimeline = sourceRoute && sourceActive,
+            phaseHint = if (sourceRoute && sourceActive && usableWindow != null) {
+                LoopPlaybackPhaseRuntime.phaseFor(effectiveSongId, usableWindow)
+            } else {
+                null
+            },
         )
     }
 

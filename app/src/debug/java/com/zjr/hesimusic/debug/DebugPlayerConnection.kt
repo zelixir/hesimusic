@@ -196,6 +196,9 @@ internal class DebugPlayerConnection(private val context: Context) {
     /** 最近一次 Player.Listener 事件缓存里的当前歌 id(不阻塞主线程;供 loop bridge 判 engine)。 */
     fun cachedSongId(): Long? = cache?.songId
 
+    /** 最近一次快照里的展示位置(ms,已是会话投影后的值);无快照时 null。 */
+    fun cachedPositionMs(): Long? = cache?.positionMs
+
     /**
      * 非阻塞取 controller:未建连时触发一次后台建连并返回 null。
      * 3s 未完成则放弃该次 future(释放),2s 后允许重试。

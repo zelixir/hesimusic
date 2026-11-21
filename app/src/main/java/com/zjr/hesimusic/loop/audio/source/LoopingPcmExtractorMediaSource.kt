@@ -70,6 +70,16 @@ object LoopingPcmExtractorMediaSource {
         val ringProvider = provider as? PcmDecoderRangeProvider
         val bandBytes = timeline.loopFrames * timeline.bytesPerFrame
         val budget = RingBandSource.budgetBytes(heap, ringBudgetDivisor)
+        // 整曲时间轴（prelude/loop/tail）只能由环带实现：块缓存路径没有前奏/尾奏的
+        // 双段解码语义。预检本应挡住超预算窗口；这里再兜一次，宁可回退普通播放，
+        // 也不能用错误的时间轴出声。
+        if (timeline.wholeTimeline &&
+            (!RingBandSource.canUse(timeline, heap, ringBudgetDivisor) || ringProvider == null)
+        ) {
+            throw IllegalStateException(
+                "whole timeline requires ring band: bandBytes=$bandBytes budget=$budget",
+            )
+        }
         if (RingBandSource.canUse(timeline, heap, ringBudgetDivisor) && ringProvider != null) {
             logger(
                 "RingBand select bandBytes=" + bandBytes +

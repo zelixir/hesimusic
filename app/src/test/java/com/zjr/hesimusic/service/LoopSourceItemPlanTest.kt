@@ -2,6 +2,7 @@ package com.zjr.hesimusic.service
 
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.source.LoopSourceItemTag
+import com.zjr.hesimusic.loop.audio.source.LoopWholeTimeline
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -20,7 +21,14 @@ class LoopSourceItemPlanTest {
     private val window = LoopWindow(songId = 7L, loopStartUs = aMs * 1_000L, loopEndUs = bMs * 1_000L)
     private val queue = listOf("song-1", "song-2", "song-3", "song-4")
 
-    private fun enter(positionMs: Long, index: Int = 2, songId: Long = 7L, path: String = "/music/a.mp3") =
+    private fun enter(
+        positionMs: Long,
+        index: Int = 2,
+        songId: Long = 7L,
+        path: String = "/music/a.mp3",
+        fullDurationUs: Long = 0L,
+        entryTimelineUs: Long = 0L,
+    ) =
         LoopSourceItemPlan.enter(
             index = index,
             itemCount = queue.size,
@@ -28,6 +36,8 @@ class LoopSourceItemPlanTest {
             window = window,
             songId = songId,
             filePath = path,
+            fullDurationUs = fullDurationUs,
+            entryTimelineUs = entryTimelineUs,
         )
 
     // ---------------------------------------------------------------- 进入：只动当前项
@@ -70,6 +80,26 @@ class LoopSourceItemPlanTest {
         // repeat=ONE 收尾在 B 之后（如 B+5s）：落点是同一相位 5s，而不是跨轮的 L+5s。
         assertEquals(5_000L, enter(positionMs = bMs + 5_000L)!!.seekTimelineMs)
         assertEquals(0L, enter(positionMs = aMs + lengthMs)!!.seekTimelineMs)
+    }
+
+    @Test
+    fun `whole timeline enters at prelude zero regardless of current position`() {
+        val durUs = 60_000_000L
+        // issue 00028：点无缝循环的位置 = 曲目开头 0，不是 A，也不是当前位置。
+        assertEquals(0L, enter(3_000L, fullDurationUs = durUs)!!.seekTimelineMs)
+        assertEquals(0L, enter(12_000L, fullDurationUs = durUs)!!.seekTimelineMs)
+        assertEquals(0L, enter(bMs + 5_000L, fullDurationUs = durUs)!!.seekTimelineMs)
+        assertEquals(durUs, enter(12_000L, fullDurationUs = durUs)!!.tag.fullDurationUs)
+    }
+
+    @Test
+    fun `window change keeps the current display position`() {
+        val durUs = 60_000_000L
+        // A/B 变化（已经处于 source item）时，调用方把当前展示位置映射成新窗口的 T。
+        assertEquals(
+            11_000L,
+            enter(12_000L, fullDurationUs = durUs, entryTimelineUs = 11_000_000L)!!.seekTimelineMs,
+        )
     }
 
     @Test
@@ -123,6 +153,33 @@ class LoopSourceItemPlanTest {
         assertEquals(aMs, exit(lengthMs)!!.seekMediaMs)
         assertEquals(aMs + 2_345L, exit(lengthMs + 2_345L)!!.seekMediaMs)
         assertEquals(aMs + 5_000L, exit(3 * lengthMs + 5_000L)!!.seekMediaMs)
+    }
+
+    @Test
+    fun `whole timeline exit maps prelude loop and tail back to media time`() {
+        val wholeTag = LoopSourceItemTag(
+            7L,
+            aMs * 1_000L,
+            bMs * 1_000L,
+            "/music/a.mp3",
+            fullDurationUs = 60_000_000L,
+        )
+        fun wholeExit(timelineMs: Long) = LoopSourceItemPlan.exit(
+            index = 2,
+            itemCount = queue.size,
+            timelineMs = timelineMs,
+            tag = wholeTag,
+        )!!.seekMediaMs
+        // prelude 直通
+        assertEquals(0L, wholeExit(0L))
+        assertEquals(5_000L, wholeExit(5_000L))
+        // loop 折返：T 是整曲时间轴，B 处回 A
+        assertEquals(12_000L, wholeExit(12_000L))
+        assertEquals(aMs, wholeExit(bMs))
+        assertEquals(aMs + 2_000L, wholeExit(bMs + 2_000L))
+        // tail 直通（sentinel 时间带）
+        val tailT = (LoopWholeTimeline.TAIL_BASE_US + 5_000_000L) / 1_000L
+        assertEquals(bMs + 5_000L, wholeExit(tailT))
     }
 
     @Test

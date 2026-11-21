@@ -27,12 +27,14 @@ object LoopingPcmTestSupport {
         sr: Int = SAMPLE_RATE,
         ch: Int = CHANNELS,
         entryUs: Long = aUs,
+        fullDurationUs: Long = 0L,
     ): LoopingPcmTimeline = LoopingPcmTimeline(
         songId = songId,
         loopStartUs = aUs,
         loopEndUs = bUs,
         format = format(sr, ch),
         entryPositionUs = entryUs,
+        fullDurationUs = fullDurationUs,
     )
 
     fun provider(timeline: LoopingPcmTimeline): SyntheticPcmProvider =

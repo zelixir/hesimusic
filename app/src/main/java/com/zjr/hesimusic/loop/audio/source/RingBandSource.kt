@@ -78,12 +78,34 @@ object RingBandSource {
             )
         }
         val ring = LoopRing(timeline.sampleRate, timeline.channels, timeline.loopFrames)
-        val startOffset = Math.floorMod(
-            timeline.frameAtTimeline(0L) - timeline.aFrame,
-            timeline.loopFrames,
-        )
-        val reader = RingBandReader(ring, startOffset)
+        val reader = RingBandReader(ring, timeline.readerStartOffsetFrames())
         val renderer = RingBandRenderer(timeline, decoder, ring, logger)
+        // issue 00028：整曲时间轴时，[0,A) 前奏与 (B,dur] 尾奏按需块解码（不整段进内存）。
+        val preludeReader = if (timeline.wholeTimeline && timeline.aFrame > 0L) {
+            PcmRangeBlockReader(
+                provider = provider,
+                startFrame = 0L,
+                endFrameExclusive = timeline.aFrame,
+                sampleRate = timeline.sampleRate,
+                channels = timeline.channels,
+                logger = logger,
+            )
+        } else {
+            null
+        }
+        val tailReader = if (timeline.wholeTimeline && timeline.durationFrames > timeline.bFrame) {
+            PcmRangeBlockReader(
+                provider = provider,
+                startFrame = timeline.bFrame,
+                endFrameExclusive = timeline.durationFrames,
+                sampleRate = timeline.sampleRate,
+                channels = timeline.channels,
+                prefetchOnInit = false,
+                logger = logger,
+            )
+        } else {
+            null
+        }
         val extractor = RingBandExtractor(
             timeline = timeline,
             ring = ring,
@@ -91,6 +113,8 @@ object RingBandSource {
             renderer = renderer,
             logger = logger,
             onSeamOutputFrames = onSeamOutputFrames,
+            preludeReader = preludeReader,
+            tailReader = tailReader,
         )
         val extractors = ExtractorsFactory { arrayOf<Extractor>(extractor) }
         val factory = ProgressiveMediaSource.Factory(

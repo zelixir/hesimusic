@@ -24,6 +24,7 @@ class LoopClaimTest {
         LoopClaimStore.resetForTest()
         LoopSourceFallback.reset()
         LoopSourceRuntime.reset()
+        LoopPlaybackPhaseRuntime.reset()
     }
 
     @Test
@@ -60,6 +61,25 @@ class LoopClaimTest {
     }
 
     @Test
+    fun `source timeline keeps tail but still folds loop extrapolation`() {
+        // tail：控制器位置已经 >B，不能折回 A（issue 00028）。
+        val tail = LoopClaim(
+            songId = songId,
+            window = window,
+            sourceActive = true,
+            sourceTimeline = true,
+            phaseHint = com.zjr.hesimusic.loop.LoopPhase.TAIL,
+        )
+        assertEquals(81_000L, tail.displayPositionMs(81_000L))
+        assertEquals(120_000L, tail.displayPositionMs(120_000L))
+
+        // loop：控制器跨 B 的本地外推仍折回 A（旧行为不能丢）。
+        val loop = tail.copy(phaseHint = com.zjr.hesimusic.loop.LoopPhase.LOOP)
+        assertEquals(51_000L, loop.displayPositionMs(81_000L))
+        assertEquals(50_000L, loop.displayPositionMs(80_000L))
+    }
+
+    @Test
     fun `invalid window never claims`() {
         val zero = LoopWindow(songId, 50_000_000L, 50_000_000L)
         val reversed = LoopWindow(songId, 80_000_000L, 50_000_000L)
@@ -91,6 +111,7 @@ class LoopClaimTest {
         )
         assertTrue(active.claimActive)
         assertEquals(window, active.effectiveWindow)
+        assertTrue(active.sourceTimeline)
 
         val notInstalled = LoopClaimResolver.resolve(
             songId = songId,

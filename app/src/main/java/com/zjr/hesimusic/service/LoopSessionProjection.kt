@@ -1,8 +1,10 @@
 package com.zjr.hesimusic.service
 
+import com.zjr.hesimusic.loop.LoopPhase
 import com.zjr.hesimusic.loop.LoopPosition
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.source.LoopSourceProjection
+import com.zjr.hesimusic.loop.audio.source.LoopWholeTimeline
 
 /**
  * 会话层位置/时长投影（纯函数，无 Android / Media3 依赖，可在纯 JVM 单测穷举）。
@@ -45,23 +47,43 @@ object LoopSessionProjection {
     /**
      * SOURCE 模式：数据源时间轴 T(ms) → 对外媒体时间(µs)。
      *
-     * 与 [displayUs] 的区别：SOURCE 的 T 从 0 单调递增且 **T=0 对应当前窗口的 A**，没有
-     * 「前奏只播一次」语义，所以对外位置恒为 `A + floorMod(T, L)`（不做 raw < A 的透传）。
-     * 通知栏 / MediaSession / 进度条必须读媒体时间，不能读带 offset 的 T。
+     * 主播放器（[fullDurationUs] > 0，issue 00028）使用整曲时间轴：
+     * prelude 直通、[A,B) 折返、tail 直通且不被折返。
+     * 未传整曲时长时保持预览页旧口径（T=0 对应 A），避免影响预览。
+     * 通知栏 / MediaSession / 进度条必须读媒体时间，不能读带 sentinel 的 T。
      */
-    fun sourceDisplayUs(timelineMs: Long, window: LoopWindow?): Long =
+    fun sourceDisplayUs(
+        timelineMs: Long,
+        window: LoopWindow?,
+        fullDurationUs: Long = 0L,
+    ): Long = if (fullDurationUs > 0L) {
+        LoopWholeTimeline.displayUs(timelineMs * US_PER_MS, window, fullDurationUs)
+    } else {
         LoopSourceProjection.displayUs(timelineMs * US_PER_MS, window)
+    }
 
     /** SOURCE 模式：数据源时间轴 T(ms) → 对外媒体时间(ms)（[getCurrentPosition] 的口径）。 */
-    fun sourceDisplayMs(timelineMs: Long, window: LoopWindow?): Long =
-        LoopSourceProjection.displayMs(timelineMs, window)
+    fun sourceDisplayMs(
+        timelineMs: Long,
+        window: LoopWindow?,
+        fullDurationUs: Long = 0L,
+    ): Long = sourceDisplayUs(timelineMs, window, fullDurationUs) / US_PER_MS
 
     /** SOURCE 模式：展示位置 → 数据源时间轴 T（[seekTo] 的口径）。 */
     fun sourceTimelineUsForDisplay(
         displayUs: Long,
         currentTimelineUs: Long,
         window: LoopWindow?,
-    ): Long = LoopSourceProjection.timelineUsForDisplay(displayUs, currentTimelineUs, window)
+        fullDurationUs: Long = 0L,
+    ): Long = if (fullDurationUs > 0L) {
+        LoopWholeTimeline.timelineUsForDisplay(displayUs, currentTimelineUs, window, fullDurationUs)
+    } else {
+        LoopSourceProjection.timelineUsForDisplay(displayUs, currentTimelineUs, window)
+    }
+
+    /** 循环阶段（prelude/loop/tail）；窗口非法/claim 未生效返回 null。 */
+    fun phaseOf(displayUs: Long, window: LoopWindow?): LoopPhase? =
+        LoopPhase.ofDisplayUs(displayUs, window)
 
     /**
      * 对外时长（µs）。返回 0 表示「不投影」，调用方要透传播放器原生时长。

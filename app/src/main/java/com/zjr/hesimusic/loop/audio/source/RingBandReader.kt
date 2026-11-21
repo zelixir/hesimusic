@@ -61,6 +61,9 @@ class RingBandReader(
     @Volatile
     private var nextPtsUs: Long = 0L
 
+    /** 当前（下一帧）PTS（µs）；整曲时间轴用它推进源位置。 */
+    fun currentPtsUs(): Long = nextPtsUs
+
     val filledFrames: Long get() = ring.coveredFrames
 
     /** 整环是否可读（会回绕的播放必须整环已填充）。 */

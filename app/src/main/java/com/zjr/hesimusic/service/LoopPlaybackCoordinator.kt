@@ -22,6 +22,7 @@ import com.zjr.hesimusic.loop.audio.source.LoopEngineInfo
 import com.zjr.hesimusic.loop.audio.source.LoopSourceItemTag
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMediaItem
 import com.zjr.hesimusic.loop.audio.source.LoopSourceProjection
+import com.zjr.hesimusic.loop.audio.source.LoopWholeTimeline
 import com.zjr.hesimusic.loop.audio.source.PcmFileFormatProbe
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -557,6 +558,7 @@ class LoopPlaybackCoordinator @Inject constructor(
         sourceOriginalIndex = -1
         LoopSourceFallback.reset()
         LoopSourceRuntime.reset()
+        LoopPlaybackPhaseRuntime.reset()
         runtime.clear()
         LoopClaimStore.invalidate()
     }
@@ -605,6 +607,7 @@ class LoopPlaybackCoordinator @Inject constructor(
         } else {
             LoopSourceRuntime.onReleased()
         }
+        LoopPlaybackPhaseRuntime.reset()
         LoopClaimStore.invalidate()
     }
 
@@ -804,8 +807,31 @@ class LoopPlaybackCoordinator @Inject constructor(
         LoopEngineInfo.recordBandBytes(ringBytes)
         val path = filePath
         if (path.isNullOrBlank()) return
-        // A/B 变更时 item 可能已经是上一个窗口的 source item：此时 player 位置是**数据源时间轴 T**，
-        // 先折回媒体时间，再用它算进入偏移，避免把 T 当媒体时间（位置会漂一整圈）。
+        // issue 00028：主播放器用整曲时间轴（prelude/loop/tail）。
+        // 首次进入固定 T=0（曲目开头）；只有 A/B 变化且当前已是 source item 时，
+        // 才把当前展示位置映射到新窗口时间轴（不重头、不跳 A）。
+        val fullDurationUs = (song?.duration ?: 0L) * 1_000L
+        val currentTimelineUs = player.currentPosition * 1_000L
+        val entryTimelineUs = if (tag is LoopSourceItemTag) {
+            val oldWindow = LoopWindow(tag.songId, tag.loopStartUs, tag.loopEndUs)
+            val displayUs = if (tag.fullDurationUs > 0L) {
+                LoopWholeTimeline.displayUs(currentTimelineUs, oldWindow, tag.fullDurationUs)
+            } else {
+                LoopSourceProjection.displayUs(currentTimelineUs, oldWindow)
+            }
+            if (fullDurationUs > 0L) {
+                LoopWholeTimeline.timelineUsForDisplay(
+                    displayUs = displayUs,
+                    currentTimelineUs = currentTimelineUs,
+                    window = w,
+                    fullDurationUs = fullDurationUs,
+                )
+            } else {
+                displayUs
+            }
+        } else {
+            LoopWholeTimeline.PRELUDE_START_US
+        }
         val positionMs = if (tag is LoopSourceItemTag) {
             val oldWindow = LoopWindow(tag.songId, tag.loopStartUs, tag.loopEndUs)
             LoopSourceProjection.displayMs(player.currentPosition, oldWindow)
@@ -819,6 +845,8 @@ class LoopPlaybackCoordinator @Inject constructor(
             window = w,
             songId = w.songId,
             filePath = path,
+            fullDurationUs = fullDurationUs,
+            entryTimelineUs = entryTimelineUs,
         )
         if (plan == null) {
             Log.w(TAG, "source plan rejected songId=" + w.songId + " window=" + w)

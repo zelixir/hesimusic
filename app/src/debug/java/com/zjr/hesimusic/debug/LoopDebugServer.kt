@@ -207,6 +207,22 @@ object LoopDebugServer {
                     else -> "none"
                 }
                 val sourceUnavailable = claim.window != null && !claimFields.sourceActive
+                // issue 00028：阶段由**播放器展示位置**判定（prelude/loop/tail），
+                // 不读源内状态，避免第二套事实源。
+                // 必须用**当前**播放器位置判阶段：cachedPositionMs 可能落后一次
+                // MediaSession 事件（实测 prelude->loop 后仍报 prelude）。这里读一次
+                // 权威快照；读不到再退回缓存。
+                val phasePositionMs = player?.snapshotForRead()?.snapshot?.positionMs
+                    ?: player?.cachedPositionMs()
+                    ?: 0L
+                // 与 UI 看到的展示位置同口径：loop 阶段吸收 MediaController 跨 B 的外推，
+                // tail 阶段原样保留（claim.displayPositionUs 的唯一事实源）。
+                val phaseDisplayUs = claim.displayPositionUs(phasePositionMs * 1_000L)
+                val phase = if (claimFields.claimActive) {
+                    claim.phaseForDisplayUs(phaseDisplayUs)?.wire
+                } else {
+                    null
+                }
                 return linkedMapOf(
                     "engine" to engine,
                     "loopPath" to loopPath,
@@ -215,6 +231,7 @@ object LoopDebugServer {
                     "claimActive" to claimFields.claimActive,
                     "sourceActive" to claimFields.sourceActive,
                     "claimReason" to claimFields.claimReason,
+                    "phase" to phase,
                     "window" to window?.let {
                         linkedMapOf(
                             "songId" to it.songId,

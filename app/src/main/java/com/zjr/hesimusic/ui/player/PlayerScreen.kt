@@ -31,8 +31,10 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.zjr.hesimusic.data.mapper.mediaIdToSongId
 import com.zjr.hesimusic.loop.LoopPosition
 import com.zjr.hesimusic.loop.LoopWindow
+import com.zjr.hesimusic.service.LoopClaimStore
 import com.zjr.hesimusic.ui.common.LoopSliderMarkerOverlay
 import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.utils.TimeFormatter
@@ -194,7 +196,15 @@ fun PlayerScreen(
                 LaunchedEffect(pendingSeekMs) {
                     val target = pendingSeekMs ?: return@LaunchedEffect
                     // loopWindowState = activeLoopWindow:源未真正循环时为 null -> expected 用真实媒体时间。
-                    val expected = SeekOverlayPolicy.expectedDisplayMs(target, loopWindowState.value)
+                    // issue 00028：SOURCE 整曲时间轴下 tail 是合法落点，overlay 不能按 [A,B)
+                    // 折返（否则松手 1.5s 后位置会弹回 A）。claim 是同一条事实源。
+                    val songId = uiState.currentMediaItem?.mediaId?.let { mediaIdToSongId(it) }
+                    val claim = LoopClaimStore.claimFor(songId)
+                    val expected = SeekOverlayPolicy.expectedDisplayMs(
+                        targetMs = target,
+                        window = loopWindowState.value,
+                        wholeTimeline = claim.sourceTimeline,
+                    )
                     val startedAtMs = SystemClock.uptimeMillis()
                     while (!SeekOverlayPolicy.shouldRelease(
                             actualDisplayMs = uiState.currentPosition,
@@ -569,11 +579,21 @@ internal object SeekOverlayPolicy {
      * 有生效窗口时引擎会把目标折回 [A, B)(见 [LoopPosition.displayUs]),UI 之后读到的展示
      * 位置就是折返后的值,所以收敛判定必须用折返后的目标;无窗口(或非法窗口)时就是目标本身。
      */
-    fun expectedDisplayMs(targetMs: Long, window: LoopWindow?): Long {
+    fun expectedDisplayMs(
+        targetMs: Long,
+        window: LoopWindow?,
+        /**
+         * true = SOURCE 整曲时间轴（prelude/loop/tail）。此时服务层**保留**展示目标：
+         * seek 到 A 之前落前奏、A..B 落循环、B 之后落 tail，overlay 期望值就是目标本身。
+         * false = M3′/普通播放，仍按 [LoopPosition.displayUs] 折返。
+         */
+        wholeTimeline: Boolean = false,
+    ): Long {
         if (window == null) return targetMs
         if (targetMs > MAX_FOLDABLE_POSITION_MS || targetMs < -MAX_FOLDABLE_POSITION_MS) {
             return targetMs
         }
+        if (wholeTimeline) return targetMs.coerceAtLeast(0L)
         return LoopPosition.displayUs(targetMs * 1_000L, window) / 1_000L
     }
 

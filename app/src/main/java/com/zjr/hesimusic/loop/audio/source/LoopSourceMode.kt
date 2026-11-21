@@ -126,4 +126,9 @@ data class LoopSourceItemTag(
     val loopStartUs: Long,
     val loopEndUs: Long,
     val filePath: String,
+    /**
+     * 整曲时长（µs）。>0 时主播放器数据源使用**整曲时间轴**（issue 00028）：
+     * T=0 前奏、A 之后循环、seek 到 B 之后进入 tail；0 保持旧口径（预览/兼容路径）。
+     */
+    val fullDurationUs: Long = 0L,
 )

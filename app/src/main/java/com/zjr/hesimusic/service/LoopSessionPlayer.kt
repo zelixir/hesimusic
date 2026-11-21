@@ -102,8 +102,15 @@ class LoopSessionPlayer(
         val window = claim.window
         if (!claim.claimActive || window == null) return super.getCurrentPosition()
         if (isSourceItem(snapshot)) {
-            // T → 媒体时间：对外读到的是 A + floorMod(T,L)，不是带 offset 的数据源时间轴 T。
-            return LoopSessionProjection.sourceDisplayMs(super.getCurrentPosition(), window)
+            // T → 媒体时间：整曲口径下 prelude/tail 直通、[A,B) 折返；不是 sentinel T。
+            val displayUs = LoopSessionProjection.sourceDisplayUs(
+                super.getCurrentPosition(),
+                window,
+                audio.fullDurationUs,
+            )
+            // UI 的二次折返需要知道"B 之后是尾奏还是外推"，记录权威展示位置。
+            LoopPlaybackPhaseRuntime.update(claim.songId, displayUs, window)
+            return displayUs / LoopSessionProjection.US_PER_MS
         }
         val rawUs = currentRawUs(snapshot.isReplaying)
         return claim.displayPositionUs(rawUs) / LoopSessionProjection.US_PER_MS
@@ -118,10 +125,12 @@ class LoopSessionPlayer(
             val currentDisplayUs = LoopSessionProjection.sourceDisplayUs(
                 super.getCurrentPosition(),
                 window,
+                audio.fullDurationUs,
             )
             val bufferedUs = LoopSessionProjection.sourceDisplayUs(
                 super.getBufferedPosition(),
                 window,
+                audio.fullDurationUs,
             )
             val atLeastCurrent = maxOf(bufferedUs, currentDisplayUs)
             val durationUs = projectedDurationUs(window)
@@ -325,8 +334,15 @@ class LoopSessionPlayer(
                 displayUs = positionMs * LoopSessionProjection.US_PER_MS,
                 currentTimelineUs = super.getCurrentPosition() * LoopSessionProjection.US_PER_MS,
                 window = window,
+                fullDurationUs = audio.fullDurationUs,
             )
             super.seekTo(mediaItemIndex, targetT / LoopSessionProjection.US_PER_MS)
+            // seek 目标就是新的权威展示位置：tail 立即被视为 tail，进度条不会先折回 A。
+            LoopPlaybackPhaseRuntime.update(
+                claim.songId,
+                positionMs * LoopSessionProjection.US_PER_MS,
+                window,
+            )
         } else {
             val rawUs = LoopSessionProjection.seekUs(
                 targetUs = positionMs * LoopSessionProjection.US_PER_MS,

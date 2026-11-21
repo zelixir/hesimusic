@@ -1,7 +1,9 @@
 package com.zjr.hesimusic.service
 
+import com.zjr.hesimusic.loop.LoopPhase
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.source.LoopSourceProjection
+import com.zjr.hesimusic.loop.audio.source.LoopWholeTimeline
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
@@ -55,6 +57,62 @@ class LoopSessionSourcePositionTest {
                 assertNotEquals("raw T must not leak into the notification", t, display)
             }
         }
+    }
+
+    @Test
+    fun `whole timeline shows prelude loop and tail truthfully`() {
+        val durUs = 60_000_000L
+        // T=0 是曲目开头，不是 A。
+        assertEquals(0L, LoopSessionProjection.sourceDisplayMs(0L, window, durUs))
+        assertEquals(5_000L, LoopSessionProjection.sourceDisplayMs(5_000L, window, durUs))
+        assertEquals(aMs, LoopSessionProjection.sourceDisplayMs(aMs, window, durUs))
+        assertEquals(12_000L, LoopSessionProjection.sourceDisplayMs(12_000L, window, durUs))
+        // loop 在 B 折回 A
+        assertEquals(aMs, LoopSessionProjection.sourceDisplayMs(bMs, window, durUs))
+        assertEquals(aMs + 2_000L, LoopSessionProjection.sourceDisplayMs(bMs + 2_000L, window, durUs))
+        // tail 不折返
+        val tailT = LoopWholeTimeline.TAIL_BASE_US / 1_000L
+        assertEquals(bMs, LoopSessionProjection.sourceDisplayMs(tailT, window, durUs))
+        assertEquals(bMs + 5_000L, LoopSessionProjection.sourceDisplayMs(tailT + 5_000L, window, durUs))
+    }
+
+    @Test
+    fun `whole timeline seek maps prelude loop and tail`() {
+        val durUs = 60_000_000L
+        assertEquals(5_000L, LoopSessionProjection.sourceTimelineUsForDisplay(
+            5_000_000L, 0L, window, durUs,
+        ) / 1_000L)
+        assertEquals(12_000L, LoopSessionProjection.sourceTimelineUsForDisplay(
+            12_000_000L, 0L, window, durUs,
+        ) / 1_000L)
+        assertEquals(
+            bMs + 5_000L,
+            LoopSessionProjection.sourceDisplayMs(
+                LoopSessionProjection.sourceTimelineUsForDisplay(
+                    50_000_000L + 5_000_000L,
+                    12_000_000L,
+                    window,
+                    durUs,
+                ) / 1_000L,
+                window,
+                durUs,
+            ),
+        )
+        // B 之后 -> tail sentinel，不被折回 A。
+        val t = LoopSessionProjection.sourceTimelineUsForDisplay(
+            bMs * 1_000L + 5_000_000L,
+            12_000_000L,
+            window,
+            durUs,
+        )
+        assertTrue(t >= LoopWholeTimeline.TAIL_BASE_US)
+    }
+
+    @Test
+    fun `phase follows display position`() {
+        assertEquals(LoopPhase.PRELUDE, LoopSessionProjection.phaseOf(5_000_000L, window))
+        assertEquals(LoopPhase.LOOP, LoopSessionProjection.phaseOf(12_000_000L, window))
+        assertEquals(LoopPhase.TAIL, LoopSessionProjection.phaseOf(bMs * 1_000L, window))
     }
 
     @Test

@@ -13,9 +13,21 @@ import androidx.media3.extractor.SeekMap
 import androidx.media3.extractor.SeekPoint
 import androidx.media3.extractor.TrackOutput
 import com.zjr.hesimusic.core.invariants.LoopInvariantProbes
+import com.zjr.hesimusic.loop.LoopPhase
 import java.io.IOException
 
-/** 环带播放的 Extractor：read 从 RingBandReader 取模；seek 只改 offset。 */
+/**
+ * 环带播放的 Extractor：read 从 RingBandReader 取模；seek 只改 offset。
+ *
+ * issue 00028：主播放器使用**整曲时间轴**（[LoopingPcmTimeline.wholeTimeline]）：
+ * - T<A 读前奏块（[PcmRangeBlockReader]，按需解码）；
+ * - A≤T<TAIL_BASE 读环带，B 处由 reader 取模折返；
+ * - T≥TAIL_BASE 读尾奏块，播到曲末在源内回绕到下一个 epoch 的 prelude 0（T 连续单调，
+ *   不发 EOS / 不依赖 repeat=ONE；display 由 [LoopWholeTimeline] 映射回 0）。
+ *
+ * 折返开关是**源内状态**：phase 由 [positionUs] 判定，seek 到 >B 改为 tail（不折返），
+ * seek 回 ≤B 恢复 loop（折返）。它不依赖 UI。
+ */
 @UnstableApi
 class RingBandExtractor(
     private val timeline: LoopingPcmTimeline,
@@ -26,6 +38,8 @@ class RingBandExtractor(
     private val onSeamOutputFrames: ((Long) -> Unit)? = null,
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val sleeper: (Long) -> Unit = { Thread.sleep(it) },
+    private val preludeReader: PcmRangeBlockReader? = null,
+    private val tailReader: PcmRangeBlockReader? = null,
 ) : Extractor {
 
     private var trackOutput: TrackOutput? = null
@@ -38,6 +52,16 @@ class RingBandExtractor(
     private var lastThrottleLogMs = 0L
     private var activeElapsedMs = 0L
     private var lastActiveClockMs = -1L
+
+    /** 当前数据源时间轴位置（下一帧的 T，µs）；整曲口径下驱动阶段选择。 */
+    @Volatile
+    private var positionUs = 0L
+
+    /** 源内已输出帧数（含前奏/尾奏）；节流预算用它而不是环带 reader。 */
+    private var emittedFrames = 0L
+
+    /** 环带 reader 是否已按 positionUs 对齐（seek / 前奏→循环切换后置 false）。 */
+    private var loopReaderSynced = false
 
     // ---- 00028(#105) 短窗口接缝取证 -------------------------------------------------
     /** B→A 回绕次数（每次 seek 重新计数）。 */
@@ -114,7 +138,11 @@ class RingBandExtractor(
         LoopInvariantProbes.onExtractorSeekMap()
         output.endTracks()
         LoopInvariantProbes.onExtractorEndTracks()
-        logger("RingBand extractor init")
+        logger(
+            "RingBand extractor init wholeTimeline=" + timeline.wholeTimeline +
+                " preludeFrames=" + timeline.aFrame +
+                " tailFrames=" + timeline.tailFrames,
+        )
     }
 
     override fun read(input: ExtractorInput, seekPosition: PositionHolder): Int {
@@ -128,20 +156,19 @@ class RingBandExtractor(
             lastEmitClockMs = -1L
             return Extractor.RESULT_CONTINUE
         }
-
         // 关键：不能无限领先播放头。这里用「加载活跃时间」做墙钟节流，
         // 最多领先 5s；暂停/长时间不读时不计入 activeElapsed，避免恢复后暴冲。
         val now = clock()
         val allowed = allowedFrames(now)
-        val emitted = reader.totalReadFrames
-        if (emitted >= allowed) {
+        if (emittedFrames >= allowed) {
             queueGuard = true
             reader.recordWait()
             if (now - lastThrottleLogMs >= 5_000L) {
                 lastThrottleLogMs = now
                 RingBandLog.w(
-                    "RingBand read throttle emitted=" + emitted +
+                    "RingBand read throttle emitted=" + emittedFrames +
                         " allowed=" + allowed +
+                        " phase=" + currentPhase().wire +
                         " queueGuard=true",
                 )
             }
@@ -153,7 +180,7 @@ class RingBandExtractor(
             lastEmitClockMs = -1L
             return Extractor.RESULT_CONTINUE
         }
-        val budget = (allowed - emitted).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        val budget = (allowed - emittedFrames).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         // 不要把预算切成 176 帧这种碎样本；预算不足最小样本时直接节流。
         if (budget < MIN_SAMPLE_FRAMES) {
             queueGuard = true
@@ -161,9 +188,10 @@ class RingBandExtractor(
             if (now - lastThrottleLogMs >= 5_000L) {
                 lastThrottleLogMs = now
                 RingBandLog.w(
-                    "RingBand read throttle emitted=" + emitted +
+                    "RingBand read throttle emitted=" + emittedFrames +
                         " budget=" + budget +
                         " minSample=" + MIN_SAMPLE_FRAMES +
+                        " phase=" + currentPhase().wire +
                         " queueGuard=true",
                 )
             }
@@ -177,17 +205,10 @@ class RingBandExtractor(
         }
         val request = minOf(READ_CHUNK_BYTES / timeline.bytesPerFrame, budget)
         queueGuard = false
-        var result = reader.read(request)
+        var result = readNext(request)
         if (result == null) {
-            // media3 会立刻重试；这里只等**当前读取位置**被跳填/续填补齐，不能空转。
-            // （00022 之前的实现等的是 ring 高水位，等于逼解码从 A 顺序追到环尾。）
-            if (awaitFilled(reader.offsetFrames)) {
-                result = reader.read(request)
-            }
-            if (result == null) {
-                lastEmitClockMs = -1L
-                return Extractor.RESULT_CONTINUE
-            }
+            lastEmitClockMs = -1L
+            return Extractor.RESULT_CONTINUE
         }
         val data = ParsableByteArray(result.data)
         track.sampleData(data, result.data.size)
@@ -237,7 +258,9 @@ class RingBandExtractor(
                     " filledFrames=" + ring.renderedFrames +
                     " offset=" + reader.offsetFrames +
                     " reads=" + reader.reads +
-                    " underruns=" + reader.underruns,
+                    " underruns=" + reader.underruns +
+                    " phase=" + currentPhase().wire +
+                    " positionUs=" + positionUs,
             )
         }
         if (!firstReadLogged) {
@@ -245,14 +268,16 @@ class RingBandExtractor(
             RingBandLog.i(
                 "RingBand firstRead filledFrames=" + ring.renderedFrames +
                     " offset=" + result.offsetFrames +
-                    " frames=" + result.frames,
+                    " frames=" + result.frames +
+                    " phase=" + currentPhase().wire +
+                    " positionUs=" + positionUs,
             )
         }
         val now2 = System.currentTimeMillis()
         if (now2 - lastLogMs >= 1_000L) {
             lastLogMs = now2
             val activeSec = activeElapsedMs / 1000.0
-            val emittedSec = reader.totalReadFrames.toDouble() / timeline.sampleRate
+            val emittedSec = emittedFrames.toDouble() / timeline.sampleRate
             val rateWindowMs = (now2 - lastRateLogMs).coerceAtLeast(1L)
             val readsPerSecond = if (lastRateLogMs == 0L) 0L else
                 (reader.reads - readsAtLastRateLog) * 1000L / rateWindowMs
@@ -261,12 +286,14 @@ class RingBandExtractor(
             RingBandLog.i(
                 "RingBand read offset=" + reader.offsetFrames +
                     " filled=" + ring.renderedFrames +
-                    " emitted=" + reader.totalReadFrames +
+                    " emitted=" + emittedFrames +
                     " aheadOfRealtime=" + String.format("%.2f", emittedSec - activeSec) +
                     "s queueGuard=" + queueGuard +
                     " readsPerSecond=" + readsPerSecond +
                     " underruns=" + reader.underruns +
                     " reads=" + reader.reads +
+                    " phase=" + currentPhase().wire +
+                    " positionUs=" + positionUs +
                     // 短窗口接缝：seam 次数/首末时刻/环回间隔/两次输出最大间隔。
                     " seams=" + seamCount +
                     " firstSeamMs=" + firstSeamAtMs +
@@ -283,6 +310,131 @@ class RingBandExtractor(
         return Extractor.RESULT_CONTINUE
     }
 
+    private class Next(
+        val data: ByteArray,
+        val frames: Int,
+        val ptsUs: Long,
+        val offsetFrames: Long,
+    )
+
+    private fun readNext(request: Int): Next? {
+        if (!timeline.wholeTimeline) return readRing(request)
+        return when (currentPhase()) {
+            LoopPhase.PRELUDE -> readPrelude(request)
+            LoopPhase.LOOP -> readRing(request)
+            LoopPhase.TAIL -> readTail(request)
+        }
+    }
+
+    /** 前奏：按需块读取；到 A 之前 1~2 秒提前请求环带跳到 A。 */
+    private fun readPrelude(request: Int): Next? {
+        val prelude = preludeReader ?: return null
+        // 新 epoch / 从 tail 回绕进来时环带 reader 还停在上一轮，到 A 时必须重新对齐。
+        loopReaderSynced = false
+        val frame = timeline.frameAtTimeline(positionUs)
+        if (frame >= timeline.aFrame || timeline.localTimelineUs(positionUs) >= timeline.loopStartUs) {
+            // 用 epoch 内偏移比较，不能用绝对 T（tail 回绕后的 epochBase 远大于 A）。
+            positionUs = timeline.epochStartUs(positionUs) + timeline.frameUs(timeline.aFrame)
+            return readRing(request)
+        }
+        val epochBase = timeline.epochStartUs(positionUs)
+        if (prelude.currentFrame() != frame) prelude.seekToFrame(frame)
+        if (epochBase + timeline.frameUs(timeline.aFrame) - positionUs <= PRELUDE_TO_LOOP_PREROLL_US) {
+            // 交界预取：确保 A 处的环带块已经在内存里，避免 prelude→loop 的可听缝隙。
+            renderer.requestFillAt(0L)
+        }
+        val maxFrames = minOf(request.toLong(), timeline.aFrame - frame).toInt()
+        val result = prelude.read(maxFrames) ?: run {
+            prelude.kick()
+            prelude.awaitCurrentReady(READ_WAIT_MS)
+            prelude.read(maxFrames)
+        } ?: return null
+        // PTS 用**绝对时间轴 T**（epochBase + 本地帧时间），保证 tail 回绕到新 epoch 时
+        // PTS 继续单调递增，不会出现"PTS 从 sentinel 跳回 0"的倒退。
+        val pts = epochBase + timeline.frameUs(result.startFrame)
+        positionUs = epochBase + timeline.frameUs(result.startFrame + result.frames)
+        emittedFrames += result.frames.toLong()
+        return Next(result.data, result.frames, pts, Long.MIN_VALUE)
+    }
+
+    /** 环带：B→A 由 RingBandReader 取模；切进来时按 positionUs 对齐 offset。 */
+    private fun readRing(request: Int): Next? {
+        if (!loopReaderSynced) {
+            val frame = timeline.frameAtTimeline(positionUs)
+            val offset = Math.floorMod(frame - timeline.aFrame, timeline.loopFrames)
+            reader.seekToOffset(offset, positionUs)
+            renderer.requestFillAt(offset)
+            loopReaderSynced = true
+        }
+        var result = reader.read(request)
+        if (result == null) {
+            // media3 会立刻重试；这里只等**当前读取位置**被跳填/续填补齐，不能空转。
+            reader.recordWait()
+            if (reader.awaitFilled(reader.offsetFrames, 1L, READ_WAIT_MS)) {
+                result = reader.read(request)
+            }
+            if (result == null) {
+                val now = System.currentTimeMillis()
+                if (now - lastWaitLogMs >= 5_000L) {
+                    lastWaitLogMs = now
+                    RingBandLog.w(
+                        "RingBand read wait filled=" + ring.renderedFrames +
+                            " covered=" + ring.coveredFrames +
+                            " offset=" + reader.offsetFrames +
+                            " phase=" + currentPhase().wire,
+                    )
+                }
+                return null
+            }
+        }
+        positionUs = result.ptsUs + framesToUs(result.frames.toLong())
+        emittedFrames += result.frames.toLong()
+        return Next(result.data, result.frames, result.ptsUs, result.offsetFrames)
+    }
+
+    /** 尾奏：按需块读取；到曲末时在源内回绕到下一个 epoch 的 prelude 0（不发 EOS）。 */
+    private fun readTail(request: Int): Next? {
+        val tail = tailReader ?: return null
+        val frame = timeline.frameAtTimeline(positionUs)
+        if (frame >= timeline.durationFrames) {
+            // 已经站在曲末（例如 seek 到 duration）：直接回绕到下一个 epoch 的 0。
+            positionUs = timeline.nextEpochStartUs(positionUs)
+            loopReaderSynced = false
+            RingBandLog.i(
+                "RingBand tail end -> next epoch prelude positionUs=" + positionUs,
+            )
+            return readPrelude(request)
+        }
+        if (tail.currentFrame() != frame) tail.seekToFrame(frame)
+        val maxFrames = minOf(request.toLong(), timeline.durationFrames - frame).toInt()
+        val result = tail.read(maxFrames) ?: run {
+            tail.kick()
+            tail.awaitCurrentReady(READ_WAIT_MS)
+            tail.read(maxFrames)
+        } ?: return null
+        // tail 的 PTS 是**时间轴 T（sentinel 带内）**，不是媒体时间：播放器位置必须能投影回
+        // 展示位置；媒体帧只用于从块缓存取 PCM。
+        val pts = positionUs
+        positionUs += framesToUs(result.frames.toLong())
+        emittedFrames += result.frames.toLong()
+        val atEnd = result.startFrame + result.frames >= timeline.durationFrames
+        if (atEnd) {
+            // 源内回绕：T 连续推进到下一个 epoch 起点（display 回到 0），不依赖 EOS/repeat，
+            // 因此不会出现 buffering/播放失败，也不会让 claim 掉成 false。
+            positionUs = timeline.nextEpochStartUs(positionUs)
+            loopReaderSynced = false
+            RingBandLog.i(
+                "RingBand tail end -> next epoch prelude positionUs=" + positionUs +
+                    " durationUs=" + timeline.fullDurationUs,
+            )
+        }
+        return Next(result.data, result.frames, pts, Long.MIN_VALUE)
+    }
+
+    private fun currentPhase(): LoopPhase =
+        if (!timeline.wholeTimeline) LoopPhase.LOOP
+        else timeline.phaseAt(positionUs)
+
     private fun allowedFrames(now: Long): Long {
         if (lastActiveClockMs < 0L) {
             lastActiveClockMs = now
@@ -294,24 +446,7 @@ class RingBandExtractor(
         return emittedBaseFrames + maxAheadFrames + activeElapsedMs * timeline.sampleRate / 1000L
     }
 
-    /** 等环内 [offsetFrames] 这一帧可读（跳填写入会立即唤醒）。 */
-    private fun awaitFilled(offsetFrames: Long): Boolean {
-        reader.recordWait()
-        val ready = reader.awaitFilled(offsetFrames, 1L, READ_WAIT_MS)
-        logHeapIfDue(System.currentTimeMillis())
-        if (!ready) {
-            val now = System.currentTimeMillis()
-            if (now - lastWaitLogMs >= 5_000L) {
-                lastWaitLogMs = now
-                RingBandLog.w(
-                    "RingBand read wait filled=" + ring.renderedFrames +
-                        " covered=" + ring.coveredFrames +
-                        " offset=" + reader.offsetFrames,
-                )
-            }
-        }
-        return ready
-    }
+    private fun framesToUs(frames: Long): Long = frames * 1_000_000L / timeline.sampleRate
 
     override fun seek(position: Long, timeUs: Long) {
         // 00023 后续的分段计时：请求 → media3 真正调到这里（loading 线程）。
@@ -325,32 +460,73 @@ class RingBandExtractor(
         maxEmitGapMs = 0L
         lastEmitClockMs = -1L
         lastSeam = -1L
-        val offset = Math.floorMod(
-            timeline.frameAtTimeline(timeUs) - timeline.aFrame,
-            timeline.loopFrames,
-        )
-        reader.seekToOffset(offset, timeUs)
+        val t = timeUs.coerceAtLeast(0L)
+        positionUs = t
+        if (!timeline.wholeTimeline) {
+            val offset = Math.floorMod(
+                timeline.frameAtTimeline(t) - timeline.aFrame,
+                timeline.loopFrames,
+            )
+            reader.seekToOffset(offset, t)
+            renderer.requestFillAt(offset)
+            loopReaderSynced = true
+        } else {
+            when (currentPhase()) {
+                LoopPhase.PRELUDE -> {
+                    preludeReader?.seekToFrame(timeline.frameAtTimeline(t))
+                    // 进前奏时把环带指向 A，并提前要求填充（A 处切换不欠载）。
+                    reader.seekToOffset(0L, timeline.loopStartUs)
+                    renderer.requestFillAt(0L)
+                    loopReaderSynced = false
+                }
+                LoopPhase.LOOP -> {
+                    val offset = Math.floorMod(
+                        timeline.frameAtTimeline(t) - timeline.aFrame,
+                        timeline.loopFrames,
+                    )
+                    reader.seekToOffset(offset, t)
+                    renderer.requestFillAt(offset)
+                    loopReaderSynced = true
+                }
+                LoopPhase.TAIL -> {
+                    tailReader?.seekToFrame(timeline.frameAtTimeline(t))
+                    loopReaderSynced = false
+                }
+            }
+        }
         // 00023：seek 后重新给满 maxAhead 的发射预算，否则墙钟节流会按实时速度喂数据，
         // media3 要等 1.5s 才凑够起播缓冲（表现为 seek 慢 1~2 秒）。
-        emittedBaseFrames = reader.totalReadFrames
+        emittedBaseFrames = emittedFrames
         activeElapsedMs = 0L
         lastActiveClockMs = clock()
         // 00022：让渲染线程立刻跳到目标 offset 开始解码，而不是从 A 顺序追上来。
-        renderer.requestFillAt(offset)
+        if (!timeline.wholeTimeline) {
+            renderer.requestFillAt(
+                Math.floorMod(timeline.frameAtTimeline(t) - timeline.aFrame, timeline.loopFrames),
+            )
+        }
         // 真机计时探针：从 seek 请求到第一个 PCM buffer 进入 AudioSink（LoopPerf 日志）。
         LoopPreviewDebugBridge.noteSeekRequest(timeUs / 1000L)
         logger(
             "RingBand seek position=" + position + " timeUs=" + timeUs +
-                " offsetFrames=" + offset,
+                " phase=" + currentPhase().wire +
+                " positionUs=" + positionUs,
         )
     }
 
     override fun release() {
         if (released) return
         released = true
+        preludeReader?.release()
+        tailReader?.release()
         renderer.release()
         ring.close()
-        RingBandLog.i("RingBand release bandBytes=" + bandBytes + " released=true")
+        RingBandLog.i(
+            "RingBand release bandBytes=" + bandBytes +
+                " preludeFrames=" + timeline.aFrame +
+                " tailFrames=" + timeline.tailFrames +
+                " released=true",
+        )
         logHeapIfDue(System.currentTimeMillis(), force = true)
     }
 
@@ -371,5 +547,8 @@ class RingBandExtractor(
         const val THROTTLE_SLEEP_MS = 4L
         const val MAX_AHEAD_SECONDS = 5L
         const val MIN_SAMPLE_FRAMES = 1024
+
+        /** 前奏离 A 还有该时长时，提前要求环带跳到 A 填写（交界无缝）。 */
+        const val PRELUDE_TO_LOOP_PREROLL_US = 2_000_000L
     }
 }

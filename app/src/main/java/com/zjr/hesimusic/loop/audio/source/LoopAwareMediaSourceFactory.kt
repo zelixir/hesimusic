@@ -174,6 +174,7 @@ class LoopAwareMediaSourceFactory(
                     loopEndUs = tag.loopEndUs,
                     format = format,
                     entryPositionUs = tag.loopStartUs,
+                    fullDurationUs = tag.fullDurationUs,
                 )
                 LoopingPcmExtractorMediaSource.create(
                     item = item,
