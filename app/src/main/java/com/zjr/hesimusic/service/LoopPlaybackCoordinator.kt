@@ -819,7 +819,13 @@ class LoopPlaybackCoordinator @Inject constructor(
             )
             // 当前 item 是 tagged 但实际为普通文件源（或根本没建源）：立即把 T 折回媒体时间
             // 并恢复原 item，消灭“tag 在、声音普通、UI 仍可能折返”的中间态。
-            restoreSourceItem(player, plan.index, plan.tag, reason + "-source-not-built")
+            restoreSourceItem(
+                player = player,
+                index = plan.index,
+                tag = plan.tag,
+                reason = reason + "-source-not-built",
+                timelineMs = plan.seekTimelineMs,
+            )
             return
         }
         // 整表重建把播放器复位成 IDLE：必须 prepare 才会加载新源；play 只在进入前就要求播放时补
@@ -868,11 +874,17 @@ class LoopPlaybackCoordinator @Inject constructor(
      * 退出同样不能用 replaceMediaItem（清 cacheKey 也要重建源，A-086 在 repeat=ONE 下同样会
      * 把当前项甩到第一项），必须走 [rebuildQueueItem] 的整表重建。
      */
-    private fun restoreSourceItem(player: Player, index: Int, tag: LoopSourceItemTag, reason: String) {
+    private fun restoreSourceItem(
+        player: Player,
+        index: Int,
+        tag: LoopSourceItemTag,
+        reason: String,
+        timelineMs: Long = player.currentPosition,
+    ) {
         val plan = LoopSourceItemPlan.exit(
             index = index,
             itemCount = player.mediaItemCount,
-            timelineMs = player.currentPosition,
+            timelineMs = timelineMs,
             tag = tag,
         )
         val original = sourceOriginalItem?.takeIf { sourceOriginalIndex == index }
