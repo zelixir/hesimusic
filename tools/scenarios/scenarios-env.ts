@@ -544,16 +544,93 @@ const sEnv41: Scenario = {
       checks.push(mainWindowCheck("下一首后位置仍在 [A,B)(未切歌)", stNext, song.id));
     }
 
-    // 4) 上一首(回到上一首,通常是主歌)
-    const prevHit = await dispatchTransport(
+    // 4) 上一首：Android/ExoPlayer 标准语义有两条分支
+    //    position > maxSeekToPreviousPosition(默认 3s) -> 回到本曲开头(songId 不变,pos≈0)
+    //    position <= 3s                                -> 切到上一首(songId 变化)
+    await ctx.api.post("/player/seek", { positionMs: 6000 });
+    await waitFor(async () => ctx.api.state(), (s) => Number(s.playback?.positionMs) >= 3000, 5000, 100);
+    const beforePrevA = await ctx.api.state();
+    const prevA = await dispatchTransport(
       ctx,
       "previous",
-      (s) => Number(s.playback?.songId) !== nextSongId,
+      (s) =>
+        Number(s.playback?.songId) !== Number(beforePrevA.playback.songId) ||
+        Number(s.playback?.positionMs) <= 2000,
       6000,
     );
-    checks.push(check("上一首生效", prevHit.ok, "via=" + prevHit.via + " " + prevHit.detail));
-    await sleep(700);
-    const stPrev = await ctx.api.state();
+    await sleep(500);
+    const afterPrevA = await ctx.api.state();
+    const aSongChanged = Number(afterPrevA.playback.songId) !== Number(beforePrevA.playback.songId);
+    const aRewound = !aSongChanged && Number(afterPrevA.playback.positionMs) <= 2000;
+    checks.push(
+      check(
+        "上一首(位置>3s): 切上一首 或 回到本曲开头",
+        prevA.ok && (aSongChanged || aRewound) && afterPrevA.playback.playing === true,
+        "pos " + beforePrevA.playback.positionMs + "->" + afterPrevA.playback.positionMs +
+          "; song " + beforePrevA.playback.songId + "->" + afterPrevA.playback.songId +
+          "; playing=" + afterPrevA.playback.playing + "; via=" + prevA.via,
+        prevA.ok ? undefined : "previous 完全无效果：检查 MediaSession 回调/seekToPrevious",
+      ),
+    );
+    ctx.evidence.step("prev-over-3s", {
+      before: { songId: beforePrevA.playback.songId, positionMs: beforePrevA.playback.positionMs },
+      after: { songId: afterPrevA.playback.songId, positionMs: afterPrevA.playback.positionMs },
+      songChanged: aSongChanged,
+      rewound: aRewound,
+      via: prevA.via,
+    });
+
+    // 4b) position < 3s：退出循环后先制造"确实有上一首"的队列位置，再 seek 1.5s 测 previous。
+    await ctx.api.post("/loop/exit");
+    await waitFor(async () => ctx.api.state(), (s) => loopWindowOf(s) === null, 6000, 100);
+    const beforeSetup = await ctx.api.state();
+    await ctx.api.post("/player/repeat", { mode: "off" }).catch(() => null);
+    await ctx.api.post("/player/next").catch(() => null);
+    const movedNext = await waitFor(
+      async () => ctx.api.state(),
+      (s) => Number(s.playback?.songId) !== Number(beforeSetup.playback.songId),
+      6000,
+      100,
+    );
+    let afterPrevB: State | null = null;
+    if (!movedNext.ok) {
+      checks.push(
+        pendingCheck(
+          "上一首(位置<3s): 切到上一首",
+          "队列当前没有下一首可先进入（无法构造'有上一首'的位置）",
+          "queue-no-next",
+          "用带前后曲目的列表/专辑队列重跑该分支",
+        ),
+      );
+    } else {
+      await ctx.api.post("/player/seek", { positionMs: 1500 });
+      await waitFor(async () => ctx.api.state(), (s) => Number(s.playback?.positionMs) <= 3000, 4000, 100);
+      const beforePrevB = await ctx.api.state();
+      const prevB = await dispatchTransport(
+        ctx,
+        "previous",
+        (s) => Number(s.playback?.songId) !== Number(beforePrevB.playback.songId),
+        8000,
+      );
+      await sleep(600);
+      afterPrevB = await ctx.api.state();
+      checks.push(
+        check(
+          "上一首(位置<3s): 切到上一首",
+          prevB.ok && Number(afterPrevB.playback.songId) !== Number(beforePrevB.playback.songId) &&
+            afterPrevB.playback.playing === true,
+          "pos " + beforePrevB.playback.positionMs + "; song " + beforePrevB.playback.songId +
+            "->" + afterPrevB.playback.songId + "; playing=" + afterPrevB.playback.playing + "; via=" + prevB.via,
+          prevB.ok ? undefined : "位置<3s 时 previous 没有切到上一首：检查队列/seekToPrevious 实现",
+        ),
+      );
+      ctx.evidence.step("prev-under-3s", {
+        before: { songId: beforePrevB.playback.songId, positionMs: beforePrevB.playback.positionMs },
+        after: { songId: afterPrevB.playback.songId, positionMs: afterPrevB.playback.positionMs },
+        via: prevB.via,
+      });
+    }
+    const stPrev = afterPrevB ?? (await ctx.api.state());
     const prevSr = ctx.sampleRateFor(Number(stPrev.playback.songId));
     const audioPrev = await measureMainFrames(ctx.api, 1600, prevSr);
     checks.push(audioCheck("上一首后仍有输出", audioPrev, 0.85));
@@ -825,6 +902,20 @@ const sEnv43: Scenario = {
         playWhenReady: stLost.playback.playWhenReady,
         positionMs: stLost.playback.positionMs,
       });
+      if (!lost.ok) {
+        // 先确认竞品真的起播/请求了焦点；只是把 Activity 拉起来不算"抢焦点"。
+        const sess = await ctx.adb.shell("dumpsys media_session", 25000);
+        const at = sess.indexOf("package=" + otherPkg);
+        const block = at >= 0 ? sess.slice(at, at + 2000) : "";
+        const competitorPlaying = /state=PLAYING/.test(block) && /state=PlaybackState/.test(block);
+        ctx.evidence.step("competitor-playback", { competitorPlaying, block: block.slice(0, 600) });
+        if (!competitorPlaying) {
+          return await skipEnv(
+            "竞品 " + otherPkg + " 被拉起但未真正起播/未请求音频焦点（dumpsys media_session 无 PLAYING）；" +
+              "环境未证实，换一个确定会起播的播放器再测",
+          );
+        }
+      }
       checks.push(
         check(
           "外部 App 起播后本应用让出音频(暂停)",
