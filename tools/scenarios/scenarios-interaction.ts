@@ -1172,11 +1172,76 @@ const s106: Scenario = {
     const sr = ctx.sampleRateFor(song.id);
     await ctx.resetForMain();
     try {
+      // ---- #106a 单曲队列：/player/play 只建 1 首队列，next 没有歌可切；
+      // 但旧循环必须清干净（intent/window/engine/claim），不能留在旧 A/B 里。
+      await playSong(ctx, song.id);
+      const oneEnter = await enterLoop(ctx, song.id, true, false);
+      const oneInstalled = await waitLoopInstalled(ctx, song.id, 10000);
+      if (oneEnter.status !== 200 || !oneInstalled.ok) throw new SkipError("前置: 单曲队列未能进入循环(enter=" + oneEnter.status + ")");
+      await ctx.api.post("/player/next");
+      const oneCleared = await waitFor(
+        async () => ctx.api.state(),
+        (s) => loopWindowOf(s) === null && s.loop?.intent == null && String(s.playback?.engine) !== "loop",
+        8000,
+        100,
+      );
+      const stOne = oneCleared.value ?? (await ctx.api.state());
+      ctx.evidence.step("single-item-next", {
+        cleared: oneCleared.ok,
+        songId: stOne.playback?.songId,
+        engine: stOne.playback?.engine,
+        window: loopWindowOf(stOne),
+        intent: stOne.loop?.intent ?? null,
+        claimActive: stOne.loop?.claimActive,
+        sourceActive: stOne.loop?.sourceActive,
+        repeatMode: stOne.playback?.repeatMode,
+        queueSize: stOne.playback?.queueSize,
+      });
+      checks.push(
+        check(
+          "单曲队列 next 后旧循环完全退出(intent/window/engine)",
+          oneCleared.ok,
+          "songId=" + stOne.playback?.songId + " engine=" + stOne.playback?.engine +
+            " window=" + fmtWindow(loopWindowOf(stOne)) + " intent=" + (stOne.loop?.intent ? "still-set" : "null") +
+            " queueSize=" + stOne.playback?.queueSize +
+            " cmdMissing=" + ((stOne.invariants ?? [])
+              .filter((i: any) => i.code === "controller-available-commands-missing")
+              .map((i: any) => i.message)
+              .join("; ") || "none"),
+          oneCleared.ok ? undefined : "单曲队列 next 后仍留在旧循环:先看 cmdMissing —— 若缺 seek-to-next,/player/next 根本没到会话层(debug controller 命令集问题,非退场逻辑)",
+        ),
+      );
+      checks.push(
+        check(
+          "单曲队列 next 后 claim/source 关闭",
+          stOne.loop?.claimActive !== true && stOne.loop?.sourceActive !== true,
+          "claimActive=" + stOne.loop?.claimActive + " sourceActive=" + stOne.loop?.sourceActive,
+        ),
+      );
+      checks.push(
+        check(
+          "单曲队列 next 后 repeat 恢复进入前的值",
+          String(stOne.playback?.repeatMode) !== "one",
+          "repeatMode=" + stOne.playback?.repeatMode,
+          String(stOne.playback?.repeatMode) === "one" ? "repeat 仍是 one:退场没恢复" : undefined,
+        ),
+      );
+
+      // ---- #106b 多曲队列：restart=true 会按全库队列进入循环，next 必须真的换歌。
       await playSong(ctx, song.id);
       await ctx.api.post("/player/seek", { positionMs: info.loopStartMs + 3000 });
-      const enter = await enterLoop(ctx, song.id, true, false);
+      const enter = await enterLoop(ctx, song.id, true, true);
       const installed = await waitLoopInstalled(ctx, song.id, 10000);
       if (enter.status !== 200 || !installed.ok) throw new SkipError("前置: 未能进入循环(enter=" + enter.status + ")");
+      const queueSize = Number(installed.state?.playback?.queueSize ?? 0);
+      checks.push(
+        check(
+          "多曲队列前置(>=3 首)",
+          queueSize >= 3,
+          "queueSize=" + queueSize + " (restart=true 应装全库队列)",
+          queueSize < 3 ? "队列不足 3 首:next 没有歌可切,场景 setup 无效" : undefined,
+        ),
+      );
       const baseline = await measureMainFrames(ctx.api, 1200, sr);
       checks.push(audioCheck("前置: 循环中正在出声", baseline, 0.85));
       const win0 = loopWindowOf(installed.state ?? null);
@@ -1228,13 +1293,26 @@ const s106: Scenario = {
           "window.songId=" + (w2 ? w2.songId : "null") + " newSongId=" + newId,
         ),
       );
+      checks.push(
+        check(
+          "旧循环 claim/source 关闭",
+          st2.loop?.claimActive !== true && st2.loop?.sourceActive !== true,
+          "claimActive=" + st2.loop?.claimActive + " sourceActive=" + st2.loop?.sourceActive,
+        ),
+      );
+      const prevRepeat = Number(intent0?.previousRepeatMode ?? -1);
+      const expectedRepeat = prevRepeat === 1 ? "one" : prevRepeat === 2 ? "all" : "off";
+      checks.push(
+        check(
+          "repeat 恢复进入前的值",
+          String(st2.playback?.repeatMode) === expectedRepeat,
+          "repeat=" + st2.playback?.repeatMode + " 期望=" + expectedRepeat + "(previous=" + prevRepeat + ")",
+          String(st2.playback?.repeatMode) === expectedRepeat ? undefined : "切歌后 repeat 没有恢复:退场没写回",
+        ),
+      );
       const srNew = ctx.sampleRateFor(newId);
       const audibleNew = await measureMainFrames(ctx.api, 1800, srNew);
       checks.push(audioCheck("新歌正常出声", audibleNew, 0.8));
-      if (String(st2.playback?.repeatMode) === "one") {
-        pending.push("切歌后 repeatMode 仍为 one(进入循环前是 " + (intent0?.previousRepeatMode ?? "?") + "):意图里记着 previousRepeatMode,是否应在新歌上恢复?需要产品裁决");
-      }
-
       // 切回旧歌：循环不得复活。
       const back = await ctx.api.post("/player/play", { songId: song.id, repeatOne: false });
       const backOk = await waitFor(

@@ -190,8 +190,19 @@ class LoopSessionPlayer(
         navigateOutsideLoop { super.seekToNext() }
     }
 
+    // MediaSession 的 COMMAND_SEEK_TO_NEXT/PREVIOUS 走的是 seekToNextMediaItem/
+    // seekToPreviousMediaItem（不是 seekToNext）；两个入口都必须接管，否则 /player/next
+    // 与通知栏"下一首"会绕过退场逻辑（真机 1271 实测：只覆盖 seekToNext 时无日志）。
+    override fun seekToNextMediaItem() {
+        navigateOutsideLoop { super.seekToNextMediaItem() }
+    }
+
     override fun seekToPrevious() {
         navigateOutsideLoop { super.seekToPrevious() }
+    }
+
+    override fun seekToPreviousMediaItem() {
+        navigateOutsideLoop { super.seekToPreviousMediaItem() }
     }
 
     /**

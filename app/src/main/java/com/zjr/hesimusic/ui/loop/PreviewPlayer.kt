@@ -447,13 +447,29 @@ class PreviewPlayer @Inject constructor(
      */
     private fun armLoopAt(song: Song, targetMs: Long, play: Boolean) {
         val w = window
-        val current = player
         val target = targetMs.coerceAtLeast(0L)
         Log.i(TAG, "arm loop target=" + target + " play=" + play + " window=" + w + " engine=" + engineKind)
-        if (w != null && shouldUseSource(mode) &&
-            (current == null || engineKind == EngineKind.SOURCE) &&
-            prepareSource(song, w)
+        if (w != null && PreviewArmEnginePolicy.requiresSourceRebuild(
+                wantSource = shouldUseSource(mode),
+                engineIsSource = engineKind == EngineKind.SOURCE,
+            )
         ) {
+            // 自由(M3) → 仅循环段/接缝/FULL:必须真的重建 SOURCE 播放器与环带源。
+            // 旧实现要求 engineKind 已经是 SOURCE,于是从 FREE 回来后一直留在 M3:
+            // 既没有环带,也让 /debug/preview 的 TapAudioSink 帧计数恒为 0(假"没声")。
+            // 走完整 play() 路径(它会 ensurePlayer(SOURCE)+prepareSource+按模式起点 seek)。
+            _outsideLoop.value = false
+            val start = PreviewArmEnginePolicy.rebuildStartMs(mode, aMs, bMs)
+            Log.i(
+                TAG,
+                "arm loop engine switch " + engineKind + "->SOURCE mode=" + mode +
+                    " start=" + start + " window=" + w,
+            )
+            play(mode, start)
+            if (!play) player?.pause()
+            return
+        }
+        if (w != null && shouldUseSource(mode) && prepareSource(song, w)) {
             val p = player ?: return
             controller.window = w
             controller.tapWindow = w
@@ -589,6 +605,10 @@ class PreviewPlayer @Inject constructor(
             Log.d(TAG, "playFromCurrent source mode=" + mode + " window=" + window)
             return
         }
+        // 非 FREE 模式必须先恢复循环窗口：FREE 的 applyFreeShape() 会把 window 清成
+        // null，若直接算 shouldUseSource() 会把 LOOP_ONLY/SEAM 误判成"SOURCE 表达不了"，
+        // 于是从自由回到仅循环段时永远留在 M3（真机 1271 复现：探针 0 帧）。
+        if (mode != PreviewMode.FREE) applyLoopShape(song)
         val sourceEngine = engineKind == EngineKind.SOURCE
         val wantSource = shouldUseSource(mode)
         if (sourceEngine != wantSource) {
@@ -1576,4 +1596,23 @@ class PreviewPlayer @Inject constructor(
             _error.value = "预览播放失败:" + error.errorCodeName
         }
     }
+}
+
+/**
+ * 「回到循环」时的引擎去向决策（纯函数，单测 PreviewArmEnginePolicyTest）。
+ *
+ * 真机回归（场景 112）：从自由试听/自由模式（M3）点回「仅循环段」时，旧 armLoopAt
+ * 要求 engineKind 已经是 SOURCE 才 prepareSource，于是永远留在 M3：没有环带，
+ * /debug/preview 的 TapAudioSink 帧计数恒 0（被判成"没声"）。
+ * 这里把"何时必须重建 SOURCE"与"重建后的模式起点"集中成可测的纯逻辑。
+ */
+internal object PreviewArmEnginePolicy {
+
+    /** true = 必须重建 SOURCE 播放器（模式要 SOURCE，但当前引擎不是）。 */
+    fun requiresSourceRebuild(wantSource: Boolean, engineIsSource: Boolean): Boolean =
+        wantSource && !engineIsSource
+
+    /** 重建后从该模式的展示口径起点起播（复用 PreviewStartPlan，不另写一套）。 */
+    fun rebuildStartMs(mode: PreviewMode, aMs: Long, bMs: Long): Long =
+        PreviewStartPlan.displayStartMs(mode, aMs, bMs)
 }
