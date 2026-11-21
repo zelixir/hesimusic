@@ -161,6 +161,26 @@ class LoopDemotionConsistencyTest {
     }
 
     @Test
+    fun `user exit notice is published and consumed`() {
+        // D05：UI 主动退出与 demote/delete/restore 共用同一条可见状态通道。
+        val notice = LoopExitNotice(
+            songId = songId,
+            reason = LoopExitReason.USER_EXIT,
+            window = window,
+            previousRepeatMode = Player.REPEAT_MODE_ONE,
+            nextRepeatMode = previousRepeat,
+            previousShuffleEnabled = false,
+            nextShuffleEnabled = previousShuffle,
+            notifiedAtMs = 42L,
+        )
+        LoopClaimStore.publishExit(notice)
+        assertEquals(notice, LoopClaimStore.exitNoticeFlow.value)
+        assertEquals(notice, LoopClaimStore.consumeExitNotice())
+        assertNull("USER_EXIT 同样是一次性提示", LoopClaimStore.consumeExitNotice())
+        assertTrue(notice.summary().contains("user-exit"))
+    }
+
+    @Test
     fun `deleting the analysed row is also an explicit exit`() {
         val exit = LoopRevocation.detect(
             armed = armed,

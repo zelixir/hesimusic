@@ -142,6 +142,9 @@ enum class LoopExitReason(val wire: String) {
 
     /** 进程重启时持久化的循环意图已不可恢复（歌/行/窗口/repeat 任一不一致）。 */
     RESTORE_UNAVAILABLE("restore-unavailable"),
+
+    /** 用户在播放页/结果页主动点「退出无缝循环」（D05），不是被 demote/delete 触发的。 */
+    USER_EXIT("user-exit"),
 }
 
 /**

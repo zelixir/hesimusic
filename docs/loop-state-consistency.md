@@ -30,7 +30,8 @@
   2. 恢复进入前的 repeat / shuffle（播放器 + 持久化偏好）；
   3. 发布 LoopClaimStore.publishExit(LoopExitNotice)，UI 可一次性提示；
   4. 窗口清空后走既有 SOURCE/M3 退出路径，位置映射回**媒体时间轴**继续播放。
-  退场原因：confirmation-revoked / result-deleted / restore-unavailable。
+  退场原因：confirmation-revoked / result-deleted / restore-unavailable /
+  user-exit（用户在播放页/结果页主动退出，D05；由 UI 发布、service 日志与调试口同样可见）。
 
 ## 3. repeat 偏好与重启（D16 + D07 产品决定）
 
