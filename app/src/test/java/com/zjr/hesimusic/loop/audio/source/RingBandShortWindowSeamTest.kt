@@ -17,6 +17,8 @@ import java.lang.reflect.Proxy
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * #105 0.5s 极短窗口：环带大小、填充会话数、回绕是否重新解码。
@@ -47,6 +49,9 @@ class RingBandShortWindowSeamTest {
         private val sampleRate: Int,
         private val channels: Int,
         private val chunkFrames: Int = 8_192,
+        /** 仅测试用：第一个 chunk 产出后通知；[continueGate] 非空时等它放行。 */
+        private val firstChunkLatch: CountDownLatch? = null,
+        private val continueGate: CountDownLatch? = null,
     ) : RingBandStreamDecoder {
 
         val openedStartUs = CopyOnWriteArrayList<Long>()
@@ -69,6 +74,7 @@ class RingBandShortWindowSeamTest {
             if (cancelled) return
             var frame = Pcm16Frames.frameAtOrAfterUs(startUs, sampleRate)
             val end = Pcm16Frames.frameAtOrAfterUs(endUs, sampleRate)
+            var chunk = 0
             while (frame < end && !cancelled) {
                 val n = minOf(chunkFrames.toLong(), end - frame).toInt()
                 val out = ByteArray(n * channels * 2)
@@ -79,6 +85,12 @@ class RingBandShortWindowSeamTest {
                 }
                 onPcm(out, out.size)
                 frame += n
+                if (chunk == 0) {
+                    firstChunkLatch?.countDown()
+                    // 让测试在"第一段已写入、会话仍在进行"时插入 seek。
+                    continueGate?.await(3, TimeUnit.SECONDS)
+                }
+                chunk += 1
             }
         }
 
@@ -230,6 +242,62 @@ class RingBandShortWindowSeamTest {
         }
     }
 
+    /**
+     * 确定性复现"3 个会话"：renderer 已写入第一段（会话 1 进行中）时 seek 到环中间。
+     * 期望是 **1 个被 seek 打断的会话 + 2 个互不重叠的有效会话**，不是同一区间重复填充。
+     */
+    @Test
+    fun `jump fill aborts the in-flight session without duplicating ranges`() {
+        val tl = timeline()
+        val ring = LoopRing(tl.sampleRate, tl.channels, tl.loopFrames)
+        val firstChunk = CountDownLatch(1)
+        val continueGate = CountDownLatch(1)
+        val decoder = ShortWindowDecoder(
+            sampleRate = sampleRate,
+            channels = channels,
+            firstChunkLatch = firstChunk,
+            continueGate = continueGate,
+        )
+        val renderer = RingBandRenderer(tl, decoder, ring)
+        val reader = RingBandReader(ring)
+        val out = FakeOutput()
+        val extractor = RingBandExtractor(tl, ring, reader, renderer)
+        extractor.init(out)
+        renderer.start()
+        try {
+            assertTrue("first chunk must be written", firstChunk.await(2, TimeUnit.SECONDS))
+            assertTrue("session 1 must be in flight", renderer.sessionCount >= 1L)
+            assertTrue(
+                "prefix must be partially filled before seek, covered=" + ring.coveredFrames,
+                ring.coveredFrames in 1 until ring.frames,
+            )
+
+            extractor.seek(0L, aUs + 250_000L)
+            continueGate.countDown()
+            assertTrue("jump fill must cover the band", awaitCovered(ring))
+
+            assertEquals("one in-flight session was aborted", 1L, renderer.abortedSessionCount)
+            assertEquals("1 aborted + 2 disjoint fills", 3L, renderer.sessionCount)
+            assertEquals(2L, renderer.sessionCount - renderer.abortedSessionCount)
+            assertEquals(
+                "no interval may be written twice",
+                ring.renderedFrames,
+                ring.coveredFrames,
+            )
+            assertNull(renderer.error)
+
+            val sessions = renderer.sessionCount
+            val opened = decoder.openedStartUs.size
+            val input = fakeInput()
+            repeat(8) { extractor.read(input, PositionHolder()) }
+            assertEquals("wrapping must not start another session", sessions, renderer.sessionCount)
+            assertEquals("wrapping must not reopen the decoder", opened, decoder.openedStartUs.size)
+        } finally {
+            continueGate.countDown()
+            renderer.release()
+        }
+    }
+
     @Test
     fun `jump fill into the middle of the band settles without further sessions`() {
         val tl = timeline()
@@ -245,14 +313,28 @@ class RingBandShortWindowSeamTest {
             val input = fakeInput()
             val position = PositionHolder()
 
-            // seek 到窗口中间：先跳填补齐 [offset,B)，再补 [0,offset)，最多 2 个会话。
+            // seek 到窗口中间：先跳填补齐 [offset,B)，再补 [0,offset)。
+            //
+            // 这里允许"会话总数"为 2 或 3：renderer 线程可能在 seek 到达前已经从 0 起了
+            // 一个填充会话；seek 会 cancel 它（[RingBandRenderer.abortedSessionCount]），
+            // 之后真正完成目标的是"中段 + 前缀"两个互不重叠的会话。因此判据是
+            // **settled sessions = sessionCount - abortedSessionCount <= 2**，
+            // 而不是简单放宽总数；同时用 renderedFrames == coveredFrames 证明没有任何
+            // 区间被重复写入（若重复填充，rendered 会大于 covered）。
             extractor.seek(0L, aUs + 250_000L)
             assertTrue("跳填后环带必须填满", awaitCovered(ring))
-            val sessionsAfterFill = renderer.sessionCount
+            val settledSessions = renderer.sessionCount - renderer.abortedSessionCount
             assertTrue(
-                "跳填只需 <= 2 个会话（常态 1~2），实际 " + sessionsAfterFill,
-                sessionsAfterFill in 1L..2L,
+                "跳填后完成的会话只需 <= 2 个（被打断的会话不计），实际 total=" +
+                    renderer.sessionCount + " aborted=" + renderer.abortedSessionCount,
+                settledSessions in 1L..2L,
             )
+            assertEquals(
+                "不得重复填充同一区间：renderedFrames 必须等于 coveredFrames",
+                ring.renderedFrames,
+                ring.coveredFrames,
+            )
+            val sessionsAfterFill = renderer.sessionCount
             val openedAfterFill = decoder.openedStartUs.size
 
             repeat(8) { extractor.read(input, position) }

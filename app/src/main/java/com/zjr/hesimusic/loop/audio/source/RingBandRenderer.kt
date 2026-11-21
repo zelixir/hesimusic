@@ -60,6 +60,18 @@ class RingBandRenderer(
     var sessionCount: Long = 0L
         private set
 
+    /**
+     * 被新 seek 目标中途打断的会话数（会话已计数，但没把原目标填完）。
+     *
+     * 场景（#105 短窗口）：renderer 刚启动就从 0 填环，此时 extractor 立刻 seek 到环中间，
+     * 旧会话被 cancel -> 新目标填 B 段 -> 回填前缀。总会话数会是 3，但其中 1 个是**被 seek
+     * 打断的无效会话**，真正成功的填充会话仍是 2 个。这个计数让测试/日志能区分
+     * "效率损失" 与 "同一区间重复填充"。
+     */
+    @Volatile
+    var abortedSessionCount: Long = 0L
+        private set
+
     /** 最近一次跳填目标的 offset（诊断用）。 */
     @Volatile
     var lastJumpOffsetFrames: Long = -1L
@@ -249,6 +261,7 @@ class RingBandRenderer(
         }
         var writeOffset = startOffset
         var written = 0L
+        var aborted = false
         var nextLogAt = 1L
         RingBandLog.i(
             "RingBand fill start session=" + sessionCount +
@@ -259,6 +272,7 @@ class RingBandRenderer(
             if (releaseRequested) return@stream
             if (generation != myGeneration) {
                 // 新目标已到：让解码器尽快返回，渲染线程下一轮直接从新 offset 填。
+                aborted = true
                 decoder.cancel()
                 return@stream
             }
@@ -287,6 +301,11 @@ class RingBandRenderer(
                 }
             }
         }
+        if (!aborted && generation != myGeneration) {
+            // 会话结束时才发现目标已变：同样算被打断（没按原目标填完）。
+            aborted = true
+        }
+        if (aborted) abortedSessionCount += 1L
         // 00024：会话结束后再判断缺口——"产出 0 帧"本身不是错误，得看源是否已到尾部。
         val reachedSourceEnd = decoder.lastStreamReachedEndOfStream()
         lastFillReachedEndOfStream = reachedSourceEnd
