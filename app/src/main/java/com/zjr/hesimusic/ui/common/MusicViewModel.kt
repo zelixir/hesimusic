@@ -194,7 +194,10 @@ class MusicViewModel @Inject constructor(
         // 00027：claim 真值一变（接管/回退/窗口应用）就立刻重读位置，
         // 不再等 1s 的进度 tick，避免“回退已生效、进度条还折返一帧”。
         viewModelScope.launch {
-            LoopClaimStore.revisionFlow.collect { updateState() }
+            LoopClaimStore.revisionFlow.collect {
+                // 服务销毁/controller 断连时读位置可能抛：claim 刷新绝不能让 UI 崩。
+                runCatching { updateState() }
+            }
         }
 
         val sessionToken = SessionToken(context, ComponentName(context, MusicService::class.java))
