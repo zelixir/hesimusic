@@ -563,10 +563,11 @@ const pid0 = await adb.pidof(cfg.pkg);
       }
       const snapBefore = before.snapshot;
       // 预览也必须在 SOURCE 路线，否则 seek 桥不存在（或 M3 上位置口径不同）。
-      if (snapBefore.engine !== "SOURCE" || snapBefore.sourceActive !== true) {
+      // 只看 engine=SOURCE：sourceActive 在页面刚起播/换源后的短暂窗口里可能还是 false，
+      // 但 SOURCE player 已创建、seek 桥可用；用它做闸门会误 SKIP。
+      if (snapBefore.engine !== "SOURCE") {
         throw new SkipError(
-          "预览引擎不是 SOURCE(engine=" + snapBefore.engine + " sourceActive=" + snapBefore.sourceActive +
-            ");用 /debug/source-mode {on:true} + force-stop/start 切回后重跑",
+          "预览引擎不是 SOURCE(engine=" + snapBefore.engine + ");用 /debug/source-mode {on:true} + force-stop/start 切回后重跑",
         );
       }
       const r = await api.post("/debug/preview-seek", { positionMs }, 10000);

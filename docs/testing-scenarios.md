@@ -254,7 +254,8 @@ powershell -NoProfile -File tools/scenarios/run-scenarios.ps1 --non-exclusive
 
 ### 3.6 内存 / heap 曲线（抗 GC 抖动）
 
-- 固定 **30s 采样**；场景 16 不足 5 个点时结尾观察补齐（最多 120s），场景 19 约 20 个点。
+- **30s 采样 + 每轮边界采样**（场景 16 实测点间隔约 15~30s；斜率用真实时间戳计算，不受采样间隔抖动影响）；
+  场景 16 不足 5 个点时结尾观察补齐（最多 120s），场景 19 约 20 个点。
 - 斜率用 **Theil–Sen 中位斜率**（两两斜率取中位数），不用最小二乘：GC 锯齿/单点尖峰不会把斜率带偏。
 - 只有**同时**满足以下两条才判泄漏：
   1. 中位斜率 > **8MB/min**；
@@ -546,4 +547,23 @@ bytes = (B - A) 秒 × sampleRate × channels × 2
 > 这两次单跑落在 baseline-cost A 轮 CPU 采集窗口内（约 11:37:14–11:38:07，共 53s/600s）；
 > 若 CPU 曲线出现台阶，可按这个窗口剔除。之后按约定停手，直到收到 device yours 再跑全量。
 > 单跑报告：e2e-artifacts/scenarios/20261121-113714/report.md、20261121-113727/report.md。
+
+### 全量（device yours 后）
+
+| 时间 | 命令 | 结果 |
+|---|---|---|
+| 11:56–12:00 | 常规 18 条 | **PASS 16 / FAIL 0 / SKIP 0 / PENDING 2**，239s，192 次 adb，pid 3044 全程未重启 |
+
+- #7 PASS：FULL display=1853（M3′ 前奏路径），LOOP_ONLY/SEAM SOURCE 101%/98%；
+- #12 PASS：39944→41409（646ms 到新歌，engine=exo，window=null）；
+- #9 接缝首声 **163ms**（≤500ms），display=45167=B-5s；
+- #10 PENDING：apply 0~1ms，playout **148~242ms**；
+- #18 PENDING：free audition playout **169~186ms**（与区内同级 → media3 native cost）；
+- #16 PASS：Java Heap 50.9→47.1MB，30s/轮次采样 n=5，Theil–Sen 斜率 **-6.8MB/min**，
+  前半均 46.5MB→后半均 41.1MB；OOM 无；pid 不变；
+- 全局 OOM/崩溃：无；设备锁已释放。
+- 报告：e2e-artifacts/scenarios/20261121-115646/report.md
+
+> 中间还有一次 11:52 的全量：PASS15/FAIL0/SKIP2（#11/#18 被“预览 sourceActive 尚未置位”的闸门误 SKIP）。
+> 已把闸门改为只看 engine=SOURCE 后重跑，上表是修复后的干净一轮（旧报告 20261121-115238 可忽略）。
 
