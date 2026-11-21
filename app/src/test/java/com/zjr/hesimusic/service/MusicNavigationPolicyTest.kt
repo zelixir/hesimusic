@@ -45,6 +45,15 @@ class MusicNavigationPolicyTest {
     }
 
     @Test
+    fun `绕回后只有 ENDED 才自动开播_暂停保持暂停`() {
+        // #90：暂停态按 next/prev 绕回必须保持暂停，不能因为 !isPlaying 就 play()。
+        assertTrue(MusicNavigationPolicy.shouldPlayAfterWrap(Player.STATE_ENDED))
+        assertFalse(MusicNavigationPolicy.shouldPlayAfterWrap(Player.STATE_READY))
+        assertFalse(MusicNavigationPolicy.shouldPlayAfterWrap(Player.STATE_BUFFERING))
+        assertFalse(MusicNavigationPolicy.shouldPlayAfterWrap(Player.STATE_IDLE))
+    }
+
+    @Test
     fun `还有下一项或队列为空时不绕回`() {
         assertFalse(MusicNavigationPolicy.shouldWrapToStart(true, Player.REPEAT_MODE_OFF, 3))
         assertFalse(MusicNavigationPolicy.shouldWrapToStart(false, Player.REPEAT_MODE_OFF, 0))

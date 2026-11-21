@@ -317,18 +317,24 @@ object LoopClaimResolver {
         audio: LoopAudioController,
     ): LoopClaim {
         val runtimeWindow = runtime.window.value
+        // #88：SOURCE 已重建但播放器还没 READY → claim 保持"未生效"（不暴露窗口）。
+        // 否则会同时制造 claimed=true/sourceActive=false（loop-claim-without-source）
+        // 和"engine=loop 但 playing=false"的假循环窗口。
+        val installPending = LoopSourceRuntime.isInstallPendingFor(runtimeWindow)
+        val effectiveRuntimeWindow = if (installPending) null else runtimeWindow
+        val effectiveAudioWindow = if (installPending) null else audio.window
         val effectiveSongId = songId
             ?: runtimeWindow?.songId
             ?: audio.window?.songId
             ?: LoopSourceRuntime.installedWindow?.songId
-        val selected = selectWindow(effectiveSongId, runtimeWindow, audio.window, audio.isReplaying)
+        val selected = selectWindow(effectiveSongId, effectiveRuntimeWindow, effectiveAudioWindow, audio.isReplaying)
         val sourceRoute = MainPlayerRouting.current.coordinatorReplacesItem
         val unavailable = selected != null &&
             LoopSourceFallback.isUnavailable(effectiveSongId, selected)
         return resolve(
             songId = effectiveSongId,
-            runtimeWindow = runtimeWindow,
-            audioWindow = audio.window,
+            runtimeWindow = effectiveRuntimeWindow,
+            audioWindow = effectiveAudioWindow,
             installedWindow = LoopSourceRuntime.installedWindow,
             isReplaying = audio.isReplaying,
             sourceRoute = sourceRoute,

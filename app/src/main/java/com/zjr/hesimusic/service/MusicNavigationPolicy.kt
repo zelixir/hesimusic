@@ -19,4 +19,13 @@ internal object MusicNavigationPolicy {
 
     fun shouldWrapToEnd(hasPrevious: Boolean, repeatMode: Int, mediaItemCount: Int): Boolean =
         !hasPrevious && mediaItemCount > 0 && repeatMode != Player.REPEAT_MODE_ALL
+
+    /**
+     * 手写绕回后是否要让播放器开播。
+     *
+     * 只有 ENDED（一首自然播完）才需要"绕回并继续"；用户**暂停**后按 next/prev
+     * 必须保持暂停（#90：旧实现用 !isPlaying 判断，暂停态也被当成需要开播）。
+     */
+    fun shouldPlayAfterWrap(playbackState: Int): Boolean =
+        playbackState == Player.STATE_ENDED
 }

@@ -758,7 +758,8 @@ internal class MainSessionForwardingPlayer(
             // A-085: repeat=ALL 时 hasNextMediaItem() 恒 true(播放器自己绕回),
             // 手写绕回只对 repeat != ALL 的最后一项生效。
             seekToDefaultPosition(0)
-            if (playbackState == Player.STATE_ENDED || !isPlaying) {
+            // #90：暂停态 next 不能自动开播；只有自然播完(ENDED)才需要续播。
+            if (MusicNavigationPolicy.shouldPlayAfterWrap(playbackState)) {
                 play()
             }
         }
@@ -776,7 +777,7 @@ internal class MainSessionForwardingPlayer(
         ) {
             // 同 A-085: repeat=ALL 时上一项由播放器自己绕回。
             seekToDefaultPosition(mediaItemCount - 1)
-            if (playbackState == Player.STATE_ENDED || !isPlaying) {
+            if (MusicNavigationPolicy.shouldPlayAfterWrap(playbackState)) {
                 play()
             }
         }

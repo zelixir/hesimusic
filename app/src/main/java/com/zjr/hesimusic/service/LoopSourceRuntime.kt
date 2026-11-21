@@ -24,6 +24,32 @@ object LoopSourceRuntime {
     var installedWindow: LoopWindow? = null
         private set
 
+    /**
+     * #88：已重建、但播放器还没 READY 的窗口（尚未发布接管）。
+     *
+     * 这个阶段 claim 必须保持"未生效"：否则 /state 先报 claimed=true/sourceActive=false，
+     * 既会撞 loop-claim-without-source 不变量，也会让"保存并播放"在首块 PCM 就绪前
+     * 看起来像进了循环却没声音。发布（READY）后 onInstalled 会清掉它。
+     */
+    @Volatile
+    var pendingWindow: LoopWindow? = null
+        private set
+
+    fun onInstallPending(window: LoopWindow) {
+        pendingWindow = window
+        LoopClaimStore.invalidate()
+    }
+
+    fun clearPendingInstall() {
+        if (pendingWindow != null) {
+            pendingWindow = null
+            LoopClaimStore.invalidate()
+        }
+    }
+
+    fun isInstallPendingFor(window: LoopWindow?): Boolean =
+        window != null && pendingWindow == window
+
     /** 接管时的媒体文件路径（排障用）。 */
     @Volatile
     var installedPath: String? = null
@@ -32,12 +58,14 @@ object LoopSourceRuntime {
     fun onInstalled(window: LoopWindow, filePath: String) {
         installedWindow = window
         installedPath = filePath
+        pendingWindow = null
         LoopClaimStore.invalidate()
     }
 
     fun onReleased() {
         installedWindow = null
         installedPath = null
+        pendingWindow = null
         LoopClaimStore.invalidate()
     }
 

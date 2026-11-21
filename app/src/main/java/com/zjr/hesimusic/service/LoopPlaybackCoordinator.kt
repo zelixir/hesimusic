@@ -2,6 +2,7 @@ package com.zjr.hesimusic.service
 
 import android.util.Log
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import com.zjr.hesimusic.data.dao.SongLoopDao
@@ -94,6 +95,35 @@ class LoopPlaybackCoordinator @Inject constructor(
     /** 进入 SOURCE 前当前 item 的原件；退出时只恢复这一项，队列不动。 */
     private var sourceOriginalItem: MediaItem? = null
     private var sourceOriginalIndex: Int = -1
+
+    /**
+     * #88：SOURCE 已重建但播放器还没 READY 时，先不对外声称"已接管"。
+     * 否则 /state 会先报 engine=loop/claim=true，而声音还要等首块解码（真机 ~300ms），
+     * "保存并播放"看起来像没播。等 READY（或超时兜底）再 onInstalled + invalidate。
+     */
+    private data class PendingSourceInstall(
+        val window: LoopWindow,
+        val path: String,
+        val player: Player,
+    )
+    private var pendingSourceInstall: PendingSourceInstall? = null
+    private var pendingInstallTimeout: Job? = null
+    private var pendingPublishDelay: Job? = null
+    private val installReadyListener = object : Player.Listener {
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            maybePublishSourceInstall()
+        }
+
+        // READY 与 isPlaying=true 不是同一个回调：READY 先到，isPlaying 晚 ~1ms。
+        // #88 要求"claim 可见时 playing 已经 true"，所以必须等 isPlaying 回调再发布。
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            maybePublishSourceInstall()
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            clearPendingSourceInstall()
+        }
+    }
 
     private var observeJob: Job? = null
     private var observedSongId: Long? = null
@@ -394,6 +424,20 @@ class LoopPlaybackCoordinator @Inject constructor(
             audio.fullDurationUs = if (willBeEligible) durationUs else 0L
             runtime.refresh(songId, mode.repeatMode, row, armedSongId, durationUs) // 1) 纯函数重算（唯一窗口来源）
             val window = runtime.window.value
+            // #88：SOURCE 路线下窗口已算出、但**当前 item 还不是该窗口的 source tag** →
+            // 标记 pending，claim 先保持未生效（不能用 installedWindow 判断：进程内可能
+            // 残留上一轮的登记，导致 claim 在重建窗口里先变 true）。
+            val currentTag = player.currentMediaItem?.localConfiguration?.tag
+            val itemAlreadySource = currentTag is LoopSourceItemTag &&
+                window != null &&
+                currentTag.songId == window.songId &&
+                currentTag.loopStartUs == window.loopStartUs &&
+                currentTag.loopEndUs == window.loopEndUs
+            if (window != null && MainPlayerRouting.current.coordinatorReplacesItem && !itemAlreadySource) {
+                LoopSourceRuntime.onInstallPending(window)
+            } else if (window == null) {
+                LoopSourceRuntime.clearPendingInstall()
+            }
             // 真机排障口径：一次事件的实际输入与输出（songId/armed/repeat/行 A/B/窗口/播放态）。
             Log.i(
                 TAG_PERF,
@@ -741,6 +785,7 @@ class LoopPlaybackCoordinator @Inject constructor(
 
     /** service 销毁时停止行订阅/监听并清空窗口（不取消 [scope]，服务可能被重建）。 */
     fun release() {
+        clearPendingSourceInstall()
         observeJob?.cancel()
         observeJob = null
         observedSongId = null
@@ -782,6 +827,7 @@ class LoopPlaybackCoordinator @Inject constructor(
      * （与 applyIntentMode 同一口径），最后撤掉 SOURCE 接管并清窗口/claim。
      */
     fun exitForNavigation(player: Player) {
+        clearPendingSourceInstall()
         val armed = loopIntent.armed.value
         if (armed != null) {
             loopIntent.clear()
@@ -942,9 +988,13 @@ class LoopPlaybackCoordinator @Inject constructor(
         if (index < 0) {
             Log.w(TAG_PERF, "syncSourceItem skip=noIndex route=" +
                 MainPlayerRouting.current.useSourceForMainPlayer + " window=" + window)
+            LoopSourceRuntime.clearPendingInstall()
             return
         }
-        val current = player.currentMediaItem ?: return
+        val current = player.currentMediaItem ?: run {
+            LoopSourceRuntime.clearPendingInstall()
+            return
+        }
         val tag = current.localConfiguration?.tag
         Log.i(
             TAG_PERF,
@@ -964,11 +1014,13 @@ class LoopPlaybackCoordinator @Inject constructor(
                 "syncSourceItem skip=song-mismatch current=" + currentSongId +
                     " window=" + w.songId + " reason=" + reason,
             )
+            LoopSourceRuntime.clearPendingInstall()
             return
         }
         val unavailable = LoopSourceFallback.isUnavailable(w?.songId, w)
         // 0) 没有窗口 / 该窗口已登记 SOURCE 不可用 → 退出循环（只恢复当前项）。
         if (w == null || !MainPlayerRouting.coordinatorReplacesItem(w, unavailable)) {
+            clearPendingSourceInstall()
             audio.tapWindow = null
             if (tag is LoopSourceItemTag) {
                 restoreSourceItem(player, index, tag, reason)
@@ -985,6 +1037,11 @@ class LoopPlaybackCoordinator @Inject constructor(
             tag.loopEndUs == w.loopEndUs
         ) {
             audio.tapWindow = w
+            // 只有"没有正在等待 READY 的 pending"时才补发布；否则这里的 row/repeat/transition
+            // 重复 refresh 会把 deferred publish 提前，claim 又回到 playing=false 的窗口。
+            if (LoopSourceRuntime.installedWindow != w && !LoopSourceRuntime.isInstallPendingFor(w)) {
+                LoopSourceRuntime.onInstalled(w, song?.filePath ?: LoopSourceRuntime.installedPath.orEmpty())
+            }
             return
         }
         // 2) 预检：格式不支持 / 环过大 / 文件缺失 → 本次不进 SOURCE，回退 M3′ 形态并登记。
@@ -1017,7 +1074,10 @@ class LoopPlaybackCoordinator @Inject constructor(
         LoopSourceFallback.clear(w.songId)
         LoopEngineInfo.recordBandBytes(ringBytes)
         val path = filePath
-        if (path.isNullOrBlank()) return
+        if (path.isNullOrBlank()) {
+            LoopSourceRuntime.clearPendingInstall()
+            return
+        }
         // issue 00028：主播放器用整曲时间轴（prelude/loop/tail）。
         // 首次进入固定 T=0（曲目开头）；只有 A/B 变化且当前已是 source item 时，
         // 才把当前展示位置映射到新窗口时间轴（不重头、不跳 A）。
@@ -1061,8 +1121,11 @@ class LoopPlaybackCoordinator @Inject constructor(
         )
         if (plan == null) {
             Log.w(TAG, "source plan rejected songId=" + w.songId + " window=" + w)
+            LoopSourceRuntime.clearPendingInstall()
             return
         }
+        // 真正重建前再标一次 pending（refresh 与这里之间可能被 row/repeat 事件插队）。
+        LoopSourceRuntime.onInstallPending(w)
         audio.tapWindow = w
         if (tag !is LoopSourceItemTag) {
             sourceOriginalItem = current
@@ -1095,6 +1158,7 @@ class LoopPlaybackCoordinator @Inject constructor(
         // 此时 item 虽然仍带 tag，实际播放的是普通文件源——绝不能 onInstalled。
         val buildUnavailable = LoopSourceFallback.isUnavailable(w.songId, w)
         if (!builtByFactory || buildUnavailable) {
+            clearPendingSourceInstall()
             LoopSourceRuntime.onReleased()
             audio.tapWindow = null
             Log.w(
@@ -1121,7 +1185,7 @@ class LoopPlaybackCoordinator @Inject constructor(
         val revive = LoopSourceRuntime.revivePlan(stateBefore, playWhenReadyBefore, sourcesRebuilt = true)
         if (revive.prepare) player.prepare()
         if (revive.play) player.play()
-        LoopSourceRuntime.onInstalled(w, path)
+        scheduleSourceInstallPublish(player, w, path)
         Log.i(
             TAG,
             "source item installed reason=" + reason + " songId=" + w.songId +
@@ -1141,6 +1205,115 @@ class LoopPlaybackCoordinator @Inject constructor(
                 " stateBefore=" + stateBefore + " stateAfter=" + player.playbackState +
                 " pwr=" + player.playWhenReady + " reviving=" + revive.prepare + "/" + revive.play,
         )
+    }
+
+    /**
+     * #88：只在该窗口的数据源真的可播（READY/ENDED）时才发布接管；否则挂起等回调，
+     * 2.5s 超时兜底发布（避免暂停/异常时永远不 claim）。
+     */
+    private fun scheduleSourceInstallPublish(player: Player, window: LoopWindow, path: String) {
+        clearPendingSourceInstall()
+        pendingSourceInstall = PendingSourceInstall(window, path, player)
+        player.addListener(installReadyListener)
+        if (SourceInstallPublishPolicy.shouldPublish(
+                playbackState = player.playbackState,
+                playWhenReady = player.playWhenReady,
+                isPlaying = player.isPlaying,
+                force = false,
+            )
+        ) {
+            scheduleDeferredPublish()
+            return
+        }
+        pendingInstallTimeout = scope.launch(eventDispatcher) {
+            delay(SOURCE_INSTALL_PUBLISH_TIMEOUT_MS)
+            if (pendingSourceInstall != null) {
+                Log.w(
+                    TAG_PERF,
+                    "source install publish timeout state=" + player.playbackState +
+                        " window=" + window,
+                )
+                publishPendingSourceInstall(force = true)
+            }
+        }
+        Log.i(
+            TAG_PERF,
+            "source install pending state=" + player.playbackState +
+                " window=" + window + " (claim waits for READY)",
+        )
+    }
+
+    private fun maybePublishSourceInstall() {
+        val pending = pendingSourceInstall ?: return
+        if (SourceInstallPublishPolicy.shouldPublish(
+                playbackState = pending.player.playbackState,
+                playWhenReady = pending.player.playWhenReady,
+                isPlaying = pending.player.isPlaying,
+                force = false,
+            )
+        ) {
+            scheduleDeferredPublish()
+        }
+    }
+
+    /**
+     * 等一个小的主线程窗口再发布：MediaSession 先把 isPlaying=true 同步给 controller，
+     * 我们再把 claim 放出来。否则会出现 claim=true / controller playing=false 的 1ms 假死。
+     */
+    private fun scheduleDeferredPublish() {
+        if (pendingPublishDelay != null) return
+        val pending = pendingSourceInstall
+        Log.i(
+            TAG_PERF,
+            "source install deferred-publish in " + CLAIM_PUBLISH_SETTLE_MS + "ms" +
+                " state=" + (pending?.player?.playbackState ?: -1) +
+                " isPlaying=" + (pending?.player?.isPlaying == true) +
+                " window=" + pending?.window,
+        )
+        pendingPublishDelay = scope.launch(eventDispatcher) {
+            delay(CLAIM_PUBLISH_SETTLE_MS)
+            pendingPublishDelay = null
+            publishPendingSourceInstall(force = false)
+        }
+    }
+
+    private fun publishPendingSourceInstall(force: Boolean) {
+        val pending = pendingSourceInstall ?: return
+        if (!SourceInstallPublishPolicy.shouldPublish(
+                playbackState = pending.player.playbackState,
+                playWhenReady = pending.player.playWhenReady,
+                isPlaying = pending.player.isPlaying,
+                force = force,
+            )
+        ) {
+            return
+        }
+        pendingSourceInstall = null
+        pendingInstallTimeout?.cancel()
+        pendingInstallTimeout = null
+        pendingPublishDelay?.cancel()
+        pendingPublishDelay = null
+        pending.player.removeListener(installReadyListener)
+        publishSourceInstall(pending.window, pending.path, pending.player.playbackState)
+    }
+
+    private fun publishSourceInstall(window: LoopWindow, path: String, playbackState: Int) {
+        LoopSourceRuntime.onInstalled(window, path)
+        LoopClaimStore.invalidate()
+        Log.i(
+            TAG_PERF,
+            "source install published playbackState=" + playbackState +
+                " window=" + window + " songId=" + window.songId,
+        )
+    }
+
+    private fun clearPendingSourceInstall() {
+        pendingInstallTimeout?.cancel()
+        pendingInstallTimeout = null
+        pendingPublishDelay?.cancel()
+        pendingPublishDelay = null
+        pendingSourceInstall?.player?.removeListener(installReadyListener)
+        pendingSourceInstall = null
     }
 
     /** 00021 取证：item 的实际字段（mediaId/uri/cacheKey/tag），用于确认 tag 真的挂上。 */
@@ -1169,6 +1342,7 @@ class LoopPlaybackCoordinator @Inject constructor(
         reason: String,
         timelineMs: Long = player.currentPosition,
     ) {
+        clearPendingSourceInstall()
         val plan = LoopSourceItemPlan.exit(
             index = index,
             itemCount = player.mediaItemCount,
@@ -1334,6 +1508,17 @@ class LoopPlaybackCoordinator @Inject constructor(
         /** 循环中 next/prev 的强制退场（exitForNavigation）。 */
         const val REASON_NAVIGATION = "navigation"
 
+        /** #88：数据源 READY 前不发布接管，最多等这么久（暂停/异常兜底）。 */
+        private const val SOURCE_INSTALL_PUBLISH_TIMEOUT_MS = 2_500L
+
+        /**
+         * #88：READY/isPlaying 之后等 controller 收到状态再发布 claim。
+         *
+         * 真机 1288 实测：isPlaying=true 到 MediaController 快照更新约 200ms；80ms 仍会
+         * 采到 claim=true/playing=false。350ms 覆盖这段 IPC/快照滞后，用户侧只多等 0.35s。
+         */
+        private const val CLAIM_PUBLISH_SETTLE_MS = 350L
+
         /** MusicService restorePlaybackState 完成后的重算（D16 的来源，用于一致性校验）。 */
         const val REASON_RESTORE = "restore"
 
@@ -1349,5 +1534,32 @@ class LoopPlaybackCoordinator @Inject constructor(
 
         /** 单次 refresh 超过该耗时打 warn（含主线程探针/DB/换源）。 */
         private const val SLOW_REFRESH_WARN_MS = 300L
+    }
+}
+
+/**
+ * #88：SOURCE 重建后"何时对外发布接管"的纯策略（单测 SourceInstallPublishPolicyTest）。
+ *
+ * 旧行为是 rebuild 完立即 onInstalled：/state 先报 engine=loop/claim=true，但首块 PCM
+ * 还要 ~300ms 才 READY，于是"保存并播放"那一刻 playing=false（听觉上像没播）。
+ * 现在等播放器 READY/ENDED 再发布；超时/异常由协调器强制兜底，不会永久不 claim。
+ */
+internal object SourceInstallPublishPolicy {
+
+    /**
+     * READY 只说明可以播；如果用户要求播放（pwr=true）还要等 isPlaying=true，
+     * 保证"claim 可见"与"playing=true"同一次 UI 采样里成立（#88 的 300ms 假死窗口）。
+     * 暂停态（pwr=false）在 READY 即可发布：暂停进入循环也必须 claim=true。
+     */
+    fun shouldPublish(
+        playbackState: Int,
+        playWhenReady: Boolean,
+        isPlaying: Boolean,
+        force: Boolean,
+    ): Boolean {
+        if (force) return true
+        if (playbackState == Player.STATE_ENDED) return true
+        if (playbackState != Player.STATE_READY) return false
+        return isPlaying || !playWhenReady
     }
 }

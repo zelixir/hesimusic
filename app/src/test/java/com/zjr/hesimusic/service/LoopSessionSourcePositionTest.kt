@@ -109,6 +109,29 @@ class LoopSessionSourcePositionTest {
     }
 
     @Test
+    fun `tail seeks past B map to the tail band and report tail`() {
+        val durUs = 90_828_000L
+        val b = bMs * 1_000L
+        for (displayUs in listOf(b + 1_000L, b + 5_000_000L, durUs - 1_000_000L)) {
+            val t = LoopSessionProjection.sourceTimelineUsForDisplay(
+                displayUs = displayUs,
+                currentTimelineUs = 30_000_000L,
+                window = window,
+                fullDurationUs = durUs,
+            )
+            assertTrue(
+                "displayUs=$displayUs must map to the tail band, got T=$t",
+                t >= LoopWholeTimeline.TAIL_BASE_US,
+            )
+            assertEquals(
+                "displayUs=$displayUs",
+                LoopPhase.TAIL,
+                LoopPhase.ofDisplayUs(displayUs, window),
+            )
+        }
+    }
+
+    @Test
     fun `phase follows display position`() {
         assertEquals(LoopPhase.PRELUDE, LoopSessionProjection.phaseOf(5_000_000L, window))
         assertEquals(LoopPhase.LOOP, LoopSessionProjection.phaseOf(12_000_000L, window))
