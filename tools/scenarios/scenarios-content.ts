@@ -48,8 +48,30 @@ import { check, pendingCheck, round, sleep, waitFor } from "./harness";
 import type { Check, SongInfo } from "./harness";
 import { createProber, defaultWorkDir, PEAK_MATCH } from "./content-probe";
 import type { ProbeResult, ProbeStack, TapCapture } from "./content-probe";
-import { SkipError } from "./scenarios";
 import type { Scenario, ScenarioCtx } from "./scenarios";
+
+/**
+ * SkipError 必须在**运行时**取，不能在模块初始化期 import。
+ *
+ * scenarios.ts -> (import CONTENT_SCENARIOS) -> scenarios-content.ts -> (import SkipError) -> scenarios.ts
+ * 是一条循环依赖：入口是 scenarios-content 时，scenarios.ts 会在本模块还没求值完就开始展开
+ * CONTENT_SCENARIOS，命中 TDZ（"Cannot access before initialization"）。所以这里改成懒取，
+ * 保证 instanceof 用的仍然是 scenarios.ts 里那**同一个** SkipError 类。
+ */
+let skipErrorCtor: (new (message: string) => Error) | null = null;
+
+function skipCtor(): new (message: string) => Error {
+  if (!skipErrorCtor) {
+    const mod: any = require("./scenarios");
+    skipErrorCtor = mod.SkipError as new (message: string) => Error;
+  }
+  return skipErrorCtor!;
+}
+
+function newSkipError(message: string): Error {
+  const Ctor = skipCtor();
+  return new Ctor(message);
+}
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -103,7 +125,7 @@ async function selectContentSong(
     if (narrowed.length > 0) cands = narrowed;
   }
   if (cands.length === 0) {
-    throw new SkipError(
+    throw newSkipError(
       "曲库里没有合适的已确认循环歌（需要 A>=" + minA + "ms、环长>=" + minBand + "ms、B 距文件尾 >3s、" +
         "mp3/wav/m4a 等可解码格式）",
     );
@@ -171,7 +193,7 @@ async function openLoopOnly(ctx: ScenarioCtx, song: SongInfo): Promise<ContentLo
   await ctx.ensureLoopPage(song.id);
   const labels = ctx.uiLabels();
   if (labels.length > 0 && !labels.includes("仅循环段")) {
-    throw new SkipError("结果页没有「仅循环段」按钮（现有文本: " + labels.slice(0, 16).join(" | ") + "）");
+    throw newSkipError("结果页没有「仅循环段」按钮（现有文本: " + labels.slice(0, 16).join(" | ") + "）");
   }
   await ctx.uiTap("仅循环段");
   const ready = await waitFor(
@@ -180,19 +202,19 @@ async function openLoopOnly(ctx: ScenarioCtx, song: SongInfo): Promise<ContentLo
     9000,
     100,
   );
-  if (!ready.ok || !ready.value) throw new SkipError("结果页「仅循环段」9s 内未起播");
+  if (!ready.ok || !ready.value) throw newSkipError("结果页「仅循环段」9s 内未起播");
   const snap = ready.value;
   if (snap.engine !== "SOURCE") {
-    throw new SkipError("预览引擎不是 SOURCE(engine=" + snap.engine + ")：内容真值需要 tap 挂在 SOURCE sink 上");
+    throw newSkipError("预览引擎不是 SOURCE(engine=" + snap.engine + ")：内容真值需要 tap 挂在 SOURCE sink 上");
   }
   const info = await ctx.api.song(song.id);
   const aMs = Math.round(Number(info.loopStartMs));
   const bMs = Math.round(Number(info.loopEndMs));
   const durationMs = Number(info.durationMs);
   const L = bMs - aMs;
-  if (!(L > 0)) throw new SkipError("环带长度非法: A=" + aMs + " B=" + bMs);
+  if (!(L > 0)) throw newSkipError("环带长度非法: A=" + aMs + " B=" + bMs);
   const songPath = String(info.path ?? song.path ?? "");
-  if (!songPath) throw new SkipError("拿不到歌曲文件路径(无法用 decode-range 解参考 PCM)");
+  if (!songPath) throw newSkipError("拿不到歌曲文件路径(无法用 decode-range 解参考 PCM)");
   const sampleRate = Number(info.sampleRate ?? ctx.sampleRateFor(song.id)) || 44100;
   ctx.evidence.step("open-loop-only", { songId: song.id, aMs, bMs, L, durationMs, sampleRate, songPath });
   ctx.log("环带: " + songPath + "  A=" + aMs + " B=" + bMs + " L=" + round(L / 1000, 1) + "s sr=" + sampleRate);
@@ -270,7 +292,7 @@ async function probeAt(
   });
   const displayRef = capture.displayRef?.displayMs;
   if (displayRef == null) {
-    throw new SkipError("抓取期间没有 display 采样(" + capture.displaySource + ")，无法定位期望内容");
+    throw newSkipError("抓取期间没有 display 采样(" + capture.displaySource + ")，无法定位期望内容");
   }
   const expected = displayRef + opts.offsetMs;
   const result = await stack.truth.probeCapture(capture, {
@@ -475,7 +497,7 @@ const s20: Scenario = {
     const song = await selectContentSong(ctx, { minBandMs: 12000 });
     const stack = stackFor(ctx);
     const li = await openLoopOnly(ctx, song);
-    if (li.L < 6000) throw new SkipError("环带只有 " + li.L + "ms，B-5s 会落到 A 之前");
+    if (li.L < 6000) throw newSkipError("环带只有 " + li.L + "ms，B-5s 会落到 A 之前");
     const cal = await calibrate(ctx, stack, li, { label: "环带中段基线" });
     checks.push(...cal.checks);
     const offset = cal.offsetMs;
@@ -553,7 +575,7 @@ const s21: Scenario = {
     const song = await selectContentSong(ctx, { minBandMs: 10000 });
     const stack = stackFor(ctx);
     const li = await openLoopOnly(ctx, song);
-    if (li.L < 4000) throw new SkipError("环带只有 " + li.L + "ms，B-1s 太贴近 A");
+    if (li.L < 4000) throw newSkipError("环带只有 " + li.L + "ms，B-1s 太贴近 A");
     const cal = await calibrate(ctx, stack, li, { label: "基线" });
     checks.push(...cal.checks);
     const offset = cal.offsetMs;
@@ -615,7 +637,7 @@ const s22: Scenario = {
     const song = await selectContentSong(ctx, { minBandMs: 8000, maxBandMs: 25000 });
     const stack = stackFor(ctx);
     const li = await openLoopOnly(ctx, song);
-    if (li.L > 40000) throw new SkipError("最短可用环带仍为 " + round(li.L / 1000, 1) + "s，整圈场景太慢");
+    if (li.L > 40000) throw newSkipError("最短可用环带仍为 " + round(li.L / 1000, 1) + "s，整圈场景太慢");
 
     const cal = await calibrate(ctx, stack, li, { label: "基线" });
     checks.push(...cal.checks);
@@ -859,7 +881,7 @@ const s25: Scenario = {
     const aMs = Math.round(Number(info.loopStartMs));
     const bMs = Math.round(Number(info.loopEndMs));
     const durationMs = Number(info.durationMs);
-    if (aMs <= 300) throw new SkipError("这首歌 A=" + aMs + "ms 贴近 0，进度归零判据无意义");
+    if (aMs <= 300) throw newSkipError("这首歌 A=" + aMs + "ms 贴近 0，进度归零判据无意义");
 
     await ctx.resetForMain();
     const play = await ctx.api.post("/player/play", { songId: song.id, repeatOne: false });
@@ -1010,14 +1032,14 @@ const s26: Scenario = {
     // 00027 现场用的就是 #41126（Shiny Up, A=23301 B=261457，整窗 42MB）：有它就优先用它，
     // 这样这条场景和 issue 里的复现口径一致；没有才退化为"最长的已确认循环歌"。
     const pinned = cands.find((s) => s.id === 41126);
-    if (cands.length === 0) throw new SkipError("曲库没有环带 >=120s 的已确认循环歌（无法构造回退场景）");
+    if (cands.length === 0) throw newSkipError("曲库没有环带 >=120s 的已确认循环歌（无法构造回退场景）");
     const song = pinned ?? cands[0];
     const info = await ctx.api.song(song.id);
     const aMs = Math.round(Number(info.loopStartMs));
     const bMs = Math.round(Number(info.loopEndMs));
     const songPath = String(info.path ?? "");
     const L = bMs - aMs;
-    if (!songPath) throw new SkipError("拿不到歌曲路径");
+    if (!songPath) throw newSkipError("拿不到歌曲路径");
     const mem = await ctx.adb.meminfo(ctx.cfg.pkg);
     const windowMb = ((L / 1000) * 44100 * 2 * 2) / 1048576;
     ctx.log(
@@ -1164,7 +1186,44 @@ const s26: Scenario = {
 // 导出（由 lead 合并注册；id/key 与 scenarios.ts 保持同一套口径）
 // ---------------------------------------------------------------------------
 
-export const CONTENT_SCENARIOS: Scenario[] = [s20, s21, s22, s23, s24, s25, s26];
+/**
+ * 把「能力未落地」类的 SKIP 降级成 PENDING。
+ *
+ * run-scenarios 的 previewSeek 在两种情况下抛 SkipError：
+ * - 409 预览 seek 桥未注册（FULL(A>0) 走 M3 时没有 SOURCE seek 桥）；
+ * - 预览引擎不是 SOURCE。
+ * 这两条是**待实现能力**，不是环境问题：SKIP 会在报告里被当成"没跑"，
+ * 而 PENDING 会进「待落地依赖」一节，修复后自动变严。其余 SKIP（没歌/没按钮）保持 SKIP。
+ */
+const SEEK_CAPABILITY_SKIP = /seek 桥|预览引擎不是 SOURCE|没有 POST \/debug\/preview-seek/;
+
+function withSeekPendingFallback(s: Scenario): Scenario {
+  return {
+    ...s,
+    async run(ctx) {
+      try {
+        return await s.run(ctx);
+      } catch (e) {
+        if (e instanceof skipCtor() && SEEK_CAPABILITY_SKIP.test(e.message)) {
+          return {
+            checks: [
+              pendingCheck(
+                "预览 seek 能力(M3/FULL 无 seek 桥)",
+                e.message,
+                "preview-seek-m3",
+                "FULL(A>0) 在 M3 上不注册 seek 桥：内容真值需要 SOURCE 或等 M3 seek 实现；不算 FAIL",
+              ),
+            ],
+            summary: "PENDING: " + e.message,
+          };
+        }
+        throw e;
+      }
+    },
+  };
+}
+
+export const CONTENT_SCENARIOS: Scenario[] = [s20, s21, s22, s23, s24, s25, s26].map(withSeekPendingFallback);
 
 /** 内容真值场景依赖 uiautomator + 预览页（--skip-ui 时应整组跳过）。 */
 export const CONTENT_SCENARIO_IDS = CONTENT_SCENARIOS.map((s) => s.id);
