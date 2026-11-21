@@ -222,10 +222,9 @@ object LoopDebugServer {
                     // 兼容旧字段：display 是否应该折返，以 claim 真值为准（不是 window 非空）。
                     "sourceAvailable" to claimFields.sourceActive,
                     "sourceUnavailable" to sourceUnavailable,
-                    "fallbackReason" to (
-                        claimFields.claimReason
-                            ?: LoopSourceFallback.latestReason()?.logName
-                        ),
+                    // 主字段只报当前 claim 的 per-song 原因，避免上一首的原因串到当前歌。
+                    "fallbackReason" to claimFields.claimReason,
+                    "latestFallbackReason" to LoopSourceFallback.latestReason()?.logName,
                     "bandBytes" to LoopEngineInfo.lastRecordedBandBytes(),
                     "budgetBytes" to RingBandSource.budgetBytes(
                         Runtime.getRuntime().maxMemory(),
