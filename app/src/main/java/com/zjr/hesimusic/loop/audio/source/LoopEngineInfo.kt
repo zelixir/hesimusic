@@ -8,8 +8,9 @@ import com.zjr.hesimusic.service.LoopSourceRuntime
 /**
  * 运行时引擎标识，供 About 页面/日志显示。
  *
- * 纯判定集中在 [of]，不依赖 Android；[current] 只负责刷新两个持久化开关并读取
- * [LoopSourceFallback] 的最近回退原因。
+ * 纯判定集中在 [of]，不依赖 Android；[current] 负责刷新两个持久化开关，并读取
+ * [com.zjr.hesimusic.service.LoopClaimStore] 的 claim 真值（源是否真的在环回）与
+ * per-song 回退原因。
  */
 data class LoopEngineInfo(
     val engine: String,
@@ -86,8 +87,9 @@ data class LoopEngineInfo(
         }
 
         /**
-         * 纯判定：只有 [claimActive]（源真的在环回）才可能显示 source/m3；
-         * 回退或没有活动 claim → [ENGINE_NONE] + [PATH_NONE]（普通播放）。
+         * 纯判定：有明确 claim 证据时，只有 [claimActive]（源真的在环回）才显示 source/m3；
+         * 回退或 claimActive=false → [ENGINE_NONE] + [PATH_NONE]（普通播放）。
+         * [claimActive]=null 表示空闲/无证据，维持“按配置显示引擎”的旧行为。
          */
         fun of(
             sourceMode: Boolean,
