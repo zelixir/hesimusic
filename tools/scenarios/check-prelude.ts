@@ -61,6 +61,8 @@ interface ValidateInput {
   uiIds: number[];
   source: string;
   mainScenarios: { id: number; key: string }[];
+  /** 真实运行时为 true：合并后的注册表含本组，比较冲突要排除自身 id。 */
+  excludeOwnIds?: boolean;
   /** 规则自测的坏 fixture 不声明全量覆盖，跳过覆盖矩阵检查。 */
   skipCoverage?: boolean;
 }
@@ -92,7 +94,11 @@ function validate(input: ValidateInput): { issues: Issue[]; rows: Row[]; expecte
   const warn = (code: string, subject: string, detail: string) => issues.push({ level: "WARN", code, subject, detail });
 
   const mainIds = new Map<number, string>();
-  for (const s of input.mainScenarios) mainIds.set(Number(s.id), String(s.key));
+  // 合并后 SCENARIOS 里也包含本组自己，比较冲突时要排除自身 id（否则永远自撞）。
+  const ownIds = input.excludeOwnIds ? new Set(input.scenarios.map((s) => Number(s.id))) : new Set<number>();
+  for (const s of input.mainScenarios) {
+    if (!ownIds.has(Number(s.id))) mainIds.set(Number(s.id), String(s.key));
+  }
 
   if (input.scenarios.length === 0) fail("empty", "-", "PRELUDE_SCENARIOS 为空");
   if (input.scenarios.length > ID_MAX - ID_MIN + 1) {
@@ -1049,6 +1055,7 @@ async function main(): Promise<number> {
     uiIds: PRELUDE_UI_SCENARIO_IDS,
     source,
     mainScenarios: SCENARIOS.map((s) => ({ id: Number(s.id), key: String(s.key) })),
+    excludeOwnIds: true,
   });
 
   printTable(rows);
@@ -1071,3 +1078,4 @@ main()
     if (e?.stack) console.error(String(e.stack).split("\n").slice(0, 6).join("\n"));
     process.exit(2);
   });
+
