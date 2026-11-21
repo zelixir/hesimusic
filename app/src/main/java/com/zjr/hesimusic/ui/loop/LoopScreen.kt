@@ -1,5 +1,8 @@
 package com.zjr.hesimusic.ui.loop
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.Bitmap
 import android.graphics.Paint
 import android.graphics.Typeface
@@ -103,6 +106,9 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.zjr.hesimusic.data.model.Song
 import kotlinx.coroutines.delay
 import com.zjr.hesimusic.loop.analysis.WaveformPeaks
@@ -138,6 +144,21 @@ private fun loopRatioColor(ratio: Float): Color = when {
     ratio >= 0.8f -> Color(0xFF3FB950)
     ratio >= 0.5f -> Color(0xFFD29922)
     else -> Color(0xFFF85149)
+}
+
+/**
+ * 取承载本组合的 Activity(穿过 ContextThemeWrapper/ContextWrapper 链)。
+ *
+ * 配置变更重建判定要用 `Activity.isChangingConfigurations()`(场景 #45);
+ * 拿不到时按"真正离开"处理(释放预览),保持旧行为不泄漏播放器。
+ */
+private fun Context.hostActivityOrNull(): Activity? {
+    var current: Context? = this
+    while (current != null) {
+        if (current is Activity) return current
+        current = (current as? ContextWrapper)?.baseContext
+    }
+    return null
 }
 
 /** 时间显示 mm:ss.SSS(契约 §2.3,毫秒精度便于 A/B 微调)。 */
@@ -189,18 +210,49 @@ fun LoopScreen(
     }
 
     // 进入页面即暂停主播放(不改变队列/repeat;契约 §2.1 / §2.5)。
-    LaunchedEffect(Unit) { musicViewModel.pause() }
+    // **只在首次进入**时暂停:配置变更重建(旋转/分屏/深色模式/字体缩放)再 pause 一次,
+    // 主播放的暂停会透传到进程级 SOURCE 闸门,把正在播放的预览数据源一起停住(场景 #45)。
+    // onHostCreated() 同时负责重建后的预览恢复(常规路径只重挂探针、不 seek)。
+    LaunchedEffect(Unit) {
+        if (viewModel.onHostCreated()) musicViewModel.pause()
+    }
 
     // effect NavigateBack(含删除持久化成功)统一从这里回到上一页。
     LaunchedEffect(Unit) {
         viewModel.backRequests.collect { currentOnBack() }
     }
 
-    // 离开页面:释放预览 → 若只是预览则恢复主播放(原歌原位);保存路径由回调接管。
-    DisposableEffect(Unit) {
+    // 宿主销毁/离开页面:只有**真正离开**才释放预览并恢复主播放(原歌原位)。
+    //
+    // 旋转/分屏/深色模式/字体缩放在未声明 configChanges 的 Activity 上都会重建宿主,
+    // 此时 Activity.isChangingConfigurations() == true:预览播放器由 ViewModel 持有、
+    // 必须原样活着(位置连续、probe 不 detach)。旧实现无条件 release 会让重建后的页面
+    // 永远没有 player、probe 也 detach → /debug/preview 恒 409 "preview probe not attached",
+    // 且页面状态仍是 Ready 不会重新 prepare(场景 #45)。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val hostActivity = remember(context) { context.hostActivityOrNull() }
+    DisposableEffect(lifecycleOwner) {
+        var handled = false
+        fun onHostGoingAway() {
+            // ON_DESTROY 与 onDispose 可能都到(Activity 结束 vs 组合回收):每任宿主只决策一次。
+            if (handled) return
+            handled = true
+            val changingConfigurations = hostActivity?.isChangingConfigurations == true
+            if (viewModel.onHostDestroyed(changingConfigurations) ==
+                PreviewHostDestroyAction.RELEASE_AND_RESUME
+            ) {
+                if (!viewModel.savedAndPlayed) musicViewModel.resume()
+            }
+        }
+        // Activity 真正结束时组合也可能先被回收;lifecycleOwner 可能是 NavBackStackEntry,
+        // 两种时机都接到同一个幂等处理上。
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_DESTROY) onHostGoingAway()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
-            viewModel.releasePreview()
-            if (!viewModel.savedAndPlayed) musicViewModel.resume()
+            onHostGoingAway()
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 

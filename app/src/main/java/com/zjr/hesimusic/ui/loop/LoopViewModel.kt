@@ -238,6 +238,22 @@ class LoopViewModel @Inject constructor(
 
     private val dispatchLock = Any()
 
+    // ---- 宿主(Activity/composition)生命周期(场景 #45) ----
+    // 预览播放器属于本 ViewModel(跨配置变更存活):旋转/分屏/深色/字体缩放重建宿主时
+    // 绝不能 release,否则重建后 player 为空、probe 已 detach、页面还是 Ready 不再 prepare。
+    // 释放走完整的 releasePreview()(取消预填 + 释放播放器),只在真正离开页面时发生。
+    private val previewHost = PreviewHostLifecycle(
+        object : PreviewHostTarget {
+            override val isPrepared: Boolean get() = previewPlayer.isPrepared
+            override val songId: Long? get() = previewPlayer.songId
+            override fun attachProbe() = previewPlayer.attachProbe()
+            override fun release() = releasePreview()
+        },
+    )
+
+    /** 本 ViewModel 是否已经被某一任宿主接管过(用于区分"首次进页"与"配置变更重建")。 */
+    private var hostEntered = false
+
     private val effectRunner = LoopPageEffectRunner(object : LoopPageEffectHost {
 
         override fun play(mode: LoopPageMode, startMs: Long, seek: Boolean) {
@@ -976,6 +992,101 @@ class LoopViewModel @Inject constructor(
 
     private fun currentPositionMs(): Long =
         (_pageState.value as? LoopPageState.Ready)?.positionMs ?: 0L
+
+    // ------------------------------------------------------------------ 宿主重建(场景 #45)
+
+    /**
+     * 新宿主(Activity/composition)首帧调用;旋转/分屏/深色模式/字体缩放重建后也走这里。
+     *
+     * 常规路径(播放器还活着)只重新挂探针、**不 seek 不重建** —— 位置连续;
+     * 只有播放器在重建中丢过(旧 release 路径/异常)才按页面位置兜底重建。
+     *
+     * @return true = 本页面的**首次**进入(调用方据此暂停主播放);
+     *   false = 配置变更重建。这里**不能**再暂停主播放:主播放的 pause 会透传到
+     *   进程级 SOURCE 闸门,把正在播放的预览数据源一起停住(没声)。
+     */
+    fun onHostCreated(): Boolean {
+        val first = !hostEntered
+        hostEntered = true
+        val ready = _pageState.value as? LoopPageState.Ready
+        val song = _song.value
+        val action = previewHost.onHostCreated(
+            pageReady = ready != null,
+            pageSongId = song?.id,
+        )
+        Log.i(
+            TAG,
+            "host created gen=" + previewHost.generation + " action=" + action +
+                " first=" + first + " prepared=" + previewPlayer.isPrepared +
+                " song=" + song?.id +
+                " page=" + (ready?.let { it.mode.name + "@" + it.positionMs }),
+        )
+        if (action != PreviewHostCreateAction.NONE && ready != null && song != null) {
+            restorePreviewAfterHostRecreate(
+                ready = ready,
+                song = song,
+                rebuildPlayer = action == PreviewHostCreateAction.RESTORE_FROM_PAGE_STATE,
+            )
+        }
+        return first
+    }
+
+    /**
+     * 宿主销毁/组合销毁时调用。
+     *
+     * 配置变更重建 → [PreviewHostDestroyAction.KEEP_ALIVE]:播放器原样保留,调用方
+     * **不要**恢复主播放;真正离开页面 → [PreviewHostDestroyAction.RELEASE_AND_RESUME]:
+     * 释放预览,调用方按原逻辑恢复主播放。
+     */
+    fun onHostDestroyed(isChangingConfigurations: Boolean): PreviewHostDestroyAction {
+        val preparedBefore = previewPlayer.isPrepared
+        val songBefore = previewPlayer.songId
+        // 状态机内部落地:重建 → 重挂探针;真正离开 → releasePreview()。
+        val action = previewHost.onHostDestroyed(isChangingConfigurations)
+        Log.i(
+            TAG,
+            "host destroyed changingConfigurations=" + isChangingConfigurations +
+                " action=" + action + " gen=" + previewHost.generation +
+                " prepared(before)=" + preparedBefore + " song(before)=" + songBefore,
+        )
+        return action
+    }
+
+    /**
+     * 重建后的预览恢复:
+     * - 播放器还活着(REATTACH_ONLY):只对齐展示位置/必要时恢复播放,**不 seek、不重建**;
+     * - 播放器丢过(RESTORE_FROM_PAGE_STATE):按页面位置从**页面当前位置**续上,绝不回到 A。
+     */
+    private fun restorePreviewAfterHostRecreate(
+        ready: LoopPageState.Ready,
+        song: Song,
+        rebuildPlayer: Boolean,
+    ) {
+        val previewMode = ready.mode.toPreviewMode()
+        val restoreMs = PreviewHostLifecyclePolicy.restoreDisplayMs(
+            pagePositionMs = ready.positionMs,
+            durationMs = ready.durationMs,
+        )
+        if (rebuildPlayer && !ensurePreview(song)) return
+        val playing = ready.playback is PlaybackState.Playing ||
+            ready.playback is PlaybackState.AwaitingPrefill
+        val ok = previewPlayer.resumeAfterHostRecreate(
+            songId = song.id,
+            mode = previewMode,
+            displayMs = restoreMs,
+            playing = playing,
+            freeAudition = ready.auditionOutside,
+        )
+        if (!ok) return
+        anchorMs = restoreMs
+        anchorElapsedRealtime = SystemClock.elapsedRealtime()
+        Log.i(
+            TAG,
+            "host recreate -> restored preview song=" + song.id + " mode=" + previewMode +
+                " pos=" + restoreMs + " playing=" + playing +
+                " freeAudition=" + ready.auditionOutside,
+        )
+    }
 
     // ------------------------------------------------------------------ 释放 / 提示
 

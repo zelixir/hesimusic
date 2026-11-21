@@ -86,7 +86,7 @@ enum class PreviewMode(val label: String) {
 class PreviewPlayer @Inject constructor(
     @ApplicationContext private val context: Context,
     private val pcmDecoder: PcmDecoder,
-) {
+) : PreviewHostTarget {
 
     companion object {
         private const val TAG = "LoopPreview"
@@ -114,6 +114,8 @@ class PreviewPlayer @Inject constructor(
         LoopSourceMode.refreshFromSettings(context)
         LoopSourcePipeline.refreshFromSettings(context)
         // 量测探针：debug 端点读当前页面这一份预览播放器（release 不编译 debug 端点，这里只是挂引用）。
+        // 只有真正的 release() 才 detach；配置变更(旋转/分屏/深色/字体)重建宿主时保留引用,
+        // 新宿主首帧再走 [attachProbe] 幂等重挂(场景 #45)。
         PreviewProbe.attach(this)
     }
 
@@ -238,14 +240,14 @@ class PreviewPlayer @Inject constructor(
     val error: StateFlow<String?> = _error.asStateFlow()
 
     /** 窗口/歌曲已写入（播放器可延迟到 play 时按模式创建）。 */
-    val isPrepared: Boolean
+    override val isPrepared: Boolean
         get() = prepared && song != null
 
     /** 实际 ExoPlayer 是否已创建（M3′ 预填延迟判据）。 */
     val hasPlayer: Boolean
         get() = player != null
 
-    val songId: Long?
+    override val songId: Long?
         get() = song?.id
 
     // ------------------------------------------------------------------ API
@@ -854,8 +856,80 @@ class PreviewPlayer @Inject constructor(
         updatePositionOnce()
     }
 
-    /** 释放预览播放器与音频控制器(退出页面/确认保存时调用,幂等)。 */
-    fun release() {
+    /**
+     * 重新把本实例挂到 [PreviewProbe](幂等)。
+     *
+     * 背景(场景 #45):旋转/分屏/深色模式/字体缩放在未声明 `configChanges` 的 Activity 上
+     * 都会重建宿主;预览播放器由 ViewModel 持有、跨重建存活,但探针引用**必须**重新挂到
+     * 它身上,否则 `/debug/preview` 恒 409 "preview probe not attached"。
+     *
+     * 顺便自愈 SOURCE 闸门:重建期间主播放的 pause 可能透传到进程级 [LoopSourcePauseGate],
+     * 让预览的数据源不再读(播放器还"在播"却没 PCM = 没声);预览播放意图仍是播放时把闸门打开。
+     */
+    override fun attachProbe() {
+        PreviewProbe.attach(this)
+        val p = player ?: return
+        if (p.playWhenReady && engineKind == EngineKind.SOURCE) {
+            LoopSourcePauseGate.resume()
+        }
+    }
+
+    /**
+     * 宿主重建(旋转/分屏/深色模式/字体缩放)后恢复预览现场(场景 #45)。
+     *
+     * - 播放器实例还在(常规路径):**不 seek、不重建**,只对齐展示位置 —— 位置连续;
+     * - 播放器在重建中丢了(旧 release 路径/异常):按页面位置 [displayMs](不是 A)
+     *   重建并续播/待播。
+     *
+     * 之所以坚持"同一个 SOURCE ExoPlayer 实例":controller / AudioSink tap / seek 调试桥
+     * 都是按实例注册的,重建实例会丢帧计数与 seek 桥;跨配置变更保住实例,这些口径才连续。
+     *
+     * @return true = 预览可继续使用(已 prepare)。
+     */
+    fun resumeAfterHostRecreate(
+        songId: Long,
+        mode: PreviewMode,
+        displayMs: Long,
+        playing: Boolean,
+        freeAudition: Boolean,
+    ): Boolean {
+        PreviewProbe.attach(this)
+        val current = song ?: return false
+        if (!prepared || current.id != songId) return false
+        this.mode = mode
+        val target = displayMs.coerceAtLeast(0L)
+        val p = player
+        if (p != null) {
+            // 常规路径:播放器/位置/controller/环带源都还在 —— 什么都不重建。
+            if (playing && !p.playWhenReady && p.playbackState != Player.STATE_ENDED) {
+                // 页面口径是"在播"但播放器被暂停(重建期间的 stray pause):恢复播放,不 seek。
+                if (engineKind == EngineKind.SOURCE) LoopSourcePauseGate.resume()
+                p.play()
+            }
+            updatePositionOnce()
+            Log.d(
+                TAG,
+                "host recreate -> reuse player pos=" + p.currentPosition + "ms target=" + target +
+                    "ms playing=" + playing + " mode=" + mode,
+            )
+            return true
+        }
+        if (playing) {
+            // 兜底:播放器已释放,按页面位置重建(play 内部按 SOURCE/M3′ 换算落点)。
+            Log.i(TAG, "host recreate -> rebuild player from page pos=" + target + "ms mode=" + mode)
+            play(mode, target, freeAudition)
+        } else {
+            // 暂停态:只记录待播位置,播放器仍按需在下次 play 时创建。
+            pendingSeekMs = target
+            _positionMs.value = target
+            _isPlaying.value = false
+            Log.i(TAG, "host recreate -> keep paused pos=" + target + "ms (player lazily rebuilt)")
+        }
+        return true
+    }
+
+    /** 释放预览播放器与音频控制器(退出页面/确认保存时调用,幂等;仅真正离开时走)。 */
+    override fun release() {
         PreviewProbe.detach(this)
         releasePlayerOnly()
         handler.removeCallbacks(ticker)
