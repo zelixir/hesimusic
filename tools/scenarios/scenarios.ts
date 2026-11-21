@@ -44,6 +44,10 @@ export interface PreviewSeekResult {
   via: "endpoint" | "snapshot";
   applyMs: number | null;
   advanceMs: number | null;
+  /** 逐段耗时(请求→apply→extractorSeek→firstBuffer→sinkPlay→ready→playout)。 */
+  stages: any | null;
+  /** stages.playoutMs = AudioTrack 播放头真正开始走(可靠的“出声”时间)。 */
+  playoutMs: number | null;
   latencyToFramesMs: number | null;
   framesDelta: number;
   displayAfterMs: number | null;
@@ -862,7 +866,8 @@ const s10: Scenario = {
       const r = await ctx.previewSeek(target);
       ctx.evidence.step("seek-" + i, { target, ...r });
       const apply = r.applyMs ?? 9999;
-      const audibleLatency = r.advanceMs ?? r.latencyToFramesMs ?? apply;
+      // stages.playoutMs 是 AudioTrack 播放头真正开始走(可靠)；advanceMs 在旧包/seek 未确认时会提前满足。
+      const audibleLatency = r.playoutMs ?? r.advanceMs ?? r.latencyToFramesMs ?? apply;
       maxApply = Math.max(maxApply, apply);
       minFrames = Math.min(minFrames, r.framesDelta);
       lastDisplay = r.displayAfterMs;
@@ -877,18 +882,18 @@ const s10: Scenario = {
       );
       // 出声延迟含 media3 seek 的 sink flush + AudioTrack 重启(原生成本)；未落地 jump-fill 前标 PENDING。
       if (audibleLatency <= 100) {
-        checks.push(check("第 " + i + " 次 seek 出声 ≤100ms", true, "advance=" + audibleLatency + "ms"));
+        checks.push(check("第 " + i + " 次 seek 出声 ≤100ms", true, "playout=" + audibleLatency + "ms"));
       } else if (audibleLatency <= 300) {
         checks.push(
           pendingCheck(
             "第 " + i + " 次 seek 出声 ≤100ms",
-            "advance=" + audibleLatency + "ms (AUDIBLE_NATIVE_COST, 依赖 jump-fill/media3 原生成本)",
+            "playout=" + audibleLatency + "ms (AUDIBLE_NATIVE_COST, 依赖 jump-fill/media3 原生成本)",
             "jump-fill/media3-native-cost",
             "与场景 18(普通播放 seek 对照)比较;若同级则是原生成本,不是环带额外开销",
           ),
         );
       } else {
-        checks.push(check("第 " + i + " 次 seek 出声 ≤100ms", false, "advance=" + audibleLatency + "ms (>300ms)"));
+        checks.push(check("第 " + i + " 次 seek 出声 ≤100ms", false, "playout=" + audibleLatency + "ms (>300ms)"));
       }
       checks.push(check("第 " + i + " 次 seek 位置对", posOk, "target=" + target + " display=" + r.displayAfterMs));
       checks.push(check("第 " + i + " 次 seek 有输出", r.framesDelta > 0, "framesΔ=" + r.framesDelta));
@@ -1278,10 +1283,37 @@ const s16: Scenario = {
     const a = Number(info.loopStartMs);
     await ctx.resetForMain();
     await sleep(500);
+    const scenarioT0 = Date.now();
     const mem0 = await ctx.adb.meminfo(ctx.cfg.pkg);
     ctx.evidence.step("memory-before", mem0);
+    const heapSeries: { atMs: number; phase: string; javaHeapKb: number | null; totalPssKb: number | null }[] = [
+      { atMs: 0, phase: "start", javaHeapKb: mem0.javaHeapKb, totalPssKb: mem0.totalPssKb },
+    ];
+    // 连跑期间每 30s 采一次 meminfo（与场景动作并发，但 adb 串行，不会出现并发 adb 命令）。
+    let sampling = true;
+    const sampler = (async () => {
+      while (sampling) {
+        // 分段睡眠：场景提前结束时最多 500ms 就能退出，不会把收尾拖 30s。
+        for (let waited = 0; waited < 30000 && sampling; waited += 500) {
+          await sleep(500);
+        }
+        if (!sampling) break;
+        try {
+          const m = await ctx.adb.meminfo(ctx.cfg.pkg);
+          heapSeries.push({
+            atMs: Date.now() - scenarioT0,
+            phase: "30s",
+            javaHeapKb: m.javaHeapKb,
+            totalPssKb: m.totalPssKb,
+          });
+        } catch {
+          // 单次采样失败不终止场景
+        }
+      }
+    })();
     const rounds: any[] = [];
     let audibleFail = 0;
+    try {
     for (let round = 1; round <= 3; round++) {
       if (round > 1) await ctx.resetForMain();
       const t0 = Date.now();
@@ -1316,7 +1348,17 @@ const s16: Scenario = {
       const st = await ctx.api.state();
       const invariants = (st.invariants ?? []).map((i: any) => ({ code: i.code, count: i.count }));
       rounds.push({ round, ms: Date.now() - t0, audible: audible.ratio, previewAudio: previewAudio.ratio, mem, pid, invariants });
+      heapSeries.push({
+        atMs: Date.now() - scenarioT0,
+        phase: "round-" + round,
+        javaHeapKb: mem.javaHeapKb,
+        totalPssKb: mem.totalPssKb,
+      });
       ctx.evidence.step("round-" + round, { ms: Date.now() - t0, audible: audible.ratio, preview: previewAudio.ratio, javaHeapKb: mem.javaHeapKb, totalPssKb: mem.totalPssKb, pid });
+    }
+    } finally {
+      sampling = false;
+      await sampler;
     }
     const pids = rounds.map((r) => r.pid);
     checks.push(check("三轮进程存活", pids.every((p) => p !== null) && new Set(pids).size === 1, "pid=" + pids.join(",")));
@@ -1335,10 +1377,30 @@ const s16: Scenario = {
         !javaOk || !pssOk ? "三轮后堆增长超阈值;先看 GC 后是否回落,再看预览页是否每轮泄漏" : undefined,
       ),
     );
+    const validHeap = heapSeries.filter((s) => s.javaHeapKb != null);
+    let upStreak = 0;
+    let maxUpStreak = 0;
+    for (let i = 1; i < validHeap.length; i++) {
+      const diff = Number(validHeap[i].javaHeapKb) - Number(validHeap[i - 1].javaHeapKb);
+      if (diff > 4096) upStreak += 1;
+      else upStreak = 0;
+      maxUpStreak = Math.max(maxUpStreak, upStreak);
+    }
+    const curve = validHeap.map((s) => Math.round(Number(s.javaHeapKb) / 1024) + "MB").join("→");
+    const curveTimes = validHeap.map((s) => Math.round(s.atMs / 1000) + "s").join("→");
+    checks.push(
+      check(
+        "heap 30s 曲线无持续上升",
+        maxUpStreak < 3,
+        "Java Heap: " + curve + " (t=" + curveTimes + "); 连续上升段=" + maxUpStreak,
+        maxUpStreak >= 3 ? "连续 3 个采样点每次增长 >4MB:优先排查预览页/分析结果缓存泄漏" : undefined,
+      ),
+    );
+    ctx.evidence.step("heap-series", { series: heapSeries, curve, curveTimes });
     // 不变量由 runner 统一做「场景前后 code×count diff」；这里不再用"invariants 必须为空"误伤历史事件。
     return {
       checks,
-      summary: "3 rounds; JavaHeap " + java0 + "->" + javaN + "KB; pids=" + new Set(pids).size,
+      summary: "3 rounds; heap30s " + curve + "; pids=" + new Set(pids).size,
     };
   },
 };
@@ -1436,7 +1498,7 @@ const s18: Scenario = {
         r = await ctx.previewSeek(target);
       }
       const apply = r.applyMs ?? 9999;
-      const audible = r.advanceMs ?? r.latencyToFramesMs ?? apply;
+      const audible = r.playoutMs ?? r.advanceMs ?? r.latencyToFramesMs ?? apply;
       maxApply = Math.max(maxApply, apply);
       maxAudible = Math.max(maxAudible, audible);
       const posOk = r.displayAfterMs !== null && Math.abs(Number(r.displayAfterMs) - target) <= 1500;

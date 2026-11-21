@@ -122,14 +122,14 @@ powershell -NoProfile -File tools/scenarios/run-scenarios.ps1 --non-exclusive
 | 7 | 四种试听模式 | 依次点 完整循环/仅循环段/接缝检查/自由 | 每种都出声、位置对 | 模式切换后 8s 内 isPlaying；1.5s 出声 ≥80%；位置：FULL/FREE 从 0 起、LOOP_ONLY 从 A-300ms、SEAM 从 max(A,B-5s) 起 |
 | 8 | 播放中启动分析 | 播放中点 /analyze | 分析期间静音、位置不动；结束不崩 | 分析开始后 250ms 起测 1.5s：Δframes=0、位置变化 ≤250ms、playing=false；分析 phase=done；进程未重启 |
 | 9 | 分析完成 -> 点接缝检查 | 结果页点「接缝检查」 | ≤500ms 出声、位置=B-5s | 从 adb tap 返回到 outputFrames 首次增长 ≤500ms（20ms 轮询）；displayMs ≈ max(A,B-5s) ±1.2~3s；mode=SEAM |
-| 10 | 循环区内连续 5 次 seek | /debug/preview-seek 在 [A,B) 内取 5 个点 | 每次 ≤100ms 出声、不堆积 | applyMs ≤100ms；displayAfter=目标 ±1.5s；framesDelta>0；seekRequests 恰好 +5；**出声延迟**：≤100ms 通过，100~300ms 标 PENDING（依赖 jump-fill / media3 原生 seek 成本，明细带 AUDIBLE_NATIVE_COST），>300ms 失败 |
+| 10 | 循环区内连续 5 次 seek | /debug/preview-seek 在 [A,B) 内取 5 个点 | 每次 ≤100ms 出声、不堆积 | applyMs ≤100ms；displayAfter=目标 ±1.5s；framesDelta>0；seekRequests 恰好 +5；**出声延迟取 stages.playoutMs**（AudioTrack 播放头开始走；advanceMs 旧包会被“seek 未确认的旧位置”提前满足）：≤100ms 通过，100~300ms 标 PENDING（依赖 jump-fill / media3 原生 seek 成本，明细带 AUDIBLE_NATIVE_COST），>300ms 失败 |
 | 11 | 循环区外 seek | /debug/preview-seek 到 A-10s / B+10s | 允许、进入自由试听、落点不折返 | HTTP 200 + framesDelta>0；outsideLoop=true；displayAfter=目标 ±1s；windowA/B 不变 |
 | 18 | 普通播放(自由试听) 5 次 seek 对照 | 先区外 seek 进入自由试听（SOURCE 整曲、无环回），再 seek 5 次 | 量出 media3 原生 seek 成本用于对照场景 10 | applyMs ≤100ms；出声 ≤100ms 通过、100~300ms PENDING(media3-native-cost)、>300ms 失败；位置 ±1.5s；framesDelta>0 |
 | 12 | 播放中切到下一首 | /loop/enter{restart:true} 建队列后 /player/next | 新歌正常出声、循环标记不串歌 | 8s 内 songId 变化且 playing；1.8s 出声；window=null 或 window.songId≠新歌；engine≠loop |
 | 13 | 后台 -> 前台 | HOME；1.5s；am start 回前台 | 声音不断、位置连续 | 后台仍 playing、位置前进 ≥800ms、2s 出声；回前台位置不回跳 >1s、仍出声 |
 | 14 | 未确认循环进循环 | 对 unconfirmed 歌 /loop/enter | 不得进入循环（或提示）、不崩 | 3s 后 engine≠loop 且 window.songId≠该歌；进程存活 |
 | 15 | 极短窗口(A=B-3s)循环 | /confirm 落 3s 窗口；结果页「仅循环段」；采样 9s | 能循环、接缝无停顿 | 9s 内 display 回绕 ≥2 次；outputFrames 相邻 100ms 采样不间断（最长停顿 ≤300ms）；位置始终在 [A,B]；整体出声 ≥80%；结束时**恢复原 A/B** |
-| 16 | 全流程连跑 3 轮 | 每轮：播放→seek→进/出循环→暂停/继续→结果页试听→回列表 | 无内存增长、无不变量、不崩 | 三轮 pid 不变；每轮有输出；Java Heap 末轮 ≤ 首轮+16MB；PSS ≤ 首轮×1.15+30MB；无新增不变量 |
+| 16 | 全流程连跑 3 轮 | 每轮：播放→seek→进/出循环→暂停/继续→结果页试听→回列表；期间每 30s 采一次 meminfo | 无内存增长、无不变量、不崩、无 OOM | 三轮 pid 不变；每轮有输出；Java Heap 末轮 ≤ 首轮+16MB；PSS ≤ 首轮×1.15+30MB；**30s heap 曲线**连续上升段 <3；无新增不变量；无 OutOfMemoryError |
 | 17 | 循环中暂停 -> 继续 | 循环中 pause/resume（常识补充） | 暂停静音、继续仍循环 | 同场景 1 的静音判据 + 继续后 engine=loop 且出声 |
 
 说明：
@@ -153,6 +153,8 @@ powershell -NoProfile -File tools/scenarios/run-scenarios.ps1 --non-exclusive
 | 结果页预览 | ~~~/debug/preview.snapshot.outputFrames~~~ | 预览 controller 自己的 TapAudioSink 写出帧数，100ms 轮询（实时计数，不受 500ms 采样限制） |
 
 - 出声判定：窗口内 ~~~Δframes / (sampleRate × 秒数) ≥ 0.85~~~（部分宽松场景 0.8），报告里给出实际百分比。
+- **seek 出声延迟**：优先读 ~~~/debug/preview-seek~~~ 的 ~~~stages.playoutMs~~~（AudioTrack 播放头开始走）；
+  ~~~advanceMs~~~ 只作旧包兜底（seek 未确认时 currentPosition 可能还是旧位置，会提前满足）。
 - 采样率：优先取歌曲 loop 行的 sampleRate，否则按 44100 兜底（报告会标注）。
 - **暂停静音**：先等尾帧落定（连续两次 500ms 采样帧数不变，最多 3s），再测 1.2s，要求 Δ=0。
   这样不会把 pause 瞬间的正常硬件尾帧（约 50-100ms）误判成"暂停仍出声"，也能抓住持续的 paused-but-sink-wrote。
@@ -182,6 +184,8 @@ powershell -NoProfile -File tools/scenarios/run-scenarios.ps1 --non-exclusive
 ### 3.5 "不崩"
 
 - 每条场景前后 ~~~pidof com.zjr.hesimusic~~~ 必须相同（重装/崩溃/被杀都会暴露）。
+- **每条场景结束都扫一次 crash buffer 的 ~~~OutOfMemoryError~~~，出现即 FAIL**（OOM 后 pid 可能还没变化，
+  只看 pid 会漏）；全量跑完再全局扫一次 crash+main，OOM 同时让整轮退出码为 1。
 - 全部跑完后扫 ~~~logcat -b crash~~~ 与 main buffer 中运行开始后的本包 ~~~FATAL EXCEPTION / ANR in~~~。
 - 场景内异常（HTTP 5xx、超时、断言抛错）记为"执行异常"并保存现场，不影响后续场景（每条场景开始前重置播放态）。
 
@@ -250,7 +254,8 @@ const s18: Scenario = {
 - ~~~waitFor(fn, predicate, timeout, interval)~~~：通用轮询。
 - ~~~ctx.previewSeek(ms)~~~：预览 seek + apply/advance/framesDelta/displayAfter 量测。
 - ~~~ctx.previewReady()~~~：等结果页预览探针可用。
-- ~~~Adb.meminfo / crashLinesSince / logcatSlice / uiDump / bringForeground~~~：设备侧证据。
+- ~~~Adb.meminfo / crashScanSince / oomLinesSince / logcatSlice / uiDump / bringForeground~~~：设备侧证据。
+- 场景 16 的 30s heap 采样：~~~heapSeries~~~ 写进 evidence，报告里给出 ~~~105MB→100MB→47MB~~~ 形式的曲线。
 
 ### 5.3 不变量白名单怎么加
 
@@ -287,6 +292,9 @@ const s18: Scenario = {
 5. 场景 16 的"heap 稳定"是启发式：Java Heap 16MB / PSS +15%+30MB 容差，只能发现明显泄漏，
    不能替代长时间内存压测。
 6. 执行器不做 install/启动环境搭建；包不在、调试口不通会直接报环境错误。
+7. **长窗口（B−A > 200s）不包含在场景 16 的 3 轮里**：长窗口的环回/预填/内存行为需要单独跑一次
+   10 分钟稳定性（循环播放 + 每 30s 采样 heap + 不变量/崩溃扫描），建议用
+   ~~~--only 3~~~ 或新增一条长窗口场景，跑 10 分钟后看 heap 曲线与 OOM。
 
 ---
 
@@ -378,4 +386,7 @@ powershell -NoProfile -File tools/scenarios/run-scenarios.ps1
 除 #7 的 FULL 起点和 #12 的队列换歌外，其余 15 条场景在 1258 上按常识判据通过（含：
 暂停静音 Δ=0、循环进出、区内外 seek、四种模式出声、分析静音、后台续播、未确认门禁、
 三轮 heap 稳定 JavaHeap 105912→47608KB、接缝检查首声 149ms ≤500ms）。
+
+> 本轮之后新增的判据（30s heap 曲线、逐场景 OOM 扫描、以 stages.playoutMs 作为出声延迟）已在代码与
+> 文档中就位，等 1259+ 正式包下一轮全量验证；长窗口（>200s）按 §6.7 单独跑 10 分钟稳定性。
 

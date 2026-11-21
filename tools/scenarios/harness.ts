@@ -378,24 +378,81 @@ export class Adb {
     };
   }
 
-  /** crash buffer + main buffer 里 runStartEpochSec 之后的 FATAL/ANR（只认本包）。 */
-  async crashLinesSince(epochSec: number, pkg: string): Promise<string[]> {
-    const result: string[] = [];
-    const crash = await this.run(["logcat", "-d", "-b", "crash", "-v", "epoch"], 30000);
-    for (const line of crash.out.split(/\r?\n/)) {
+  /**
+   * crash buffer 里的 OOM 行。OOM 行本身通常不带包名（包名在它前面的 Process: 行），
+   * 所以按"上下文 40 行里出现本包"归属，避免把别的 app 的 OOM 算进来。
+   */
+  private collectOom(lines: string[], epochSec: number, pkg: string): string[] {
+    const out: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
       const m = line.match(/^(\d+\.\d+)\s/);
-      if (!m) continue;
-      if (Number(m[1]) < epochSec) continue;
-      if (line.includes(pkg) || line.includes("FATAL EXCEPTION")) result.push("[crash] " + line);
+      if (!m || Number(m[1]) < epochSec) continue;
+      if (!/OutOfMemoryError|Out of memory/i.test(line)) continue;
+      // OOM 行本身不带包名：只认它**前面最近的一条** Process/ANR 行（Android 崩溃转储固定格式），
+      // 不看后面，避免把别的 app 的 OOM 误算到本包。
+      const before = lines.slice(Math.max(0, i - 40), i);
+      const nearestProcess = [...before].reverse().find((l) => /Process:\s|ANR in /.test(l));
+      if (!nearestProcess || !nearestProcess.includes(pkg)) continue;
+      out.push(line);
+    }
+    return out;
+  }
+
+  /** crash buffer + main buffer 里 runStartEpochSec 之后的 FATAL/ANR/OOM（只认本包）。 */
+  async crashScanSince(epochSec: number, pkg: string): Promise<{ fatal: string[]; oom: string[]; anr: string[] }> {
+    const fatal: string[] = [];
+    const oom: string[] = [];
+    const anr: string[] = [];
+    const crash = await this.run(["logcat", "-d", "-b", "crash", "-v", "epoch"], 30000);
+    const crashLines = crash.out.split(/\r?\n/);
+    for (const line of this.collectOom(crashLines, epochSec, pkg)) oom.push("[crash] " + line);
+    for (let i = 0; i < crashLines.length; i++) {
+      const line = crashLines[i];
+      const m = line.match(/^(\d+\.\d+)\s/);
+      if (!m || Number(m[1]) < epochSec) continue;
+      if (!line.includes("FATAL EXCEPTION")) continue;
+      // FATAL 行后面紧跟 Process: 行；只认第一条，遇到下一条 FATAL 就停。
+      let processLine = "";
+      for (let j = i; j < Math.min(crashLines.length, i + 8); j++) {
+        if (j > i && crashLines[j].includes("FATAL EXCEPTION")) break;
+        if (/Process:\s/.test(crashLines[j])) {
+          processLine = crashLines[j];
+          break;
+        }
+      }
+      if (processLine.includes(pkg)) fatal.push("[crash] " + line);
     }
     const main = await this.run(["logcat", "-d", "-v", "epoch", "-t", "20000"], 30000);
-    for (const line of main.out.split(/\r?\n/)) {
+    const mainLines = main.out.split(/\r?\n/);
+    for (const line of this.collectOom(mainLines, epochSec, pkg)) oom.push("[main] " + line);
+    for (let i = 0; i < mainLines.length; i++) {
+      const line = mainLines[i];
       const m = line.match(/^(\d+\.\d+)\s/);
-      if (!m) continue;
-      if (Number(m[1]) < epochSec) continue;
-      if (line.includes("FATAL EXCEPTION") || line.includes("ANR in " + pkg)) result.push("[main] " + line);
+      if (!m || Number(m[1]) < epochSec) continue;
+      if (line.includes("FATAL EXCEPTION")) {
+        let processLine = "";
+        for (let j = i; j < Math.min(mainLines.length, i + 8); j++) {
+          if (j > i && mainLines[j].includes("FATAL EXCEPTION")) break;
+          if (/Process:\s/.test(mainLines[j])) {
+            processLine = mainLines[j];
+            break;
+          }
+        }
+        if (processLine.includes(pkg)) fatal.push("[main] " + line);
+      }
+      if (line.includes("ANR in " + pkg)) anr.push("[main] " + line);
     }
-    return result.slice(-40);
+    return { fatal: fatal.slice(-20), oom: oom.slice(-20), anr: anr.slice(-20) };
+  }
+
+  /**
+   * 轻量 OOM 扫描（只读 crash buffer，供每条场景结束调用）。
+   * OOM 不一定会让 pid 立刻变化（被系统回收/重启前有一段时间），必须单独判 FAIL。
+   */
+  async oomLinesSince(epochSec: number, pkg: string): Promise<string[]> {
+    const out = await this.run(["logcat", "-d", "-b", "crash", "-v", "epoch"], 30000);
+    return this.collectOom(out.out.split(/\r?\n/), epochSec, pkg).slice(-10);
   }
 
   /** 失败现场 logcat 片段：按时间过滤（设备与主机同时区）。 */

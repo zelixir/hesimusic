@@ -471,6 +471,8 @@ async function main(): Promise<number> {
         via: "endpoint",
         applyMs: j.applyMs == null ? null : Number(j.applyMs),
         advanceMs: j.advanceMs == null ? null : Number(j.advanceMs),
+        stages: j.stages ?? null,
+        playoutMs: j.stages && j.stages.playoutMs != null ? Number(j.stages.playoutMs) : null,
         latencyToFramesMs,
         framesDelta,
         displayAfterMs: j.displayAfterMs == null ? null : Number(j.displayAfterMs),
@@ -705,6 +707,18 @@ async function main(): Promise<number> {
         ),
       );
     }
+    // OOM 不一定会让 pid 立刻变化：必须单独扫 crash buffer 的 OutOfMemoryError。
+    const oomLines = await adb.oomLinesSince(Math.floor(t0 / 1000) - 1, cfg.pkg);
+    if (oomLines.length > 0 || status !== "SKIP") {
+      checks.push(
+        check(
+          "无 OutOfMemoryError",
+          oomLines.length === 0,
+          oomLines.length > 0 ? oomLines.slice(-2).join(" | ").slice(0, 400) : "none",
+          oomLines.length > 0 ? "crash buffer 出现 OOM:按纪律直接判 FAIL(不能只看 pid 存活)" : undefined,
+        ),
+      );
+    }
     const versionAfter = await adb.versionInfo(cfg.pkg).catch(() => null);
     if (
       versionAfter &&
@@ -774,8 +788,9 @@ async function main(): Promise<number> {
     });
   }
 
-  // ---- 全局崩溃检查 ----
-  const crash = await adb.crashLinesSince(runStartEpochSec, cfg.pkg);
+  // ---- 全局崩溃/OOM 检查 ----
+  const crashScan = await adb.crashScanSince(runStartEpochSec, cfg.pkg);
+  const crash = [...crashScan.fatal, ...crashScan.oom, ...crashScan.anr];
   const finalPid = await adb.pidof(cfg.pkg);
   const totalMs = Date.now() - startedAt.getTime();
 
@@ -811,6 +826,8 @@ async function main(): Promise<number> {
     baselineInvariants: Array.from(baselineInv),
     allowInvariants: Array.from(allowSet),
     crash,
+    oom: crashScan.oom,
+    anr: crashScan.anr,
     pendingDecisions,
     results: results.map((r) => ({
       ...r,
@@ -832,9 +849,13 @@ async function main(): Promise<number> {
   if (contaminatedResults.length > 0) {
     console.log("注意: CONTAMINATED = 场景执行期间检测到外部改动(另一个 agent/重装),结果不可信;独占窗口重跑。");
   }
+  if (crashScan.oom.length > 0) {
+    console.log("!! OutOfMemoryError 证据(" + crashScan.oom.length + " 条) — 必须修复:");
+    for (const line of crashScan.oom.slice(-6)) console.log("   " + line.slice(0, 220));
+  }
   if (crash.length > 0) {
     console.log("!! 崩溃/ANR 证据(" + crash.length + " 条):");
-    for (const line of crash.slice(-6)) console.log("   " + line.slice(0, 220));
+    for (const line of crash.slice(-8)) console.log("   " + line.slice(0, 220));
   }
   if (contaminatedResults.length > 0) {
     console.log("");
@@ -857,7 +878,11 @@ async function main(): Promise<number> {
   console.log("数据: " + path.join(runDir, "report.json"));
   console.log("证据: " + path.join(runDir, "evidence"));
 
-  const bad = failedResults.length > 0 || crash.length > 0 || finalPid === null;
+  const bad =
+    failedResults.length > 0 ||
+    crash.length > 0 ||
+    crashScan.oom.length > 0 ||
+    finalPid === null;
   return bad ? 1 : 0;
 }
 
@@ -1060,6 +1085,7 @@ function buildMarkdown(report: any, results: any[], runDir: string): string {
   L.push("- 起始不变量: " + (report.baselineInvariants.length ? report.baselineInvariants.map((x: any) => x[0] + "x" + x[1]).join(", ") : "none"));
   L.push("- 允许的不变量: " + (report.allowInvariants.length ? report.allowInvariants.join(", ") : "none"));
   L.push("- 崩溃/ANR(运行期): " + (report.crash.length ? report.crash.length + " 条(见 report.json)" : "无"));
+  L.push("- OutOfMemoryError: " + ((report.oom ?? []).length ? report.oom.length + " 条 — 必须修复" : "无"));
   L.push("- 产物目录: " + runDir);
   L.push("");
   L.push("## 判据说明");
