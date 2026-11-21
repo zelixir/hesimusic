@@ -596,7 +596,8 @@ class MainMonitor {
       const prev = this.series[i - 1].posMs;
       const cur = this.series[i].posMs;
       if (prev == null || cur == null) continue;
-      if (prev >= durationMs - 4000 && cur <= 3000 && cur < prev - 5000) {
+      // 落点可能正好在 duration-4s，首采样 prev 会略小于 duration-4000；放宽到 6s 才能捕到这次跳变。
+      if (prev >= durationMs - 6000 && cur <= 3000 && cur < prev - 5000) {
         return { beforeMs: prev, afterMs: cur, atMs: this.series[i].atMs };
       }
     }
