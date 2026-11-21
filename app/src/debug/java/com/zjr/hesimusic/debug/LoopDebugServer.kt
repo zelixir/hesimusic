@@ -16,6 +16,7 @@ import com.zjr.hesimusic.loop.audio.source.LoopEngineInfo
 import com.zjr.hesimusic.loop.audio.source.LoopPreviewDebugBridge
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMainPlayer
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
+import com.zjr.hesimusic.loop.LoopPhase
 import com.zjr.hesimusic.loop.audio.source.LoopWholeTimeline
 import com.zjr.hesimusic.loop.audio.source.RingBandSource
 import com.zjr.hesimusic.service.LoopClaim
@@ -243,12 +244,24 @@ object LoopDebugServer {
                 } else {
                     null
                 }
-                val runtimePhase = if (runtimeMatches) phaseSnapshot!!.phase?.wire else null
-                // #61：phase 必须跟**当前展示位置**翻转。runtime 的 timelinePhase 只是诊断，
-                // 不能用它覆盖 fresh display 的判定（MediaSession 事件之间 runtime 可能落后
-                // 几百毫秒，display 已越过 A 而 timeline 还停在 A 之前）。
-                // tail 的歧义已由 claim.phaseHint（同为 runtime 的权威值）在 display 折叠时处理。
-                val effectivePhase = phase
+                val runtimePhaseEnum = if (runtimeMatches) phaseSnapshot!!.phase else null
+                val runtimePhase = runtimePhaseEnum?.wire
+                // #61：display 一到 A 就必须翻 loop，不能被滞后的 runtime 拉回 prelude；
+                // display>B 时再用 timeline/runtime 的 TAIL 解决"tail vs loop 外推"。
+                val effectivePhase = LoopPhase.resolve(
+                    displayUs = phasePositionMs * 1_000L,
+                    window = claim.window,
+                    timelinePhase = if (runtimeMatches) {
+                        LoopWholeTimeline.phaseOfTimelineUs(
+                            phaseSnapshot!!.timelineUs,
+                            claim.window,
+                            phaseSnapshot.fullDurationUs,
+                        )
+                    } else {
+                        null
+                    },
+                    runtimePhase = runtimePhaseEnum,
+                )?.wire
                 return linkedMapOf(
                     "engine" to engine,
                     "loopPath" to loopPath,

@@ -889,6 +889,8 @@ const sEnv43: Scenario = {
       started = !/Error|Exception|does not exist|No Activity/i.test(out);
       ctx.evidence.step("start-competitor", { code: r.code, out: out.slice(0, 500), started });
       if (!started) {
+        await ctx.adb.shell("am force-stop " + otherPkg, 20000).catch(() => "");
+        await ctx.adb.bringForeground(ctx.cfg.pkg).catch(() => false);
         return await skipEnv("第三方播放器拒绝 VIEW 播放: " + out.slice(0, 200));
       }
 
@@ -914,6 +916,8 @@ const sEnv43: Scenario = {
         const competitorPlaying = /state=PLAYING/.test(block) && /state=PlaybackState/.test(block);
         ctx.evidence.step("competitor-playback", { competitorPlaying, block: block.slice(0, 600) });
         if (!competitorPlaying) {
+          await ctx.adb.shell("am force-stop " + otherPkg, 20000).catch(() => "");
+          await ctx.adb.bringForeground(ctx.cfg.pkg).catch(() => false);
           return await skipEnv(
             "竞品 " + otherPkg + " 被拉起但未真正起播/未请求音频焦点（dumpsys media_session 无 PLAYING）；" +
               "环境未证实，换一个确定会起播的播放器再测",

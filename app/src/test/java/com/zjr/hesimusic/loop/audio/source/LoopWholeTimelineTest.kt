@@ -131,6 +131,30 @@ class LoopWholeTimelineTest {
     }
 
     @Test
+    fun resolveUsesDisplayForBoundariesAndRuntimeOnlyForTailAmbiguity() {
+        // #61：runtime 还停在 prelude，display 已过 A -> loop。
+        assertEquals(
+            LoopPhase.LOOP,
+            LoopPhase.resolve(aUs + 1_000L, window, LoopPhase.PRELUDE, LoopPhase.PRELUDE),
+        )
+        // 回绕后 display=0：即使 runtime 还停在 tail，也必须是 prelude。
+        assertEquals(
+            LoopPhase.PRELUDE,
+            LoopPhase.resolve(0L, window, LoopPhase.TAIL, LoopPhase.TAIL),
+        )
+        // display>B：runtime/timeline 明确 tail 才是 tail。
+        assertEquals(
+            LoopPhase.TAIL,
+            LoopPhase.resolve(bUs + 5_000_000L, window, LoopPhase.TAIL, LoopPhase.LOOP),
+        )
+        // display>B 但只是 loop 外推 -> loop。
+        assertEquals(
+            LoopPhase.LOOP,
+            LoopPhase.resolve(bUs + 500_000L, window, LoopPhase.LOOP, LoopPhase.LOOP),
+        )
+    }
+
+    @Test
     fun phaseFollowsDisplayPosition() {
         assertEquals(LoopPhase.PRELUDE, LoopPhase.ofDisplayUs(0L, window))
         assertEquals(LoopPhase.PRELUDE, LoopPhase.ofDisplayUs(aUs - 1L, window))

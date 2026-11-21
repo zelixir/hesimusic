@@ -26,6 +26,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
@@ -149,7 +150,9 @@ fun PlayerScreen(
                         .crossfade(true)
                         .build(),
                     contentDescription = "封面",
+                    // 封面最大 280dp：小屏上给状态行 + 播放控制留出高度，避免被挤出/裁掉。
                     modifier = Modifier
+                        .sizeIn(maxWidth = 280.dp, maxHeight = 280.dp)
                         .aspectRatio(1f)
                         .clip(MaterialTheme.shapes.medium)
                         .background(MaterialTheme.colorScheme.surfaceVariant),
@@ -158,6 +161,7 @@ fun PlayerScreen(
             } else {
                 Box(
                     modifier = Modifier
+                        .sizeIn(maxWidth = 280.dp, maxHeight = 280.dp)
                         .aspectRatio(1f)
                         .clip(MaterialTheme.shapes.medium)
                         .background(MaterialTheme.colorScheme.surfaceVariant),
@@ -305,28 +309,33 @@ fun PlayerScreen(
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
-                // D06：常驻一行，错过 Snackbar 也能事后看到原因（带原因码）。
-                loopClaim.fallbackReason?.let { reason ->
-                    Text(
-                        text = fallbackNoticeMessage(reason),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 4.dp),
-                    )
-                }
-                // D05：显式的“退出无缝循环”入口（与 repeat 按钮的 XOR 语义分开）。
+                // D05/D06：状态行与退出入口合并为**一行**，避免挤压下方播放控制。
+                // - claim 生效：phase 文案 + 退出；
+                // - 回退态：原因文案（带 code）+ 退出；
+                // - 非无缝但有历史原因：只显示原因行（正常不会出现）。
                 if (seamlessEngaged) {
+                    val statusText = if (loopClaim.claimActive) {
+                        loopStatusText
+                    } else {
+                        loopClaim.fallbackReason?.let { fallbackNoticeMessage(it) }
+                            ?: "无缝循环未生效"
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            text = loopStatusText,
+                            text = statusText,
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary,
+                            color = if (loopClaim.claimActive) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.error
+                            },
+                            maxLines = if (loopClaim.claimActive) 1 else 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
                         )
                         TextButton(
                             onClick = {
@@ -336,9 +345,21 @@ fun PlayerScreen(
                                     keepPlainSingleLoop = false,
                                 )
                             },
+                            contentPadding = PaddingValues(horizontal = 8.dp),
                         ) {
-                            Text("退出无缝循环")
+                            Text("退出无缝循环", maxLines = 1, fontSize = 11.sp)
                         }
+                    }
+                } else {
+                    loopClaim.fallbackReason?.let { reason ->
+                        Text(
+                            text = fallbackNoticeMessage(reason),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
                 }
             }

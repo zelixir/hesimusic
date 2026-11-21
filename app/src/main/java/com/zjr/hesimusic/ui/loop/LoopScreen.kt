@@ -61,6 +61,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -102,10 +103,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
@@ -476,8 +474,6 @@ private fun ResultContent(
     val buffering by viewModel.buffering.collectAsState()
     val isReplaying by viewModel.isReplaying.collectAsState()
 
-    val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-
     val aMs = state.aMs
     val bMs = state.bMs
     val mode = state.mode
@@ -529,14 +525,16 @@ private fun ResultContent(
     // 拖拽只在首次进入某个手柄时发 Start,之后发 Move;松手统一 End + CommitWindow。
     var dragHandle by remember { mutableStateOf<LoopHandle?>(null) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            // 底部留白 = 常规 16dp + 系统导航栏 inset;最后一行按钮可完整滚到可点区域。
-            .padding(bottom = 16.dp + bottomInset),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        // 内容区可滚动；底部动作区固定在首屏（见下方 Surface）。
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(
                 song?.title ?: "未知曲目",
@@ -737,49 +735,84 @@ private fun ResultContent(
             Text("●", color = loopRatioColor(loopRatio), fontSize = 12.sp)
         }
 
-        HorizontalDivider(modifier = Modifier.padding(vertical = 2.dp))
+            HorizontalDivider(modifier = Modifier.padding(vertical = 2.dp))
+        } // 内容区结束
 
-        // 底部按钮组(契约 §2.4)。按钮在滚动内容里,不覆盖上方内容;
-        // 滚动容器底部预留 nav bar inset,最后一行可完整滚到。
-        if (onExitSeamless != null) {
-            OutlinedButton(onClick = onExitSeamless, modifier = Modifier.fillMaxWidth()) {
-                Text("退出无缝循环", maxLines = 1)
-            }
-        }
-        Button(onClick = { viewModel.confirmAndSave { saved -> onSavedAndPlay(saved) } }, modifier = Modifier.fillMaxWidth()) {
-            Text("确认并保存")
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            OutlinedButton(onClick = { viewModel.startAnalysis() }, modifier = Modifier.weight(1f)) {
-                Text("重新分析", maxLines = 1)
-            }
-            if (confirmed) {
-                OutlinedButton(
-                    onClick = { viewModel.dispatch(LoopPageEvent.Demote) },
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+        // 底部动作区固定在首屏（不随内容滚动）：
+        // 循环态下多出的“退出无缝循环”不再把“取消最终结果”推出可视区。
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            tonalElevation = 3.dp,
+            shadowElevation = 8.dp,
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp, bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("取消最终结果", maxLines = 1, fontSize = 12.sp)
+                    Button(
+                        onClick = { viewModel.confirmAndSave { saved -> onSavedAndPlay(saved) } },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("确认并保存", maxLines = 1)
+                    }
+                    if (onExitSeamless != null) {
+                        OutlinedButton(
+                            onClick = onExitSeamless,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text("退出无缝循环", maxLines = 1, fontSize = 12.sp)
+                        }
+                    }
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    OutlinedButton(onClick = { viewModel.startAnalysis() }, modifier = Modifier.weight(1f)) {
+                        Text("重新分析", maxLines = 1)
+                    }
+                    if (confirmed) {
+                        OutlinedButton(
+                            onClick = { viewModel.dispatch(LoopPageEvent.Demote) },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                        ) {
+                            Text("取消最终结果", maxLines = 1, fontSize = 12.sp)
+                        }
+                    }
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    // 「删除分析结果」:仅确有结果(候选已加载/已落库)时出现;
+                    // 删除持久化成功后由 VM effect runner 发 NavigateBack。
+                    if (candidates.isNotEmpty()) {
+                        OutlinedButton(
+                            onClick = { showDeleteDialog = true },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                        ) {
+                            Text("删除分析结果", maxLines = 1, fontSize = 12.sp)
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = { viewModel.dispatch(LoopPageEvent.Back) },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("返回", maxLines = 1)
+                    }
                 }
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            // 「删除分析结果」:仅确有结果(候选已加载/已落库)时出现;
-            // 删除持久化成功后由 VM effect runner 发 NavigateBack。
-            if (candidates.isNotEmpty()) {
-                OutlinedButton(
-                    onClick = { showDeleteDialog = true },
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                ) {
-                    Text("删除分析结果", maxLines = 1, fontSize = 12.sp)
-                }
-            }
-            OutlinedButton(onClick = { viewModel.dispatch(LoopPageEvent.Back) }, modifier = Modifier.weight(1f)) {
-                Text("返回", maxLines = 1)
-            }
-        }
-    }
+    } // 外层 Column 结束
 
     if (showCandidateSheet) {
         // skipPartiallyExpanded:打开即全展开,避免部分展开↔全展开中间态闪烁。

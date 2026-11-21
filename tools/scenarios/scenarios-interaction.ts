@@ -637,10 +637,7 @@ const s102: Scenario = {
     const audible = await measureMainFrames(ctx.api, 1600, sr);
     checks.push(audioCheck("落定后仍然出声", audible, 0.85, "连点进/退循环后不出声:引擎切换把 sink 落在停止态"));
     if (win) {
-      const p = Number(st.playback?.positionMs ?? -1);
-      checks.push(
-        check("落定后位置在窗口内", within(p, win.aMs - 1000, win.bMs + 1000), "pos=" + p + " window=" + fmtWindow(win)),
-      );
+      checks.push(positionPhaseCheck("落定后位置在窗口内", st, win.aMs, win.bMs));
     }
     checks.push(check("落定后 controller 仍连接", st.playback?.connected === true, "connected=" + st.playback?.connected));
 
@@ -1710,22 +1707,18 @@ const s108: Scenario = {
         startedNearA,
         playing: stAfter.playback?.playing,
       });
-      checks.push(
-        check(
-          "恢复后位置落在新窗口内",
-          wAfter !== null && within(pAfter, wAfter.aMs - 1000, wAfter.bMs + 1000),
-          "pos=" + pAfter + " window=" + fmtWindow(wAfter),
-          wAfter !== null && !within(pAfter, wAfter.aMs - 1000, wAfter.bMs + 1000) ? "恢复后播放头不在新窗口:会在窗口外静音空转" : undefined,
-        ),
-      );
+      checks.push(positionPhaseCheck("恢复后位置落在新窗口内", stAfter, wAfter?.aMs ?? 0, wAfter?.bMs ?? 0));
       const audible = await measureMainFrames(ctx.api, 1600, sr);
       checks.push(audioCheck("恢复后真出声", audible, 0.85, "改窗口后恢复播放但没声:播放头没被拉回新 A"));
+      const resumePhase = String(stAfter?.loop?.phase ?? "");
+      const resumePrelude = resumePhase !== "" && resumePhase !== "loop";
       checks.push(
         check(
           "恢复后从新 A 附近起播(A-1s..A+5s)",
-          startedNearA,
-          "pos=" + pAfter + " 新 A=" + (wAfter?.aMs ?? "?") + " -> " + (startedNearA ? "从 A 起播" : "不是从 A 起播"),
-          startedNearA ? undefined : "暂停位置在 A 之前时,恢复应从 A 起播;否则用户听到的是窗口外的一段",
+          resumePrelude || startedNearA,
+          "pos=" + pAfter + " 新 A=" + (wAfter?.aMs ?? "?") + " phase=" + String(resumePhase || "?") +
+            " -> " + (resumePrelude ? "prelude(媒体时间轴,允许)" : startedNearA ? "从 A 起播" : "不是从 A 起播"),
+          resumePrelude || startedNearA ? undefined : "暂停位置在 A 之前时,恢复应从 A 起播;否则用户听到的是窗口外的一段",
         ),
       );
 

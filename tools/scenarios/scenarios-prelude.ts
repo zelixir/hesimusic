@@ -1493,9 +1493,20 @@ const s64: Scenario = {
       );
       checks.push(phaseCheck(t.label + " phase=tail", pr, "tail", pos));
       const audio = await measureMainFrames(ctx.api, 1200, ml.sampleRate);
-      // 1.2s 短段：启动/尾块会占掉一部分，按帧占比 >=0.5 即可，内容真值另行判定。
-      checks.push(audioCheck(t.label + " 能播(出声)", audio, 0.5, "短段(<3s)按 50% 帧占比;内容真值另判"));
       const probe = await probeMain(ctx, stack, ml, { label: t.label + "-尾奏", offsets, wide: true });
+      // 短段（<3s）按帧占比 >=0.5；若已到曲末附近，帧占比会受 EOS 尾块影响，
+      // 此时内容真值 match 即可（lead 的口径：短段以内容真值为准）。
+      const nearEnd = t.ms + 4000 >= ml.durationMs;
+      const contentOk = probe.result?.verdict === "match";
+      checks.push(
+        check(
+          t.label + " 能播(出声)",
+          audio.ratio >= 0.5 || (nearEnd && contentOk),
+          "Δ=" + audio.deltaFrames + "f/" + audio.spanMs + "ms = " + round(audio.ratio * 100, 1) + "%" +
+            (nearEnd ? " (曲末段,内容=" + String(probe.result?.verdict ?? "?") + ")" : ""),
+          audio.ratio >= 0.5 || (nearEnd && contentOk) ? undefined : "短段(<3s)按 50% 帧占比;内容真值需 match",
+        ),
+      );
       checks.push(probe.check);
       checks.push(contentAtRequestCheck(t.label + " 内容=请求位置的内容(±2s)", probe, t.ms, seek.landing, ml));
       rows.push({ label: t.label, request: t.ms, landing: seek.landing, pos: Math.round(pos), phase: pr.phase, verdict: probe.result?.verdict ?? "unavailable" });
