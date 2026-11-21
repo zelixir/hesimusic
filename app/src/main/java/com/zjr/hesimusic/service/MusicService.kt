@@ -3,6 +3,7 @@ package com.zjr.hesimusic.service
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Intent
+import android.media.AudioManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -21,8 +22,11 @@ import com.zjr.hesimusic.data.mapper.mediaIdToSongId
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.data.preferences.PlaybackPreferences
 import com.zjr.hesimusic.data.repository.SongRepository
+import com.zjr.hesimusic.loop.LoopIntent
 import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.audio.LoopAudioController
+import com.zjr.hesimusic.loop.audio.source.LoopSourceItemTag
+import com.zjr.hesimusic.loop.audio.source.LoopSourcePauseGate
 import com.zjr.hesimusic.utils.AppLogger
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
@@ -43,6 +47,9 @@ class MusicService : MediaSessionService() {
         private const val SILENT_CHANNEL_ID = "silent_media_service"
         private const val SILENT_NOTIFICATION_ID = 2001
         private const val PLAYBACK_ERROR_TOAST_INTERVAL_MS = 3000L
+
+        /** #112 共享闸门守卫的检查间隔（只做布尔读，成本可忽略）。 */
+        private const val GATE_GUARD_INTERVAL_MS = 120L
     }
 
     @Inject
@@ -65,6 +72,11 @@ class MusicService : MediaSessionService() {
 
     @Inject
     lateinit var loopAudioController: LoopAudioController
+
+    @Inject
+    lateinit var loopIntent: LoopIntent
+
+    private val audioManager: AudioManager by lazy { getSystemService(AudioManager::class.java) }
 
     /** 对外（MediaSession/UI/通知）的位置与时长口径层；见 LoopSessionPlayer。 */
     private lateinit var sessionPlayer: LoopSessionPlayer
@@ -155,7 +167,16 @@ class MusicService : MediaSessionService() {
 
         // 位置/时长投影层：只重写位置/时长/seek，其余全部透传给上面的 forwardingPlayer
         // （队列首尾绕回播放仍由 forwardingPlayer 的 seekToNext/Previous 负责）。
-        sessionPlayer = LoopSessionPlayer(forwardingPlayer, loopRuntime, loopAudioController)
+        sessionPlayer = LoopSessionPlayer(
+            player = forwardingPlayer,
+            runtime = loopRuntime,
+            audio = loopAudioController,
+            loopIntent = loopIntent,
+            // #106：循环中切歌前先彻底退出旧循环（唯一写点在协调器）。
+            onExitLoopForNavigation = { loopPlaybackCoordinator.exitForNavigation(forwardingPlayer) },
+            // #112：主播放暂停时判断"预览是否还在出声"，避免把共享闸门关死。
+            otherSourceAudible = { audioManager?.isMusicActive == true },
+        )
         // 00027：安装唯一的 claim provider。UI / MediaSession / debug / About 都通过
         // LoopClaimStore 读同一份真值（窗口 = 意图，sourceActive = 源真的在环回）。
         LoopClaimStore.install { songId ->
@@ -170,6 +191,7 @@ class MusicService : MediaSessionService() {
         restorePlaybackState()
         setupPlayerListeners()
         startPeriodicSave()
+        startSourceGateGuard()
         
         val duration = System.currentTimeMillis() - startTime
         appLogger.timing(TAG, "MusicService onCreate", duration)
@@ -403,6 +425,34 @@ class MusicService : MediaSessionService() {
         session.setSessionExtras(extras)
     }
 
+    /**
+     * #112 主播放侧的共享闸门守卫。
+     *
+     * 预览与主播放共用 [LoopSourcePauseGate]（进程级布尔）：预览 pause() 会把它关掉，
+     * 若此时主播放仍在出声，它会一直"显示在播但不再写帧"（永久哑）。这里周期性地把
+     * 闸门重新顶开 —— 只在主播放确实应该出声（SOURCE item + playWhenReady + 非 IDLE）时。
+     *
+     * 反方向（主播放 pause 把预览静音）由 [LoopSessionPlayer.pause] 的延迟复核负责：
+     * 只有确认没有其它音频活动时才关门。
+     */
+    private fun startSourceGateGuard() {
+        serviceScope.launch {
+            while (isActive) {
+                val sourceItem = player.currentMediaItem?.localConfiguration?.tag is LoopSourceItemTag
+                val wantsSound = SourceAudioArbiter.mainWantsToSound(
+                    playWhenReady = player.playWhenReady,
+                    playbackState = player.playbackState,
+                    isSourceItem = sourceItem,
+                )
+                if (SourceAudioArbiter.shouldResumeGate(wantsSound, LoopSourcePauseGate.paused)) {
+                    Log.i(TAG, "source gate guard: resume (a preview pause must not mute the main player)")
+                    LoopSourcePauseGate.resume()
+                }
+                delay(GATE_GUARD_INTERVAL_MS)
+            }
+        }
+    }
+
     private fun startPeriodicSave() {
         serviceScope.launch {
             while (isActive) {
@@ -481,6 +531,7 @@ class MusicService : MediaSessionService() {
         Log.d(TAG, "onDestroy: MusicService destroyed, saving final state")
         saveCurrentState() // Save one last time
         saveQueueState()   // Also save queue state
+        sessionPlayer.dispose()
         loopPlaybackCoordinator.release()
         LoopClaimStore.uninstall()
         serviceScope.cancel()

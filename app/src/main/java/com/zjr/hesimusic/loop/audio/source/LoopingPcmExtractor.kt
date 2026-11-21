@@ -118,10 +118,15 @@ class LoopingPcmExtractor(
         }
 
         // 起播门槛：至少 2 块（2s）就绪再吐首个 sample，避免“先出声再断 347ms”。
-        if (!started && core.readyBlockCount() < 2) {
+        // 00028(#105)：窗口本身不足 2 块时（例如 0.5s 窗口 = 1 块）必须按 blockCount 收敛，
+        // 否则 readyBlockCount 永远到不了 2，extractor 会永远返回 CONTINUE（短窗口死锁）。
+        val requiredBlocks = minOf(START_READY_BLOCKS, timeline.blockCount)
+        if (!started && core.readyBlockCount() < requiredBlocks) {
             var guard = 0
-            while (core.readyBlockCount() < 2 && guard < 4 && core.pumpDecode()) guard += 1
-            if (core.readyBlockCount() < 2) {
+            while (core.readyBlockCount() < requiredBlocks && guard < 4 && core.pumpDecode()) {
+                guard += 1
+            }
+            if (core.readyBlockCount() < requiredBlocks) {
                 prefetcher?.kick()
                 return Extractor.RESULT_CONTINUE
             }
@@ -272,6 +277,9 @@ class LoopingPcmExtractor(
         const val MAX_AHEAD_SECONDS = 5L
         const val THROTTLE_SLEEP_MS = 4L
         const val MIN_SAMPLE_FRAMES = 1024
+
+        /** 起播前想要的块数（2s 预读）；窗口本身更短时按 blockCount 收敛。 */
+        const val START_READY_BLOCKS = 2
         /**
          * 单次 read 间隔超过这个值就当"停顿"，不计入活跃时间。
          *

@@ -50,6 +50,16 @@ class RingBandRenderer(
     var jumpCount: Long = 0L
         private set
 
+    /**
+     * 已启动的解码填充会话数（诊断用）。
+     *
+     * 00028(#105)：短窗口（0.5s）只需要 1~2 个会话就能填满整环，之后渲染线程 DONE 退出；
+     * 接缝回绕**不**再解码。这里把会话数暴露给测试/日志，用来证明"回绕不会退化成逐次解码"。
+     */
+    @Volatile
+    var sessionCount: Long = 0L
+        private set
+
     /** 最近一次跳填目标的 offset（诊断用）。 */
     @Volatile
     var lastJumpOffsetFrames: Long = -1L
@@ -225,6 +235,8 @@ class RingBandRenderer(
     private fun fillGap(startOffset: Long, myGeneration: Long) {
         val gapFrames = ring.distanceToFilledFrame(startOffset)
         if (gapFrames <= 0L) return
+        sessionCount += 1L
+        val sessionStartedMs = System.currentTimeMillis()
         val startAbsFrame = timeline.aFrame + startOffset
         val endAbsFrame = minOf(startAbsFrame + gapFrames, timeline.bFrame)
         val frames = endAbsFrame - startAbsFrame
@@ -239,7 +251,8 @@ class RingBandRenderer(
         var written = 0L
         var nextLogAt = 1L
         RingBandLog.i(
-            "RingBand fill start offset=" + startOffset + " frames=" + frames +
+            "RingBand fill start session=" + sessionCount +
+                " offset=" + startOffset + " frames=" + frames +
                 " generation=" + myGeneration + " covered=" + ring.coveredFrames,
         )
         decoder.stream(startUs, endUs, PREROLL_US) { data, size ->
@@ -310,12 +323,16 @@ class RingBandRenderer(
             emptyFillAttempts = 0
         }
         RingBandLog.i(
-            "RingBand fill end offset=" + writeOffset + " written=" + written +
+            "RingBand fill end session=" + sessionCount +
+                " ms=" + (System.currentTimeMillis() - sessionStartedMs) +
+                " offset=" + writeOffset + " written=" + written +
                 " missing=" + (missing.coerceAtLeast(0L)) +
                 " silence=" + (ring.tailTrimmedFrames - silenceBefore) +
                 " eos=" + reachedSourceEnd +
                 " generation=" + myGeneration + " covered=" + ring.coveredFrames +
-                " trimmed=" + ring.tailTrimmedFrames,
+                " trimmed=" + ring.tailTrimmedFrames +
+                // 小窗口取证：填满整环即 DONE，回绕不再需要解码。
+                " fullyCovered=" + ring.isFullyCovered,
         )
     }
 

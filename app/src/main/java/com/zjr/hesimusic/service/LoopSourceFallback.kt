@@ -68,6 +68,7 @@ object LoopSourceFallback {
      * @param filePath 媒体文件路径（空 → FILE_MISSING）
      * @param probe 音轨格式探测；null 或抛异常 → FORMAT_UNSUPPORTED
      * @param heapBytes 堆上限（默认进程 maxMemory；单测可注入固定值）
+     * @param durationUs 整曲时长（µs）；<=0 = 未知。用于拒绝 B 越界的历史行
      */
     fun evaluate(
         window: LoopWindow?,
@@ -75,9 +76,15 @@ object LoopSourceFallback {
         filePath: String?,
         probe: (() -> PcmTrackFormat)?,
         heapBytes: Long = Runtime.getRuntime().maxMemory(),
+        durationUs: Long = 0L,
     ): Decision {
-        if (window == null || !window.isValid()) {
-            return Decision.UseM3Prime(Reason.WINDOW_INVALID, "window=" + window)
+        // 窗口自身合法性：A>=0、B>A、B-A>=500ms、B<=时长（[LoopWindowRules] 唯一口径）。
+        // 历史坏行（A==B / 只差 1 sample / 越界）在这里被判 window-invalid，绝不建源。
+        if (!LoopWindowRules.usable(window, durationUs)) {
+            return Decision.UseM3Prime(
+                Reason.WINDOW_INVALID,
+                LoopWindowRules.describe(window, durationUs),
+            )
         }
         if (songId == null || songId <= 0L || filePath.isNullOrBlank()) {
             return Decision.UseM3Prime(

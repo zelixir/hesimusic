@@ -20,6 +20,7 @@ import com.zjr.hesimusic.service.LoopClaim
 import com.zjr.hesimusic.service.LoopClaimResolver
 import com.zjr.hesimusic.service.LoopClaimStore
 import com.zjr.hesimusic.service.LoopSourceFallback
+import com.zjr.hesimusic.service.LoopWindowRules
 import com.zjr.hesimusic.service.MainPlayerRouting
 import com.zjr.hesimusic.loop.analysis.AnalysisState
 import com.zjr.hesimusic.loop.analysis.LoopAnalysisManager
@@ -670,8 +671,15 @@ object LoopDebugServer {
         val candidate: LoopCandidateKt
         val sampleRate: Int
         if (aSamples != null && bSamples != null) {
-            if (aSamples < 0L || bSamples <= aSamples) {
-                throw HttpError(400, "invalid A/B samples: a=$aSamples b=$bSamples")
+            // 协议层窗口合法性（A>=0、B>A）先判：与采样率无关，先给明确的 4xx + 错误码。
+            if (aSamples < 0L) {
+                throw HttpError(400, LoopWindowRules.Code.A_NEGATIVE.wire + ": a=" + aSamples)
+            }
+            if (bSamples <= aSamples) {
+                throw HttpError(
+                    400,
+                    LoopWindowRules.Code.A_NOT_BEFORE_B.wire + ": a=" + aSamples + " b=" + bSamples,
+                )
             }
             sampleRate = done?.sampleRate ?: existing?.sampleRate
                 ?: throw HttpError(409, "显式 A/B 需要采样率:先 POST /analyze 或已有分析结果")
@@ -698,6 +706,20 @@ object LoopDebugServer {
             sampleRate = existing.sampleRate
         } else {
             throw HttpError(409, "无可用候选:先 POST /analyze 并等待 phase=done")
+        }
+
+        // 统一口径（含 500ms 最小长度 + 时长上界）：显式 A/B、分析候选、历史行重确认
+        // 都必须过这道闸，绝不把零长度/超短/越界窗口落库。
+        when (val verdict = LoopWindowRules.validateSamples(
+            songId = songId,
+            aSamples = candidate.startSamples,
+            bSamples = candidate.endSamples,
+            sampleRate = sampleRate,
+            durationMs = song.duration,
+        )) {
+            is LoopWindowRules.Verdict.Invalid ->
+                throw HttpError(verdict.status, verdict.code.wire + ": " + verdict.message)
+            is LoopWindowRules.Verdict.Valid -> Unit
         }
 
         val unchanged = existing != null &&

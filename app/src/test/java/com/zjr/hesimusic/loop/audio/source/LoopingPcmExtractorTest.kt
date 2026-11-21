@@ -90,6 +90,25 @@ class LoopingPcmExtractorTest {
     }
 
     @Test
+    fun `single block window starts instead of waiting forever for two blocks`() {
+        // #105：0.5s 窗口在块实现下只有 1 块；起播门槛不能死等 2 块。
+        val tl = LoopingPcmTestSupport.timeline(aUs = 0L, bUs = 500_000L, sr = 1_000, ch = 1)
+        val provider = LoopingPcmTestSupport.provider(tl)
+        val core = LoopingPcmSourceCore(tl, provider, prefetchBlocks = 6)
+        val out = FakeOutput()
+        val extractor = LoopingPcmExtractor(core, tl)
+        extractor.init(out)
+        assertEquals(1, tl.blockCount)
+        extractor.read(fakeInput(), PositionHolder())
+        assertEquals("单块窗口也必须能起播", 1, core.readyBlockCount())
+        assertTrue("first read must output samples", out.track.totalBytes > 0)
+        assertEquals(
+            tl.loopFrames * tl.bytesPerFrame,
+            out.track.totalBytes.toLong(),
+        )
+    }
+
+    @Test
     fun `short block is rejected and totalReadFrames does not advance`() {
         val tl = LoopingPcmTestSupport.timeline()
         val bad = object : PcmRangeProvider {

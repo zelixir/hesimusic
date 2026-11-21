@@ -561,6 +561,53 @@ class LoopPlaybackCoordinator @Inject constructor(
         LoopClaimStore.invalidate()
     }
 
+    /**
+     * #106 循环中切歌的**强制退场**（同步、主线程；由 [LoopSessionPlayer.seekToNext/Previous]
+     * 在跳过 repeat=ONE 之前调用）。
+     *
+     * 为什么不能只靠 transition 事件：
+     * - 多曲队列下原生 seekToNext 会换项（导航口径把 repeat=ONE 降级成 OFF），但**单曲队列**
+     *   没有下一项，原生只绕回当前项、不会产生 transition —— 旧循环（intent/窗口）留在原地；
+     * - 即便换项成功，旧 item 上的 [LoopSourceItemTag] 仍留在队列里，下次回到该歌会被工厂
+     *   再次当成循环源 —— 必须在**旧 item 还是当前项**时把它还原。
+     *
+     * 顺序：先清意图（避免恢复 repeat/shuffle 的事件被当成"进入"），再恢复进入前的模式
+     * （与 applyIntentMode 同一口径），最后撤掉 SOURCE 接管并清窗口/claim。
+     */
+    fun exitForNavigation(player: Player) {
+        val armed = loopIntent.armed.value
+        if (armed != null) {
+            loopIntent.clear()
+            val currentRepeat = player.repeatMode
+            val currentShuffle = player.shuffleModeEnabled
+            val restoreRepeat = armed.previousRepeatMode.takeIf { it != currentRepeat }
+            val restoreShuffle = armed.previousShuffleEnabled.takeIf { it != currentShuffle }
+            if (restoreRepeat != null) player.setRepeatMode(restoreRepeat)
+            if (restoreShuffle != null) player.shuffleModeEnabled = restoreShuffle
+            restoreRepeat?.let { playbackPreferences.saveRepeatMode(it) }
+            restoreShuffle?.let { playbackPreferences.saveShuffleModeEnabled(it) }
+            Log.i(
+                TAG,
+                "loop intent exit: reason=navigation songId=" + armed.songId +
+                    " repeat=" + currentRepeat + "->" + (restoreRepeat ?: currentRepeat) +
+                    " shuffle=" + currentShuffle + "->" + (restoreShuffle ?: currentShuffle),
+            )
+        }
+        runtime.clear()
+        audio.window = null
+        audio.tapWindow = null
+        appliedWindow = null
+        val index = player.currentMediaItemIndex
+        val tag = player.currentMediaItem?.localConfiguration?.tag
+        if (index >= 0 && tag is LoopSourceItemTag) {
+            // 把当前项从循环数据源还原成普通文件源（整表重建；A-086）。
+            restoreSourceItem(player, index, tag, REASON_NAVIGATION)
+        } else {
+            LoopSourceRuntime.onReleased()
+        }
+        LoopClaimStore.invalidate()
+    }
+
     // ------------------------------------------------------------------ 意图订阅
 
     /**
@@ -735,6 +782,8 @@ class LoopPlaybackCoordinator @Inject constructor(
             probe = filePath?.takeIf { it.isNotBlank() }?.let { path ->
                 { PcmFileFormatProbe.probe(path) }
             },
+            // 时长上界：历史行 B 越界（> 整曲 + 100ms）也判 window-invalid，不建源。
+            durationUs = (song?.duration ?: 0L) * 1_000L,
         )
         val ringBytes = when (val d = decision) {
             is LoopSourceFallback.Decision.UseM3Prime -> {
@@ -1042,6 +1091,9 @@ class LoopPlaybackCoordinator @Inject constructor(
 
         /** 意图武装后当前 item/窗口还没就绪时的兜底补算（scheduleIntentSettle）。 */
         const val REASON_INTENT_SETTLE = "intent-settle"
+
+        /** 循环中 next/prev 的强制退场（exitForNavigation）。 */
+        const val REASON_NAVIGATION = "navigation"
 
         /** 兜底补算：最多 10 次 × 200ms（覆盖 setMediaItems/restore 的异步就绪窗口）。 */
         private const val INTENT_SETTLE_ATTEMPTS = 10

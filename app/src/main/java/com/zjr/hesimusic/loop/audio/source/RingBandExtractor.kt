@@ -39,6 +39,39 @@ class RingBandExtractor(
     private var activeElapsedMs = 0L
     private var lastActiveClockMs = -1L
 
+    // ---- 00028(#105) 短窗口接缝取证 -------------------------------------------------
+    /** B→A 回绕次数（每次 seek 重新计数）。 */
+    @Volatile
+    var seamCount: Long = 0L
+        private set
+
+    /** 连续两次"成功输出样本"之间最大的墙钟间隔（ms）：节流/等待/seek 后的首帧不计入。 */
+    @Volatile
+    var maxEmitGapMs: Long = 0L
+        private set
+
+    /** 第一次回绕的时刻（注入时钟，ms）；-1 = 还没回绕过。 */
+    @Volatile
+    var firstSeamAtMs: Long = -1L
+        private set
+
+    /** 最近一次回绕的时刻；-1 = 还没回绕过。 */
+    @Volatile
+    var lastSeamAtMs: Long = -1L
+        private set
+
+    /** 相邻两次回绕间隔的最大/最小值（ms）；min 为 0 = 样本不足。 */
+    @Volatile
+    var maxSeamIntervalMs: Long = 0L
+        private set
+
+    @Volatile
+    var minSeamIntervalMs: Long = 0L
+        private set
+
+    /** 上一次成功输出的时刻；<0 = 本次输出是"重新开始"（节流/等待/seek 之后）。 */
+    private var lastEmitClockMs = -1L
+
     /** seek 时的已输出帧数基准：seek 后允许重新领先 [MAX_AHEAD_SECONDS]（00023）。 */
     private var emittedBaseFrames = 0L
     private var queueGuard = false
@@ -85,9 +118,16 @@ class RingBandExtractor(
     }
 
     override fun read(input: ExtractorInput, seekPosition: PositionHolder): Int {
-        if (LoopSourcePauseGate.paused) return Extractor.RESULT_CONTINUE
+        // 任何"本次没吐样本"的返回都必须打断 emit 间隔测量：否则暂停/节流时间会被算成停顿。
+        if (LoopSourcePauseGate.paused) {
+            lastEmitClockMs = -1L
+            return Extractor.RESULT_CONTINUE
+        }
         renderer.error?.let { throw IOException("RingBand render failed: " + it) }
-        val track = trackOutput ?: return Extractor.RESULT_CONTINUE
+        val track = trackOutput ?: run {
+            lastEmitClockMs = -1L
+            return Extractor.RESULT_CONTINUE
+        }
 
         // 关键：不能无限领先播放头。这里用「加载活跃时间」做墙钟节流，
         // 最多领先 5s；暂停/长时间不读时不计入 activeElapsed，避免恢复后暴冲。
@@ -110,6 +150,7 @@ class RingBandExtractor(
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
             }
+            lastEmitClockMs = -1L
             return Extractor.RESULT_CONTINUE
         }
         val budget = (allowed - emitted).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
@@ -131,6 +172,7 @@ class RingBandExtractor(
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
             }
+            lastEmitClockMs = -1L
             return Extractor.RESULT_CONTINUE
         }
         val request = minOf(READ_CHUNK_BYTES / timeline.bytesPerFrame, budget)
@@ -142,14 +184,47 @@ class RingBandExtractor(
             if (awaitFilled(reader.offsetFrames)) {
                 result = reader.read(request)
             }
-            if (result == null) return Extractor.RESULT_CONTINUE
+            if (result == null) {
+                lastEmitClockMs = -1L
+                return Extractor.RESULT_CONTINUE
+            }
         }
         val data = ParsableByteArray(result.data)
         track.sampleData(data, result.data.size)
         track.sampleMetadata(result.ptsUs, C.BUFFER_FLAG_KEY_FRAME, result.data.size, 0, null)
         samples += 1L
+        // 00028(#105)：回绕取证。间隔按注入时钟算，节流/等待后的首帧已重置基线，
+        // 所以 sincePrevSeamMs 反映的是"两轮循环真实耗时"（0.5s 窗口应≈500ms）。
+        if (lastEmitClockMs >= 0L) {
+            val gap = (now - lastEmitClockMs).coerceAtLeast(0L)
+            if (gap > maxEmitGapMs) maxEmitGapMs = gap
+        }
+        lastEmitClockMs = now
         reader.lastSeamOutputFrames.takeIf { it >= 0L && it != lastSeam }?.let { seam ->
             lastSeam = seam
+            seamCount += 1L
+            val previousSeamMs = lastSeamAtMs
+            if (firstSeamAtMs < 0L) firstSeamAtMs = now
+            lastSeamAtMs = now
+            var sincePrevious = -1L
+            if (previousSeamMs >= 0L) {
+                sincePrevious = (now - previousSeamMs).coerceAtLeast(0L)
+                if (sincePrevious > maxSeamIntervalMs) maxSeamIntervalMs = sincePrevious
+                if (minSeamIntervalMs <= 0L || sincePrevious < minSeamIntervalMs) {
+                    minSeamIntervalMs = sincePrevious
+                }
+            }
+            RingBandLog.i(
+                "RingBand seam idx=" + seamCount +
+                    " outFrames=" + seam +
+                    " tMs=" + now +
+                    " sincePrevSeamMs=" + sincePrevious +
+                    " maxEmitGapMs=" + maxEmitGapMs +
+                    " sessions=" + renderer.sessionCount +
+                    " covered=" + ring.coveredFrames + "/" + timeline.loopFrames +
+                    " offset=" + reader.offsetFrames +
+                    " reads=" + reader.reads,
+            )
             logger("RingBand seam outFrames=" + seam)
             onSeamOutputFrames?.invoke(seam)
         }
@@ -191,7 +266,14 @@ class RingBandExtractor(
                     "s queueGuard=" + queueGuard +
                     " readsPerSecond=" + readsPerSecond +
                     " underruns=" + reader.underruns +
-                    " reads=" + reader.reads,
+                    " reads=" + reader.reads +
+                    // 短窗口接缝：seam 次数/首末时刻/环回间隔/两次输出最大间隔。
+                    " seams=" + seamCount +
+                    " firstSeamMs=" + firstSeamAtMs +
+                    " seamIntervalMinMs=" + minSeamIntervalMs +
+                    " seamIntervalMaxMs=" + maxSeamIntervalMs +
+                    " maxEmitGapMs=" + maxEmitGapMs +
+                    " sessions=" + renderer.sessionCount,
             )
             logHeapIfDue(now2)
         }
@@ -234,6 +316,15 @@ class RingBandExtractor(
     override fun seek(position: Long, timeUs: Long) {
         // 00023 后续的分段计时：请求 → media3 真正调到这里（loading 线程）。
         LoopPreviewDebugBridge.seekStages.noteExtractorSeek()
+        // 每次进入/换窗口重新统计接缝：第一次回绕 vs 之后每次的停顿才有对比意义。
+        seamCount = 0L
+        firstSeamAtMs = -1L
+        lastSeamAtMs = -1L
+        maxSeamIntervalMs = 0L
+        minSeamIntervalMs = 0L
+        maxEmitGapMs = 0L
+        lastEmitClockMs = -1L
+        lastSeam = -1L
         val offset = Math.floorMod(
             timeline.frameAtTimeline(timeUs) - timeline.aFrame,
             timeline.loopFrames,

@@ -34,11 +34,16 @@ data class LoopClaim(
     val fallbackReason: LoopSourceFallback.Reason? = null,
 ) {
 
-    /** 对用户/媒体会话**生效**的循环声明。源没生效时恒 false，哪怕 window 还在。 */
+    /**
+     * 对用户/媒体会话**生效**的循环声明。源没生效时恒 false，哪怕 window 还在。
+     *
+     * 窗口合法性走 [LoopWindowRules]（含 500ms 最小长度）：历史坏行（A==B、只差 1 个样本、
+     * 越界）即使 sourceActive 被误置也绝不算生效。
+     */
     val claimActive: Boolean
         get() = sourceActive &&
             window != null &&
-            window.isValid() &&
+            LoopWindowRules.usable(window) &&
             songId != null &&
             window.songId == songId
 
@@ -72,9 +77,15 @@ data class LoopClaim(
     /**
      * /state.loop 的一等字段契约（claim 真值）。claimed = “有意图窗口”，
      * claimActive = 对用户生效，sourceActive = 源真的在环回，claimReason = 未生效原因。
+     *
+     * 非法窗口（未过 [LoopWindowRules]）在 [LoopClaimResolver] 里已被清成 window=null，
+     * 所以这里 claimed 自然为 false：坏行不声称循环，也不会触发
+     * `loop-claim-without-source`（那条不变量判的是 claimed && !sourceActive）。
      */
     fun debugFields(): LoopClaimDebugFields = LoopClaimDebugFields(
-        claimed = window != null,
+        // 非法窗口不算"有意图窗口"：claimed=false 才能让 loop-claim-without-source
+        // 不误报（那条不变量判 claimed && !sourceActive）。
+        claimed = window != null && LoopWindowRules.usable(window),
         claimActive = claimActive,
         sourceActive = sourceActive,
         claimReason = if (sourceActive) null else fallbackReason?.logName,
@@ -145,17 +156,26 @@ object LoopClaimResolver {
         fallbackReason: LoopSourceFallback.Reason? = null,
     ): LoopClaim {
         val selected = selectWindow(songId, runtimeWindow, audioWindow, isReplaying)
+        // 窗口合法性（500ms 下限 / A<B / 时长上界）在 claim 层再判一次：
+        // 历史坏行即使把源装上了也绝不能声称循环。非法窗口不下发（window=null），
+        // 这样 claimed=false、claimActive=false，且 reason=window-invalid 仍可见。
+        val usableWindow = selected?.takeIf { LoopWindowRules.usable(it) }
         val sourceActive = when {
-            selected == null -> false
+            usableWindow == null -> false
             sourceUnavailable -> false
-            sourceRoute -> sameWindow(installedWindow, selected)
-            else -> sameWindow(audioWindow, selected)
+            sourceRoute -> sameWindow(installedWindow, usableWindow)
+            else -> sameWindow(audioWindow, usableWindow)
+        }
+        val reason = when {
+            selected != null && usableWindow == null -> LoopSourceFallback.Reason.WINDOW_INVALID
+            sourceActive -> null
+            else -> fallbackReason
         }
         return LoopClaim(
-            songId = selected?.songId ?: songId,
-            window = selected,
+            songId = usableWindow?.songId ?: songId,
+            window = usableWindow,
             sourceActive = sourceActive,
-            fallbackReason = if (sourceActive) null else fallbackReason,
+            fallbackReason = reason,
         )
     }
 
