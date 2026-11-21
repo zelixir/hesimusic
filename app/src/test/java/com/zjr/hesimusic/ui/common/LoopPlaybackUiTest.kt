@@ -22,7 +22,7 @@ class LoopPlaybackUiTest {
     )
 
     private fun fold(rawMs: Long, w: LoopWindow? = window, id: Long? = songId): Long =
-        foldDisplayPositionMs(rawMs, w, id)
+        foldDisplayPositionMs(rawMs, w, id, sourceLoopActive = true)
 
     @Test
     fun `窗口为 null 时原样透传`() {
@@ -82,7 +82,11 @@ class LoopPlaybackUiTest {
         assertEquals("前奏原样", 0L, foldDisplayPositionMs(0L, window, songId, sourceLoopActive = false))
         // 源真的生效时仍按老口径折返(默认参数也保持 true,避免调用方漏传时行为漂移)。
         assertEquals("源生效时 B 点折回 A", 50_000L, foldDisplayPositionMs(80_000L, window, songId, sourceLoopActive = true))
-        assertEquals("默认参数 = 源生效", 50_000L, foldDisplayPositionMs(80_000L, window, songId))
+        assertEquals(
+            "显式源生效时 B 点折回 A",
+            50_000L,
+            foldDisplayPositionMs(80_000L, window, songId, sourceLoopActive = true),
+        )
     }
 
     @Test

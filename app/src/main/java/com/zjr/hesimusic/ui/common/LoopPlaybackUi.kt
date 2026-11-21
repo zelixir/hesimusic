@@ -33,7 +33,7 @@ fun foldDisplayPositionMs(
     rawPositionMs: Long,
     window: LoopWindow?,
     currentSongId: Long?,
-    sourceLoopActive: Boolean = true,
+    sourceLoopActive: Boolean,
 ): Long = LoopClaim(
     songId = currentSongId,
     window = window,
