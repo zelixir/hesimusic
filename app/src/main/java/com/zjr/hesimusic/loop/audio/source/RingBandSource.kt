@@ -15,10 +15,41 @@ import androidx.media3.exoplayer.source.ProgressiveMediaSource
 @UnstableApi
 object RingBandSource {
 
-    /** L*bytesPerFrame <= heap/10 才启用环带，否则回退旧分块实现。 */
-    fun canUse(timeline: LoopingPcmTimeline, maxMemoryBytes: Long): Boolean {
+    /**
+     * **主播放器**的环预算分母：窗口 PCM 字节数 <= heap/10 才建环。
+     *
+     * 与 [com.zjr.hesimusic.service.LoopSourceFallback.RING_BUDGET_DIVISOR] 同口径：
+     * 正式播放还要同时扛整曲窗口预填/解码，环带只能占堆的一小份。
+     */
+    const val BUDGET_DIVISOR_MAIN: Long = 10L
+
+    /**
+     * **预览（分析页试听）** 的环预算分母：heap/6。
+     *
+     * 00022：Shiny Up 这类长窗口（A=23.301s B=261.457s，L=238.156s@44.1kHz = 42,010,716B）
+     * 在 heap/10（402MB -> 40.27MB）下判超预算，回退到分块实现（1 秒块 + 块缓存重建），
+     * 点接缝检查要 1~2 秒才出声。预览路径没有整曲解码/正式播放的预填开销，环带就是唯一大对象：
+     * 42MB 仍不到堆的 11%，放宽到 1/6（402MB -> 67MB）留足余量；超过 1/6 的窗口依旧回退，
+     * 保证"环带永远不是 OOM 的来源"。
+     */
+    const val BUDGET_DIVISOR_PREVIEW: Long = 6L
+
+    /**
+     * 环预算字节数 = heap / [divisor]。
+     *
+     * 无堆信息/非法分母返回 0（= 拒绝建环），避免得到"0 字节也算通过"的边界。
+     */
+    fun budgetBytes(maxMemoryBytes: Long, divisor: Long = BUDGET_DIVISOR_MAIN): Long =
+        if (maxMemoryBytes <= 0L || divisor <= 0L) 0L else maxMemoryBytes / divisor
+
+    /** L*bytesPerFrame <= heap/divisor 才启用环带，否则回退旧分块实现。 */
+    fun canUse(
+        timeline: LoopingPcmTimeline,
+        maxMemoryBytes: Long,
+        divisor: Long = BUDGET_DIVISOR_MAIN,
+    ): Boolean {
         val bytes = timeline.loopFrames * timeline.bytesPerFrame
-        return bytes > 0L && bytes <= maxMemoryBytes / 10L
+        return bytes > 0L && bytes <= budgetBytes(maxMemoryBytes, divisor)
     }
 
     fun create(

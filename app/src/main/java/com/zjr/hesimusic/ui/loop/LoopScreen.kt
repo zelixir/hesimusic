@@ -469,13 +469,17 @@ private fun ResultContent(
                 }
             },
             onDragEnd = {
-                when (dragHandle) {
-                    LoopHandle.A -> viewModel.dispatch(LoopPageEvent.DragAEnd)
-                    LoopHandle.B -> viewModel.dispatch(LoopPageEvent.DragBEnd)
-                    null -> Unit
-                }
+                val handle = dragHandle
                 dragHandle = null
-                viewModel.dispatch(LoopPageEvent.CommitWindow)
+                if (handle != null) {
+                    when (handle) {
+                        LoopHandle.A -> viewModel.dispatch(LoopPageEvent.DragAEnd)
+                        LoopHandle.B -> viewModel.dispatch(LoopPageEvent.DragBEnd)
+                    }
+                    // 只有真的拖过手柄才提交窗口;没拖过的"点一下"绝不能 CommitWindow
+                    // (否则播放头会退回模式起点:SEAM=B−5s,B 点左侧 —— issue 00023 用户报告的现象)。
+                    viewModel.dispatch(LoopPageEvent.CommitWindow)
+                }
             },
             modifier = Modifier
                 .fillMaxWidth()
@@ -894,35 +898,49 @@ private fun WaveformCanvas(
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         val width = size.width.toFloat()
-                        val duration = durationSecState.value
-                        if (width <= 0f || duration <= 0.0) return@awaitEachGesture
-                        val target = nearHandle(
+                        val durationMs = (durationSecState.value * 1000.0).toLong()
+                        if (width <= 0f || durationMs <= 0L) return@awaitEachGesture
+                        val target = WaveformGesture.handleAt(
                             x = down.position.x,
                             width = width,
-                            aSec = aSecState.value,
-                            bSec = bSecState.value,
-                            durationSec = duration,
+                            aMs = (aSecState.value * 1000.0).toLong(),
+                            bMs = (bSecState.value * 1000.0).toLong(),
+                            durationMs = durationMs,
                             tolerancePx = handleTouchPx,
                         )
                         if (target == null) {
                             val up = waitForUpOrCancellation()
                             if (up != null) {
                                 up.consume()
-                                val sec = (up.position.x / width * duration).coerceIn(0.0, duration)
-                                onSeekState.value((sec * 1000).toLong())
+                                onSeekState.value(
+                                    WaveformGesture.positionMsAt(up.position.x, width, durationMs),
+                                )
                             }
                             return@awaitEachGesture
                         }
+                        // 按在手柄命中区:先不急着当拖动 —— 没移动的"点一下"必须当 seek,
+                        // 否则松手只会 CommitWindow,把播放头退回模式起点(SEAM = B−5s)。
                         down.consume()
+                        val slopPx = handleTouchPx / 6f
+                        var dragged = false
+                        var lastX = down.position.x
                         while (true) {
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull { it.id == down.id } ?: break
                             change.consume()
+                            lastX = change.position.x
                             if (!change.pressed) break
-                            val sec = (change.position.x / width * duration).coerceIn(0.0, duration)
-                            onDragState.value(target == 'A', (sec * 1000).toLong())
+                            if (!dragged && abs(change.position.x - down.position.x) < slopPx) continue
+                            dragged = true
+                            onDragState.value(
+                                target == 'A',
+                                WaveformGesture.positionMsAt(change.position.x, width, durationMs),
+                            )
                         }
-                        onDragEndState.value()
+                        when (val release = WaveformGesture.release(dragged, lastX, width, durationMs)) {
+                            WaveformRelease.Commit -> onDragEndState.value()
+                            is WaveformRelease.Seek -> onSeekState.value(release.positionMs)
+                        }
                     }
                 },
         ) {
@@ -1052,21 +1070,3 @@ private fun renderWaveBitmaps(
     return dark to green
 }
 
-/** 命中检测:距 A/B 竖线小于容差(px)时返回可拖拽目标(A 优先)。 */
-private fun nearHandle(
-    x: Float,
-    width: Float,
-    aSec: Double,
-    bSec: Double,
-    durationSec: Double,
-    tolerancePx: Float,
-): Char? {
-    if (durationSec <= 0.0) return null
-    val xa = (aSec / durationSec * width).toFloat()
-    val xb = (bSec / durationSec * width).toFloat()
-    return when {
-        abs(x - xa) <= tolerancePx -> 'A'
-        abs(x - xb) <= tolerancePx -> 'B'
-        else -> null
-    }
-}

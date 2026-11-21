@@ -51,6 +51,12 @@ class LoopingPcmDataSource : BaseDataSource(/* isNetwork= */ false) {
 @UnstableApi
 object LoopingPcmExtractorMediaSource {
 
+    /**
+     * @param ringBudgetDivisor 环预算分母（窗口 PCM <= heap/divisor 才建环）。
+     *   默认 [RingBandSource.BUDGET_DIVISOR_MAIN]（heap/10，主播放器口径）；
+     *   预览（分析页试听）传 [RingBandSource.BUDGET_DIVISOR_PREVIEW]（heap/6），
+     *   让 Shiny Up 这类 ~42MB 的长窗口也能走环带而不是回退 1 秒块实现（00022）。
+     */
     fun create(
         item: MediaItem,
         timeline: LoopingPcmTimeline,
@@ -58,13 +64,18 @@ object LoopingPcmExtractorMediaSource {
         logger: (String) -> Unit = {},
         prefetchBlocks: Int = SOURCE_PREFETCH_BLOCKS,
         onSeamOutputFrames: ((Long) -> Unit)? = null,
+        ringBudgetDivisor: Long = RingBandSource.BUDGET_DIVISOR_MAIN,
     ): MediaSource {
         val heap = Runtime.getRuntime().maxMemory()
         val ringProvider = provider as? PcmDecoderRangeProvider
-        if (RingBandSource.canUse(timeline, heap) && ringProvider != null) {
+        val bandBytes = timeline.loopFrames * timeline.bytesPerFrame
+        val budget = RingBandSource.budgetBytes(heap, ringBudgetDivisor)
+        if (RingBandSource.canUse(timeline, heap, ringBudgetDivisor) && ringProvider != null) {
             logger(
-                "RingBand select bandBytes=" + (timeline.loopFrames * timeline.bytesPerFrame) +
-                    " heap=" + heap,
+                "RingBand select bandBytes=" + bandBytes +
+                    " heap=" + heap +
+                    " budget=" + budget +
+                    " divisor=" + ringBudgetDivisor,
             )
             return RingBandSource.create(
                 item = item,
@@ -77,9 +88,9 @@ object LoopingPcmExtractorMediaSource {
         logger(
             "RingBand fallback reason=" + (
                 if (ringProvider == null) "PROVIDER" else "SIZE"
-            ) + " bandBytes=" +
-                (timeline.loopFrames * timeline.bytesPerFrame) +
-                " budget=" + (heap / 10L),
+            ) + " bandBytes=" + bandBytes +
+                " budget=" + budget +
+                " divisor=" + ringBudgetDivisor,
         )
         val core = LoopingPcmSourceCore(
             timeline = timeline,

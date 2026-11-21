@@ -1129,6 +1129,211 @@ int64_t nearestZeroCrossing(const float* pcm, int channels, int64_t totalFrames,
     return sampleIdx + argmin - offset + offsetCorrection;
 }
 
+// --------------------------------------------------------------- seam quality
+// v8: the legacy pipeline ranks candidates purely by chroma-sequence similarity
+// and never inspects the waveform that is actually spliced at B->A. This stage
+// measures the splice itself and feeds a 0..1 quality into the final ranking.
+//
+// Why the *tail* windows: playback runs ... y[B-2], y[B-1], then jumps to y[A].
+// If the loop is a true repetition, y[A+i] == y[B+i], so the step y[B-1] -> y[A]
+// equals the natural step y[B-1] -> y[B]. Correlating [B-W, B) with [A-W, A)
+// therefore measures phase/waveform continuity at the cut (the best lag pins the
+// residual phase offset). Correlating [B-W, B) with [A, A+W) would instead
+// compare the end of one phrase with its beginning, which is near-zero for a
+// valid loop and would reward discontinuous cuts.
+constexpr int kSeamWindowMs = 50;       // analysis window on each side of the cut
+constexpr int kSeamMaxLagMs = 10;       // phase search range for the xcorr
+constexpr int kSeamRefineRangeMs = 30;  // sub-beat local search radius
+constexpr int kSeamRefineCoarseMs = 5;  // coarse step
+constexpr int kSeamRefineFineMs = 1;    // fine step
+
+// v8 debug/A-B switch. The app never sets this, so production keeps seam ranking
+// ON. Host tooling sets LOOP_ENGINE_SEAM=0 to reproduce the pre-v8 ordering
+// bitwise, and LOOP_ENGINE_SEAM_WEIGHT=0..1 to sweep the blend weight.
+bool seamEnabled() {
+    const char* env = std::getenv("LOOP_ENGINE_SEAM");
+    if (env == nullptr || env[0] == '\0') return true;
+    return env[0] != '0';
+}
+
+double seamWeight() {
+    double w = 0.30;
+    const char* env = std::getenv("LOOP_ENGINE_SEAM_WEIGHT");
+    if (env != nullptr && env[0] != '\0') {
+        char* end = nullptr;
+        const double v = std::strtod(env, &end);
+        if (end != env && v >= 0.0 && v <= 1.0) w = v;
+    }
+    return w;
+}
+
+struct SeamQuality {
+    double correlation = 0.0;  // peak normalized xcorr of [B-W,B) and [A-W,A)
+    double rmsJumpDb = 0.0;    // |RMS([A,A+W)) - RMS([B-W,B))| in dB
+    double fluxRatio = 1.0;    // seam spectral distance / local mean distance
+    double quality = 0.0;      // blended 0..1 score
+};
+
+double rmsAt(const std::vector<double>& y, int64_t begin, int64_t end) {
+    begin = std::max<int64_t>(0, begin);
+    end = std::min<int64_t>(int64_t(y.size()), end);
+    if (end <= begin) return 0.0;
+    double s = 0.0;
+    for (int64_t i = begin; i < end; i++) s += y[size_t(i)] * y[size_t(i)];
+    return std::sqrt(s / double(end - begin));
+}
+
+// Normalized cross-correlation peak over lag in [-lagMax, lagMax].
+double tailCorrelation(const std::vector<double>& y, int64_t a, int64_t b, int win, int lagMax) {
+    const int64_t w = std::min<int64_t>(win, std::min(a, b));
+    if (w < 32) return 0.0;
+    double eb = 0.0, ea = 0.0;
+    for (int64_t i = 0; i < w; i++) {
+        const double vb = y[size_t(b - w + i)];
+        const double va = y[size_t(a - w + i)];
+        eb += vb * vb;
+        ea += va * va;
+    }
+    const double denom = std::sqrt(eb * ea);
+    if (denom <= 1e-9) return 0.0;
+    double best = -1.0;
+    for (int64_t lag = -lagMax; lag <= lagMax; lag++) {
+        const int64_t lo = std::max<int64_t>(0, lag);
+        const int64_t hi = std::min<int64_t>(w - 1, w - 1 + lag);
+        double num = 0.0;
+        for (int64_t i = lo; i <= hi; i++)
+            num += y[size_t(b - w + i)] * y[size_t(a - w + i - lag)];
+        best = std::max(best, num / denom);
+    }
+    return std::max(0.0, best);
+}
+
+void unitMagnitude(const std::vector<double>& y, int64_t start, int nfft,
+                   const std::vector<double>& win, std::vector<double>& out) {
+    std::vector<double> frame(size_t(nfft), 0.0);
+    const int64_t total = int64_t(y.size());
+    for (int i = 0; i < nfft; i++) {
+        const int64_t p = start + i;
+        if (p >= 0 && p < total) frame[size_t(i)] = y[size_t(p)] * win[size_t(i)];
+    }
+    std::vector<Cdp> spec(size_t(nfft / 2 + 1));
+    detail::rfft(frame.data(), nfft, spec.data());
+    out.assign(size_t(nfft / 2 + 1), 0.0);
+    double norm = 0.0;
+    for (size_t k = 0; k < out.size(); k++) {
+        out[k] = std::hypot(spec[k].real(), spec[k].imag());
+        norm += out[k] * out[k];
+    }
+    norm = std::sqrt(norm);
+    if (norm > 1e-12)
+        for (double& v : out) v /= norm;
+}
+
+double cosineDistance(const std::vector<double>& a, const std::vector<double>& b) {
+    double dot = 0.0;
+    const size_t n = std::min(a.size(), b.size());
+    for (size_t k = 0; k < n; k++) dot += a[k] * b[k];
+    return std::max(0.0, std::min(1.0, 1.0 - dot));
+}
+
+// Spectral discontinuity at the cut compared with the local frame-to-frame flux.
+double seamFluxRatio(const std::vector<double>& y, int64_t a, int64_t b, int sr) {
+    const int nfft = sr >= 32000 ? 1024 : 512; // ~23 ms at both 44.1k and 22.05k
+    const int hop = nfft / 4;
+    std::vector<double> win;
+    detail::hannPeriodic(nfft, win);
+    std::vector<double> seamA, seamB, t1, t2;
+    unitMagnitude(y, a, nfft, win, seamA);
+    unitMagnitude(y, b - nfft, nfft, win, seamB);
+    const double seamDist = cosineDistance(seamA, seamB);
+    double localSum = 0.0;
+    int localCount = 0;
+    for (int k = 3; k >= 1; k--) { // three consecutive distances before the cut
+        unitMagnitude(y, b - nfft - int64_t(k - 1) * hop, nfft, win, t1);
+        unitMagnitude(y, b - nfft - int64_t(k) * hop, nfft, win, t2);
+        localSum += cosineDistance(t1, t2);
+        localCount++;
+    }
+    for (int k = 0; k < 3; k++) { // three after the jump
+        unitMagnitude(y, a + int64_t(k) * hop, nfft, win, t1);
+        unitMagnitude(y, a + int64_t(k + 1) * hop, nfft, win, t2);
+        localSum += cosineDistance(t1, t2);
+        localCount++;
+    }
+    const double localMean = localCount > 0 ? localSum / double(localCount) : 0.0;
+    return seamDist / std::max(localMean, 1e-4);
+}
+
+SeamQuality evaluateSeam(const std::vector<double>& y, int64_t a, int64_t b, int sr) {
+    SeamQuality q;
+    const int64_t win = std::max<int64_t>(64, int64_t(sr) * kSeamWindowMs / 1000);
+    const int lagMax = int(std::max<int64_t>(8, int64_t(sr) * kSeamMaxLagMs / 1000));
+    q.correlation = tailCorrelation(y, a, b, int(win), lagMax);
+    const double rb = rmsAt(y, b - win, b);
+    const double ra = rmsAt(y, a, a + win);
+    q.rmsJumpDb = (rb > 1e-9 && ra > 1e-9)
+                      ? std::fabs(20.0 * std::log10(ra / rb))
+                      : 60.0;
+    q.fluxRatio = seamFluxRatio(y, a, b, sr);
+    const double corrScore = std::max(0.0, std::min(1.0, (q.correlation - 0.25) / 0.75));
+    const double energyScore = std::exp(-q.rmsJumpDb / 3.0);
+    const double timbreScore = 1.0 / (1.0 + std::max(0.0, q.fluxRatio - 1.0));
+    q.quality = 0.50 * corrScore + 0.30 * energyScore + 0.20 * timbreScore;
+    return q;
+}
+
+// Cheap O(short-window) seam cost used by the sub-beat local search. It mirrors
+// the full metric's dominant terms (boundary step, slope match, short-term
+// energy) without the xcorr/spectral cost, so a ±30 ms grid stays inexpensive.
+double cheapSeamCost(const std::vector<double>& y, int64_t a, int64_t b, int sr) {
+    const int64_t total = int64_t(y.size());
+    if (a < 2 || b < 2 || a >= total || b > total || b <= a) return 1e9;
+    const int64_t win = std::max<int64_t>(32, int64_t(sr) * 5 / 1000);
+    const double rb = rmsAt(y, b - win, b);
+    const double ra = rmsAt(y, a, a + win);
+    const double local = std::max(1e-6, 0.5 * (ra + rb));
+    const double step = std::fabs(y[size_t(a)] - y[size_t(b - 1)]) / local;
+    const double slope = std::fabs((y[size_t(a)] - y[size_t(a - 1)]) -
+                                   (y[size_t(b - 1)] - y[size_t(b - 2)])) / local;
+    const double db = (rb > 1e-9 && ra > 1e-9)
+                          ? std::fabs(20.0 * std::log10(ra / rb)) : 60.0;
+    return 2.0 * step + slope + 0.5 * db;
+}
+
+// Coordinate descent around the beat-aligned cut: coarse 5 ms grid over ±30 ms,
+// then a 1 ms grid over ±5 ms. Loop-length bounds are enforced at every step.
+void refineSeam(const std::vector<double>& y, int sr, int64_t minLen, int64_t maxLen,
+                int64_t& a, int64_t& b) {
+    const int64_t total = int64_t(y.size());
+    struct Stage { int stepMs; int rangeMs; int passes; };
+    const Stage stages[2] = {{kSeamRefineCoarseMs, kSeamRefineRangeMs, 2},
+                             {kSeamRefineFineMs, 5, 1}};
+    for (const Stage& st : stages) {
+        const int64_t step = std::max<int64_t>(1, int64_t(sr) * st.stepMs / 1000);
+        const int64_t range = std::max<int64_t>(step, int64_t(sr) * st.rangeMs / 1000);
+        for (int pass = 0; pass < st.passes; pass++) {
+            for (int coord = 0; coord < 2; coord++) {
+                const int64_t base = coord == 0 ? b : a;
+                int64_t best = base;
+                double bestCost = cheapSeamCost(y, a, b, sr);
+                for (int64_t d = -range; d <= range; d += step) {
+                    if (d == 0) continue;
+                    int64_t na = a, nb = b;
+                    if (coord == 0) nb = base + d; else na = base + d;
+                    if (na < 2 || nb < 2 || na >= total || nb >= total) continue;
+                    if (nb - na < minLen || nb - na > maxLen) continue;
+                    const double c = cheapSeamCost(y, na, nb, sr);
+                    if (c < bestCost - 1e-12) {
+                        bestCost = c;
+                        best = base + d;
+                    }
+                }
+                if (coord == 0) b = best; else a = best;
+            }
+        }
+    }
+}
+
 } // namespace
 
 // ------------------------------------------------------------ orchestration
@@ -1360,6 +1565,15 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
         struct ScoredPair {
             PairRaw p;
             double score;
+            // v8 seam stage (also surfaced through DebugInfo::pairs for the host CLI).
+            double legacyScore = 0.0;
+            double seamQuality = 0.0;
+            double seamCorrelation = 0.0;
+            double seamRmsJumpDb = 0.0;
+            double seamFluxRatio = 1.0;
+            bool seamEvaluated = false;
+            int64_t seamStart = 0;
+            int64_t seamEnd = 0;
         };
         // v6 §10.4-2: scoring parallel by candidate index (scored[i] disjoint writes;
         // stable_sort input sequence identical to serial push order)
@@ -1377,46 +1591,124 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
         std::stable_sort(scored.begin(), scored.end(),
                          [](const ScoredPair& a, const ScoredPair& b) { return a.score > b.score; });
 
+        // ---- v8: seam quality + sub-beat refinement ----
+        // LOOP_ENGINE_SEAM=0 keeps the legacy ordering bitwise, so host tooling
+        // can A/B the two rankings with the same binary. Production never sets it.
+        const bool useSeam = seamEnabled();
+        std::vector<ScoredPair> ranked;
+        if (!useSeam) {
+            ranked = std::move(scored);
+            for (ScoredPair& sp : ranked) sp.legacyScore = sp.score;
+        } else {
+            const size_t seamCount =
+                std::min<size_t>(scored.size(), size_t(std::max(32, maxCandidates * 3)));
+            ranked.assign(scored.begin(), scored.begin() + ptrdiff_t(seamCount));
+            const double wSeam = seamWeight();
+            const int64_t minLenSamples = int64_t(minLoopFrames) * kHop;
+            const int64_t maxLenSamples = int64_t(maxLoopFrames) * kHop;
+            const int64_t yTotal = int64_t(y.size());
+            // Only the legacy top candidates get the expensive treatment; each
+            // shard writes its own ScoredPair, so the stage stays deterministic.
+            parallelForRangeItems(0, int64_t(seamCount), [&](int64_t lo, int64_t hi, int /*shard*/) {
+                for (int64_t i = lo; i < hi; i++) {
+                    ScoredPair& sp = ranked[size_t(i)];
+                    sp.legacyScore = sp.score;
+                    const int64_t a0 = int64_t(sp.p.startF) * kHop + trimStart;
+                    const int64_t b0 = int64_t(sp.p.endF) * kHop + trimStart;
+                    const int64_t aSnap = nearestZeroCrossing(interleavedPcm, channels, frames,
+                                                              sampleRate, a0);
+                    const int64_t bSnap = nearestZeroCrossing(interleavedPcm, channels, frames,
+                                                              sampleRate, b0);
+                    int64_t ya = aSnap - trimStart;
+                    int64_t yb = bSnap - trimStart;
+                    const int64_t aFirst = ya;
+                    const int64_t bFirst = yb;
+                    if (ya >= 2 && yb >= 2 && ya < yTotal && yb < yTotal && yb > ya) {
+                        refineSeam(y, sampleRate, minLenSamples, maxLenSamples, ya, yb);
+                        if (ya >= 1 && yb < yTotal && yb > ya) {
+                            const int64_t ra = nearestZeroCrossing(
+                                interleavedPcm, channels, frames, sampleRate, ya + trimStart);
+                            const int64_t rb = nearestZeroCrossing(
+                                interleavedPcm, channels, frames, sampleRate, yb + trimStart);
+                            const int64_t nya = ra - trimStart;
+                            const int64_t nyb = rb - trimStart;
+                            if (nya >= 1 && nyb < yTotal && nyb > nya) {
+                                ya = nya;
+                                yb = nyb;
+                            } else {
+                                ya = aFirst;
+                                yb = bFirst;
+                            }
+                        }
+                    }
+                    // Clamp into the trimmed stream; metrics and emitted samples agree.
+                    ya = std::max<int64_t>(0, std::min<int64_t>(yTotal - 1, ya));
+                    yb = std::max<int64_t>(ya + 1, std::min<int64_t>(yTotal - 1, yb));
+                    const SeamQuality q = evaluateSeam(y, ya, yb, sampleRate);
+                    sp.seamStart = ya + trimStart;
+                    sp.seamEnd = yb + trimStart;
+                    sp.seamQuality = q.quality;
+                    sp.seamCorrelation = q.correlation;
+                    sp.seamRmsJumpDb = q.rmsJumpDb;
+                    sp.seamFluxRatio = q.fluxRatio;
+                    sp.seamEvaluated = true;
+                    sp.score = (1.0 - wSeam) * sp.legacyScore + wSeam * q.quality;
+                }
+            }, 4);
+            if (!prog.report(0.97)) return result;
+            std::stable_sort(ranked.begin(), ranked.end(),
+                             [](const ScoredPair& a, const ScoredPair& b) {
+                                 return a.score > b.score;
+                             });
+        }
+
         // ---- frame -> sample (trim offset + zero-crossing snap) ----
         int emitted = 0;
-        for (const ScoredPair& sp : scored) {
+        for (const ScoredPair& sp : ranked) {
             if (emitted >= maxCandidates) break;
-            int sf = sp.p.startF;
-            int ef = sp.p.endF;
-            if (trimStart > 0) {
-                sf = int((int64_t(sf) * kHop + trimStart) / kHop);
-                ef = int((int64_t(ef) * kHop + trimStart) / kHop);
-            }
-            const int64_t startSample = int64_t(sf) * kHop;
-            const int64_t endSample = int64_t(ef) * kHop;
             LoopCandidate c;
-            c.loopStart = nearestZeroCrossing(interleavedPcm, channels, frames, sampleRate, startSample);
-            c.loopEnd = nearestZeroCrossing(interleavedPcm, channels, frames, sampleRate, endSample);
-            c.score = sp.score;
-            c.noteDistance = sp.p.nd;
-            c.loudnessDifference = sp.p.ld;
-            result.candidates.push_back(c);
-            emitted++;
-            prog.report(0.97);
-        }
-        if (dbg != nullptr) {
-            int count = 0;
-            for (const ScoredPair& sp : scored) {
-                if (count >= maxCandidates) break;
+            if (useSeam && sp.seamEvaluated) {
+                c.loopStart = sp.seamStart;
+                c.loopEnd = sp.seamEnd;
+            } else {
                 int sf = sp.p.startF;
                 int ef = sp.p.endF;
                 if (trimStart > 0) {
                     sf = int((int64_t(sf) * kHop + trimStart) / kHop);
                     ef = int((int64_t(ef) * kHop + trimStart) / kHop);
                 }
+                c.loopStart = nearestZeroCrossing(interleavedPcm, channels, frames, sampleRate,
+                                                  int64_t(sf) * kHop);
+                c.loopEnd = nearestZeroCrossing(interleavedPcm, channels, frames, sampleRate,
+                                                int64_t(ef) * kHop);
+            }
+            c.score = sp.score;
+            c.noteDistance = sp.p.nd;
+            c.loudnessDifference = sp.p.ld;
+            result.candidates.push_back(c);
+            emitted++;
+            prog.report(0.98);
+        }
+        if (dbg != nullptr) {
+            int count = 0;
+            for (const ScoredPair& sp : ranked) {
+                if (count >= maxCandidates) break;
                 PairInfo pi;
-                pi.startFrame = sf;
-                pi.endFrame = ef;
+                pi.startFrame = sp.p.startF;
+                pi.endFrame = sp.p.endF;
                 pi.loopStart = result.candidates[size_t(count)].loopStart;
                 pi.loopEnd = result.candidates[size_t(count)].loopEnd;
                 pi.noteDistance = sp.p.nd;
                 pi.loudnessDifference = sp.p.ld;
                 pi.score = sp.score;
+                pi.legacyScore = sp.legacyScore;
+                pi.seamQuality = sp.seamQuality;
+                pi.seamCorrelation = sp.seamCorrelation;
+                pi.seamRmsJumpDb = sp.seamRmsJumpDb;
+                pi.seamFluxRatio = sp.seamFluxRatio;
+                pi.seamEvaluated = sp.seamEvaluated;
+                pi.refinedStartSample = sp.seamStart;
+                pi.refinedEndSample = sp.seamEnd;
                 dbg->pairs.push_back(pi);
                 count++;
             }

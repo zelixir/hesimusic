@@ -38,6 +38,7 @@ import com.zjr.hesimusic.loop.audio.source.LoopingPcmMediaSource
 import com.zjr.hesimusic.loop.audio.source.LoopingPcmTimeline
 import com.zjr.hesimusic.loop.audio.source.PcmDecoderRangeProvider
 import com.zjr.hesimusic.loop.audio.source.PcmFileFormatProbe
+import com.zjr.hesimusic.loop.audio.source.RingBandSource
 import com.zjr.hesimusic.loop.audio.source.SourceRenderersFactory
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -392,6 +393,9 @@ class PreviewPlayer @Inject constructor(
         if (LoopSourceMode.isSource()) {
             // 原生源:同一个 SOURCE ExoPlayer(帧计数 sink)+ 普通 MediaItem,没有环带/PTS 投影。
             val p = ensurePlayer(EngineKind.SOURCE)
+            // ensurePlayer 从 M3′ 切到 SOURCE 时会 releasePlayerOnly(),那会顺手把 _outsideLoop 清掉;
+            // 这里必须重新置位,否则位置口径会退回环带折返(A + floorMod(raw, L)),量测/UI 都会显示错位置。
+            _outsideLoop.value = true
             // 循环源引用必须清空:回到区间时 prepareSource 才会重建环带源(否则会误判"同窗口已装好")。
             source = null
             sourceTimeline = null
@@ -426,6 +430,7 @@ class PreviewPlayer @Inject constructor(
         }
         if (play) p.play() else p.pause()
         sourceActive = false
+        _outsideLoop.value = true
         updatePositionOnce()
         Log.i(TAG, "free audition passthrough(m3) target=" + target)
     }
@@ -451,8 +456,8 @@ class PreviewPlayer @Inject constructor(
             controller.window = w
             controller.tapWindow = w
             _sourceFirstBlockReady.value = false
-            val targetT = (target * 1000L - w.loopStartUs)
-                .coerceIn(0L, (w.lengthUs - 1L).coerceAtLeast(0L)) / 1000L
+            // 时间轴落点 T 的唯一来源(纯函数,单测锁"落点=请求值")。
+            val targetT = PreviewSeekPolicy.restoreTimelineMs(target, w)
             p.seekTo(targetT)
             recordAppliedSeek(targetT)
             sourceActive = true
@@ -710,7 +715,14 @@ class PreviewPlayer @Inject constructor(
         }
         val target = ms.coerceAtLeast(0L)
         // 分区/时序判定集中在纯函数里(可为"刚切完模式立刻区外 seek"写单测)。
-        when (PreviewSeekPolicy.decide(mode, w, _outsideLoop.value, target)) {
+        val action = PreviewSeekPolicy.decide(mode, w, _outsideLoop.value, target)
+        Log.d(
+            TAG,
+            "seek action=" + action + " target=" + target +
+                " landing=" + PreviewSeekPolicy.landingDisplayMs(action, target, w) +
+                " outside=" + _outsideLoop.value,
+        )
+        when (action) {
             PreviewSeekAction.FREE_ENTER -> {
                 // 区外 seek:离开循环播放,按文件时间试听(不再把目标折回 [A,B))。
                 _outsideLoop.value = true
@@ -1010,6 +1022,7 @@ class PreviewPlayer @Inject constructor(
     private fun releasePlayerOnly() {
         LoopPreviewDebugBridge.release()
         LoopSourcePauseGate.reset()
+        LoopPlayheadProbe.reset()
         handler.removeCallbacks(ticker)
         val p = player
         player = null
@@ -1029,6 +1042,9 @@ class PreviewPlayer @Inject constructor(
         nativeSourceInstalled = false
         engineKind = EngineKind.M3
         lastPlaybackState = Player.STATE_IDLE
+        // 00022:旧播放器已释放,不能把上一台播放器的 buffering 带进新播放器 ——
+        // 否则"加载中冻结播放头"会在换引擎/重建播放器后一直生效(指针卡住不走)。
+        _buffering.value = false
         controller.window = null
         controller.tapWindow = null
         controller.onDegradeRequested = null
@@ -1086,6 +1102,10 @@ class PreviewPlayer @Inject constructor(
                     provider = provider,
                     logger = { message -> Log.d("LoopPcmSource", message) },
                     onSeamOutputFrames = { outFrames -> controller.tapSeam(outFrames) },
+                    // 00022：预览放宽到 heap/6（主播放器仍 heap/10）。Shiny Up 的窗口 PCM 是
+                    // 42.0MB，heap/10 只有 40.3MB -> 回退 1 秒块，点接缝检查要等 1~2 秒；
+                    // heap/6(67MB) 能装下，长窗口也能走环带的跳填，首声回到与普通窗口同档。
+                    ringBudgetDivisor = RingBandSource.BUDGET_DIVISOR_PREVIEW,
                 )
             } else {
                 LoopingPcmMediaSource(
@@ -1281,6 +1301,11 @@ class PreviewPlayer @Inject constructor(
             "playerPositionMs" to (p?.currentPosition ?: -1L),
             // UI 口径(100ms ticker 值,可能有最多 100ms 滞后) —— 页面对账用这个。
             "displayMs" to _positionMs.value,
+            // 00022:60fps 播放头(波形上真正画的那条线)与"加载中冻结"标记。
+            // 验收"点接缝检查后指针冻结在 B−5s 不动、出声后才开始走"就看这两项;
+            // displayMs 是真实位置的 10Hz 采样,它冻结不代表指针冻结(指针是插值出来的)。
+            "playheadMs" to LoopPlayheadProbe.lastPlayheadMs,
+            "playheadFrozen" to LoopPlayheadProbe.lastFrozen,
             // 实时口径:直接从播放器位置投影(折返/自由源都按同一口径),量测 seek 落点用它,避免 ticker 滞后。
             "liveDisplayMs" to liveDisplayMs(p),
             // 循环窗口(用于恢复循环);自由试听期间不生效,但保留着等"拖回区间"恢复。

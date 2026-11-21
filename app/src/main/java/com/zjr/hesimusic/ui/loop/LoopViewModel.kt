@@ -949,12 +949,27 @@ class LoopViewModel @Inject constructor(
      */
     fun interpolatedPositionMs(nowElapsedRealtime: Long): Long {
         val ready = _pageState.value as? LoopPageState.Ready ?: return 0L
-        return LoopPlayhead.interpolate(
+        // 00022:从点击到首帧出声之间,播放器在 buffering,**真实位置一步都没走** ——
+        // 它就是本次操作的落点(seek 目标 / 模式起点),也就是插值锚点。这时禁止外推:
+        // 否则指针按 1s/s 跑到目标前面,首帧出声那一刻再被真实位置拽回来(用户看到的"回跳")。
+        val loading = previewPlayer.buffering.value
+        if (loading) {
+            // 每帧刷新锚点时刻:解除冻结后的第一帧只从落点多走一帧,不会因为锚点停在
+            // 点击时刻而前冲(那是另一种"跳一下")。
+            anchorElapsedRealtime = nowElapsedRealtime
+        }
+        val playhead = LoopPlayhead.interpolate(
             state = ready,
             anchorMs = anchorMs,
             anchorElapsedRealtime = anchorElapsedRealtime,
             nowElapsedRealtime = nowElapsedRealtime,
+            loading = loading,
         )
+        LoopPlayheadProbe.note(
+            playheadMs = playhead,
+            frozen = loading || ready.playback !is PlaybackState.Playing,
+        )
+        return playhead
     }
 
     private fun currentPositionMs(): Long =

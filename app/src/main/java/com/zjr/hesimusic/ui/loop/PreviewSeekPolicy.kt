@@ -26,6 +26,43 @@ enum class PreviewSeekAction {
 object PreviewSeekPolicy {
 
     /**
+     * LOOP_RESTORE 的环带时间轴落点 T(ms):新装的环带源 T=0 恒对应 A。
+     *
+     * 注意这里**不是** (target−A) mod L —— 窗口外的目标钳到窗口起点,绝不能被折到环尾,
+     * 否则"点 A 左侧"会跳到 B 左侧(issue 00023 用户报告的现象)。
+     */
+    fun restoreTimelineMs(targetMs: Long, window: LoopWindow): Long {
+        val aMs = window.loopStartUs / 1_000L
+        val lengthMs = (window.lengthUs / 1_000L).coerceAtLeast(1L)
+        return (targetMs.coerceAtLeast(0L) - aMs).coerceIn(0L, lengthMs - 1L)
+    }
+
+    /** 展示位置 ↔ 环带时间轴同口径折返(= A + floorMod(T, L),与 LoopSourceProjection.displayUs 一致)。 */
+    fun displayOfTimelineMs(timelineMs: Long, window: LoopWindow): Long {
+        val aMs = window.loopStartUs / 1_000L
+        val lengthMs = (window.lengthUs / 1_000L).coerceAtLeast(1L)
+        return aMs + ((timelineMs % lengthMs) + lengthMs) % lengthMs
+    }
+
+    /**
+     * 该路径的**展示落点**契约(issue 00023):任何路径的落点都必须等于请求的展示位置。
+     * - 自由试听:原生源按媒体时间显示 → 落点 = 请求值(绝不折返);
+     * - 环内 / 恢复循环:落点 = 折返后的展示位置(投影正确时等于请求值)。
+     *
+     * 单测用它对 A 之前/之后、A/B 边界逐点断言;生产端用它打日志/对账。
+     */
+    fun landingDisplayMs(
+        action: PreviewSeekAction,
+        targetMs: Long,
+        window: LoopWindow?,
+    ): Long = when {
+        window == null -> targetMs.coerceAtLeast(0L)
+        action == PreviewSeekAction.FREE_ENTER || action == PreviewSeekAction.FREE_SEEK ->
+            targetMs.coerceAtLeast(0L)
+        else -> displayOfTimelineMs(restoreTimelineMs(targetMs, window), window)
+    }
+
+    /**
      * @param mode 当前试听模式(FREE = 用户显式选择整段直通,不存在"区外")
      * @param window 当前循环窗口;null = 无循环(自由模式/非法窗口)
      * @param outsideLoop 播放器当前是否已处于自由试听

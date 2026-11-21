@@ -15,7 +15,16 @@ struct PairInfo {
     int64_t loopEnd = 0;
     double noteDistance = 0.0;
     double loudnessDifference = 0.0;
-    double score = 0.0;
+    double score = 0.0;              // final score (v8: blended, see loop_engine.cpp)
+    // v8 seam-quality diagnostics (host CLI only; not part of the JNI contract).
+    double legacyScore = 0.0;        // pre-v8 chroma-sequence score
+    double seamQuality = 0.0;        // 0..1 blended continuity at the B->A splice
+    double seamCorrelation = 0.0;    // peak normalized xcorr of the two tail windows
+    double seamRmsJumpDb = 0.0;      // |short-term RMS after A - before B| in dB
+    double seamFluxRatio = 1.0;      // seam spectral distance / local mean distance
+    bool seamEvaluated = false;      // false when LOOP_ENGINE_SEAM=0 or bounds fell back
+    int64_t refinedStartSample = 0;  // pre-zero-crossing refined position (original coords)
+    int64_t refinedEndSample = 0;
 };
 
 struct DebugInfo {

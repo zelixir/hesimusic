@@ -2,6 +2,7 @@ package com.zjr.hesimusic.ui.loop
 
 import com.zjr.hesimusic.loop.LoopWindow
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -95,6 +96,77 @@ class PreviewSeekPolicyTest {
             PreviewSeekAction.LOOP_FAST,
             PreviewSeekPolicy.decide(PreviewMode.LOOP_ONLY, null, outsideLoop = false, targetMs = 1458L),
         )
+    }
+
+
+    // ------------------------------------------------------------------ 落点契约(A 之前/B 之后/边界)
+
+    // Shiny Up!(issue 00023 用户报告):A=23301 B=261457 duration=284865。
+    private val shinyWindow = LoopWindow(songId = 41126L, loopStartUs = 23_301_000L, loopEndUs = 261_457_000L)
+    private val shinyDuration = 284_865L
+
+    @Test
+    fun beforeAAlwaysFreeAuditionWithLandingEqualToTarget() {
+        val points = listOf(0L, 23_301L - 10_000L, 23_301L - 1_000L)
+        for (target in points) {
+            val action = PreviewSeekPolicy.decide(PreviewMode.LOOP_ONLY, shinyWindow, outsideLoop = false, targetMs = target)
+            assertEquals("target=" + target + " 必须在区外(自由试听)", PreviewSeekAction.FREE_ENTER, action)
+            assertEquals(
+                "target=" + target + " 的展示落点必须等于请求值(不能折到 B 左侧)",
+                target,
+                PreviewSeekPolicy.landingDisplayMs(action, target, shinyWindow),
+            )
+            // 已在自由试听里:继续原生 seek,落点仍等于请求值。
+            val again = PreviewSeekPolicy.decide(PreviewMode.LOOP_ONLY, shinyWindow, outsideLoop = true, targetMs = target)
+            assertEquals(PreviewSeekAction.FREE_SEEK, again)
+            assertEquals(target, PreviewSeekPolicy.landingDisplayMs(again, target, shinyWindow))
+        }
+    }
+
+    @Test
+    fun afterBAlwaysFreeAuditionWithLandingEqualToTarget() {
+        val points = listOf(261_457L + 5_000L, 261_457L + 20_000L)
+        for (target in points) {
+            assertTrue("测试点必须在时长内", target <= shinyDuration)
+            val action = PreviewSeekPolicy.decide(PreviewMode.LOOP_ONLY, shinyWindow, outsideLoop = false, targetMs = target)
+            assertEquals("target=" + target + " 必须在区外", PreviewSeekAction.FREE_ENTER, action)
+            assertEquals(target, PreviewSeekPolicy.landingDisplayMs(action, target, shinyWindow))
+        }
+    }
+
+    @Test
+    fun loopBoundaryPointsKeepRequestedLanding() {
+        val cases = listOf(
+            23_301L to PreviewSeekAction.LOOP_FAST, // A 在区间内
+            23_301L + 1L to PreviewSeekAction.LOOP_FAST,
+            261_457L - 1L to PreviewSeekAction.LOOP_FAST,
+            261_457L to PreviewSeekAction.FREE_ENTER, // B 右开 → 区外
+        )
+        for ((target, expected) in cases) {
+            val action = PreviewSeekPolicy.decide(PreviewMode.LOOP_ONLY, shinyWindow, outsideLoop = false, targetMs = target)
+            assertEquals("target=" + target, expected, action)
+            assertEquals(
+                "target=" + target + " 的落点必须等于请求值",
+                target,
+                PreviewSeekPolicy.landingDisplayMs(action, target, shinyWindow),
+            )
+        }
+    }
+
+    @Test
+    fun restoreTimelineNeverFoldsOutsideTargetsIntoTheLoopTail() {
+        // 窗口外的目标钳到窗口起点/终点,绝不 (target−A) mod L 折到环尾。
+        assertEquals(0L, PreviewSeekPolicy.restoreTimelineMs(0L, shinyWindow))
+        assertEquals(0L, PreviewSeekPolicy.restoreTimelineMs(23_301L - 1_000L, shinyWindow))
+        assertEquals(
+            (261_457L - 23_301L) - 1L,
+            PreviewSeekPolicy.restoreTimelineMs(999_999L, shinyWindow),
+        )
+        // 折返口径自洽:restore 后的展示位置仍等于目标(区内)。
+        for (target in listOf(23_301L + 1_000L, 100_000L, 261_457L - 1L)) {
+            val t = PreviewSeekPolicy.restoreTimelineMs(target, shinyWindow)
+            assertEquals(target, PreviewSeekPolicy.displayOfTimelineMs(t, shinyWindow))
+        }
     }
 
     @Test
