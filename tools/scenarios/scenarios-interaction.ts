@@ -1056,11 +1056,12 @@ const s105: Scenario = {
         const stEnd = await ctx.api.state();
         const wEnd = loopWindowOf(stEnd);
         const degDelta = Number(stEnd.loop?.degradeCount ?? 0) - deg0;
+        const seamDelta = Number(stEnd.loop?.seamCount ?? 0) - seam0;
         checks.push(
           check(
             "0.5s 窗口不移出循环、不降级",
             String(stEnd.playback?.engine) === "loop" && wEnd !== null && degDelta === 0,
-            "engine=" + stEnd.playback?.engine + " window=" + fmtWindow(wEnd) + " degrade+" + degDelta,
+            "engine=" + stEnd.playback?.engine + " window=" + fmtWindow(wEnd) + " seam+" + seamDelta + " degrade+" + degDelta,
           ),
         );
         checks.push(check("0.5s 窗口不崩", stEnd.playback?.connected === true, "connected=" + stEnd.playback?.connected));
@@ -1509,6 +1510,11 @@ const s107: Scenario = {
       };
     } finally {
       await ctx.api.post("/loop/exit").catch(() => null);
+      // 分析成功会落库"临时结果"，可能改写这首歌的 loop 行；这里把它还原成跑之前那条（用户数据）。
+      const restored = await restoreLoopRow(ctx, song.id, info.origA, info.origB).catch(() =>
+        check("恢复原 A/B", false, "restore 异常"),
+      );
+      if (!restored.pass) checks.push(restored);
       await ctx.resetForMain().catch(() => null);
     }
   },

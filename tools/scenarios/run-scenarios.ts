@@ -341,7 +341,7 @@ function stateFingerprint(s: State): string {
 // 主流程
 // ---------------------------------------------------------------------------
 
-const UI_SCENARIOS = new Set([6, 7, 9, 10, 11, 15, 16, 18, 45]);
+const UI_SCENARIOS = new Set([6, 7, 9, 10, 11, 15, 16, 18, 45, 103, 110, 111, 112]);
 
 async function main(): Promise<number> {
   const opts = parseArgs(process.argv.slice(2));
@@ -1257,4 +1257,5 @@ main()
     if (e?.stack) console.error(String(e.stack).split("\n").slice(0, 6).join("\n"));
     process.exit(2);
   });
+
 
