@@ -11,6 +11,7 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import com.zjr.hesimusic.core.invariants.AssumptionFrameUs
 import com.zjr.hesimusic.core.invariants.AudioOutputFrames
+import com.zjr.hesimusic.service.RenderedFramesCounter
 import com.zjr.hesimusic.core.invariants.AssumptionInvariantCode
 import com.zjr.hesimusic.core.invariants.AvailableCommandsEvaluator
 import com.zjr.hesimusic.core.invariants.AvailableCommandsSample
@@ -84,6 +85,9 @@ internal object PlaybackInvariantMonitor {
      * 所以 [lastSampleMap] 在返回时再用实时计数覆盖 writtenFrames/atMs。
      */
     private const val SAMPLE_INTERVAL_MS = 500L
+
+    /** 00029：outputFrames 的独立轻量采样周期（只读 position）。 */
+    private const val OUTPUT_FRAMES_TICK_MS = 50L
 
     /**
      * 音源不一致需要连续 2 次采样（≈1s）确认才上报：
@@ -185,6 +189,27 @@ internal object PlaybackInvariantMonitor {
 
     @Volatile
     private var lastSample: Map<String, Any?>? = null
+    private val renderedFramesCounter = RenderedFramesCounter()
+
+    /**
+     * 00029：outputFrames 的轻量 50ms tick（只读 currentPosition，不碰其它探针）。
+     * invariantProbe 本身 500ms 采样一次；#90 的 1.2s 窗口只有 2~3 个点，卡边界会漏判。
+     */
+    private val outputFramesTicker = object : Runnable {
+        override fun run() {
+            val d = entry
+            val player = exoPlayer
+            if (d != null && player != null) {
+                runCatching {
+                    renderedFramesCounter.onPosition(
+                        player.currentPosition,
+                        d.loopAudioController().outputSampleRate,
+                    )
+                }
+            }
+            if (started) handler.postDelayed(this, OUTPUT_FRAMES_TICK_MS)
+        }
+    }
 
     /** 非 null 时用合成采样打真实判定器（真机验证用，见 POST /debug/invariant）。 */
     @Volatile
@@ -235,7 +260,12 @@ internal object PlaybackInvariantMonitor {
         entry = d
         connection = playerConnection
         appContext = context.applicationContext
+        renderedFramesCounter.reset()
         handler.postDelayed(sampler, SAMPLE_INTERVAL_MS)
+        handler.postDelayed(outputFramesTicker, OUTPUT_FRAMES_TICK_MS)
+        FrameGapRecorder.start {
+            AudioOutputFrames.totalFrames(d.loopAudioController())
+        }
         Log.i(TAG, "invariant monitor started intervalMs=" + SAMPLE_INTERVAL_MS)
     }
 
@@ -259,6 +289,10 @@ internal object PlaybackInvariantMonitor {
      *   （harness 的 measureFrames / engine-cost-gate 都按 atMs 差算跨度）。
      *
      * 计数来自 [AudioOutputFrames]（AudioSink 交给 delegate 的累计帧数），本方法只读。
+     *
+     * 00029：`outputFrames` 是**已渲染帧**（按 player.currentPosition 正增量累加，
+     * 单调、不因 seek 回退），用于区分“写进 AudioTrack 缓冲”和“用户真的听到”：
+     * 暂停/缓冲不增长；只有播放位置前进才增长。
      */
     fun lastSampleMap(): Map<String, Any?>? {
         val cached = lastSample ?: return null
@@ -382,6 +416,11 @@ internal object PlaybackInvariantMonitor {
         val now = System.currentTimeMillis()
         val controller = d.loopAudioController()
         val frames = AudioOutputFrames.totalFrames(controller)
+        val currentPositionMs = runCatching { player.currentPosition }.getOrDefault(0L)
+        val outputFrames = renderedFramesCounter.onPosition(
+            currentPositionMs,
+            controller.outputSampleRate,
+        )
         val playbackState = player.playbackState
         // 主播放器是否走 SOURCE（TapAudioSink）路线：帧计数只覆盖这条路线；
         // M3′ 路线由 LoopAudioSink 出声，目前没有同一来源的帧计数，不参与判定（避免误报）。
@@ -793,6 +832,7 @@ internal object PlaybackInvariantMonitor {
             "playWhenReady" to playWhenReady,
             "playbackState" to playbackState,
             "writtenFrames" to frames,
+            "outputFrames" to outputFrames,
             "windowActive" to windowActive,
             "itemHasLoopTag" to itemHasLoopTag,
             "lastSelect" to select?.kind,

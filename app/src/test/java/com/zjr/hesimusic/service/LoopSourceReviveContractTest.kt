@@ -8,9 +8,13 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.test.utils.FakeClock
 import androidx.media3.test.utils.TestExoPlayerBuilder
 import androidx.test.core.app.ApplicationProvider
+import com.zjr.hesimusic.loop.LoopIntent
+import com.zjr.hesimusic.loop.LoopRuntime
+import com.zjr.hesimusic.loop.audio.LoopAudioController
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -63,5 +67,27 @@ class LoopSourceReviveContractTest {
         player.prepare()
         ShadowLooper.idleMainLooper()
         assertNotEquals("prepare() 必须把源拉起", Player.STATE_IDLE, player.playbackState)
+    }
+
+    @Test
+    fun sessionPlayOnIdle_preparesTheRestoredSource() {
+        // #90：暂停态换源后协调器 stop 到 IDLE；用户按播放时 LoopSessionPlayer 必须先 prepare。
+        val player = newPlayer()
+        player.setMediaItems(listOf(item("11")))
+        player.stop()
+        ShadowLooper.idleMainLooper()
+        assertEquals(Player.STATE_IDLE, player.playbackState)
+
+        val session = LoopSessionPlayer(
+            player = player,
+            runtime = LoopRuntime(),
+            audio = LoopAudioController(),
+            loopIntent = LoopIntent(),
+        )
+        session.play()
+        ShadowLooper.idleMainLooper()
+
+        assertNotEquals("session.play() 必须把 IDLE 拉起", Player.STATE_IDLE, player.playbackState)
+        assertTrue(player.playWhenReady)
     }
 }

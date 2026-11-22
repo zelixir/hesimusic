@@ -1414,8 +1414,22 @@ class LoopPlaybackCoordinator @Inject constructor(
             sourcesRebuilt = true,
             stateAfterRebuild = stateAfterRebuild,
         )
-        if (revive.prepare) player.prepare()
-        if (revive.play) player.play()
+        if (!playWhenReadyBefore) {
+            // #90 回归：暂停态换源时 setMediaItems 仍可能自动 prepare 并预填一个 buffer，
+            // 造成 writtenFrames 增长（真机 4079f）。立即 stop 丢弃预填，只保留一个
+            // pending seek；等用户真正 play() 时再由 LoopSessionPlayer 统一 prepare。
+            player.stop()
+            player.seekTo(index, mediaMs)
+            Log.i(
+                TAG,
+                "source restore paused: stop-and-seek mediaMs=" + mediaMs +
+                    " index=" + index + " reason=" + reason +
+                    " state=" + player.playbackState + " pwr=" + player.playWhenReady,
+            )
+        } else {
+            if (revive.prepare) player.prepare()
+            if (revive.play) player.play()
+        }
         Log.i(
             TAG,
             "source item restored reason=" + reason + " index=" + index +

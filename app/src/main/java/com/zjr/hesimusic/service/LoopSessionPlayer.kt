@@ -94,6 +94,9 @@ class LoopSessionPlayer(
             Log.i(TAG, "paused wrap: auto play() suppressed (stay paused)")
             return
         }
+        // 暂停态换源后协调器会把播放器 stop 到 IDLE（防预填写帧）；用户真正 play 时
+        // ExoPlayer 的 play() 不会自动 prepare，必须在这里补一次，否则会停在 IDLE。
+        if (playbackState == Player.STATE_IDLE) super.prepare()
         LoopSourcePauseGate.resume()
         super.play()
     }

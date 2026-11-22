@@ -458,12 +458,18 @@ object LoopDebugServer {
             method == "POST" && segments == listOf("debug", "source-mode") -> handleSourceModeToggle(body)
             method == "POST" && segments == listOf("debug", "preview-seek") -> handlePreviewSeek(body)
             method == "GET" && segments == listOf("debug", "preview") -> handlePreviewSnapshot()
+            method == "GET" && segments == listOf("debug", "frame-gaps") -> handleFrameGaps(params)
             method == "POST" && segments == listOf("debug", "invariant") -> handleInvariantFault(body)
             else -> throw HttpError(404, "unknown endpoint: $method ${request.path}")
         }
     }
 
     // ------------------------------------------------------------ /state
+
+    private fun handleFrameGaps(params: Map<String, String>): Map<String, Any?> {
+        val windowMs = params["windowMs"]?.toLongOrNull() ?: 5_000L
+        return FrameGapRecorder.snapshot(windowMs)
+    }
 
     private suspend fun handleState(): Map<String, Any?> {
         val d = deps()
@@ -491,6 +497,8 @@ object LoopDebugServer {
             "invariants" to PlaybackInvariantMonitor.snapshotMaps(),
             // 最近一次 500ms 采样的原始事实，便于真机确认“为什么没触发/为什么触发”。
             "invariantProbe" to PlaybackInvariantMonitor.lastSampleMap(),
+            // 设备侧 5ms 采样：最近一次停写段时长，避免 HTTP 轮询把计数粒度误判成静音。
+            "lastWriteGapMs" to FrameGapRecorder.lastGapMs(),
             "library" to library,
             "server" to linkedMapOf(
                 "version" to VERSION,
