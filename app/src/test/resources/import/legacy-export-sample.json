@@ -1,0 +1,229 @@
+{
+  "format": "hesi-legacy-export",
+  "formatVersion": 1,
+  "version": 4,
+  "exportedAt": 1795335600000,
+  "generator": "tools/export-legacy-data.ps1 (runas)",
+  "source": {
+    "applicationId": "com.zjr.hesimusic",
+    "versionName": "2.6.25-test",
+    "versionCode": 1336,
+    "databaseVersion": 10,
+    "deviceSerial": "b1e84dad",
+    "deviceModel": "KB2000",
+    "androidRelease": "14",
+    "method": "runas"
+  },
+  "songs": [
+    {
+      "id": 101,
+      "title": "CUE 第一轨",
+      "artist": "Artist A",
+      "album": "Album A",
+      "filePath": "/storage/emulated/0/Music/a.flac",
+      "duration": 180000,
+      "trackNumber": 1,
+      "year": null,
+      "genre": null,
+      "mimeType": "audio/flac",
+      "size": 0,
+      "dateAdded": 1700000000000,
+      "isCue": true,
+      "cueFilePath": "/storage/emulated/0/Music/a.cue",
+      "startPosition": 0,
+      "endPosition": 180000,
+      "titleInitial": "C",
+      "folderPath": "/storage/emulated/0/Music"
+    },
+    {
+      "id": 102,
+      "title": "CUE 第二轨",
+      "artist": "Artist A",
+      "album": "Album A",
+      "filePath": "/storage/emulated/0/Music/a.flac",
+      "duration": 200000,
+      "trackNumber": 2,
+      "year": null,
+      "genre": null,
+      "mimeType": "audio/flac",
+      "size": 0,
+      "dateAdded": 1700000000000,
+      "isCue": true,
+      "cueFilePath": "/storage/emulated/0/Music/a.cue",
+      "startPosition": 180000,
+      "endPosition": 380000,
+      "titleInitial": "C",
+      "folderPath": "/storage/emulated/0/Music"
+    },
+    {
+      "id": 103,
+      "title": "普通歌",
+      "artist": "Artist B",
+      "album": "Album B",
+      "filePath": "/storage/emulated/0/Music/b.ogg",
+      "duration": 240000,
+      "trackNumber": 1,
+      "year": "2024",
+      "genre": "Pop",
+      "mimeType": "audio/ogg",
+      "size": 1234567,
+      "dateAdded": 1700000001000,
+      "isCue": false,
+      "cueFilePath": null,
+      "startPosition": 0,
+      "endPosition": -1,
+      "titleInitial": "P",
+      "folderPath": "/storage/emulated/0/Music"
+    }
+  ],
+  "songLoops": [
+    {
+      "songId": 101,
+      "loopStartSamples": 441000,
+      "loopEndSamples": 1323000,
+      "sampleRate": 44100,
+      "loopStartMs": 10000,
+      "loopEndMs": 30000,
+      "score": 0.91,
+      "noteDistance": 0.1,
+      "loudnessDifference": 0.2,
+      "createdAt": 1795000000000,
+      "confirmed": true,
+      "candidatesJson": "[{\"startSamples\":441000,\"endSamples\":1323000,\"score\":0.91}]"
+    },
+    {
+      "songId": 103,
+      "loopStartSamples": 882000,
+      "loopEndSamples": 1764000,
+      "sampleRate": 44100,
+      "loopStartMs": 20000,
+      "loopEndMs": 40000,
+      "score": 0.5,
+      "noteDistance": 0.4,
+      "loudnessDifference": 0.6,
+      "createdAt": 1795000001000,
+      "confirmed": false
+    },
+    {
+      "songId": 999,
+      "loopStartSamples": 1000,
+      "loopEndSamples": 2000,
+      "sampleRate": 44100,
+      "loopStartMs": 1,
+      "loopEndMs": 2,
+      "score": 0.1,
+      "noteDistance": 0.9,
+      "loudnessDifference": 0.9,
+      "createdAt": 1795000002000,
+      "confirmed": true
+    }
+  ],
+  "playlists": [
+    {
+      "id": 5,
+      "name": "歌单A",
+      "createdAt": 1700000002000
+    },
+    {
+      "id": 6,
+      "name": "歌单B",
+      "createdAt": 1700000003000
+    }
+  ],
+  "playlistEntries": [
+    {
+      "id": 500,
+      "playlistId": 5,
+      "songId": 101,
+      "order": 0
+    },
+    {
+      "id": 501,
+      "playlistId": 5,
+      "songId": 102,
+      "order": 1
+    },
+    {
+      "id": 502,
+      "playlistId": 6,
+      "songId": 103,
+      "order": 0
+    },
+    {
+      "id": 503,
+      "playlistId": 5,
+      "songId": 999,
+      "order": 2
+    }
+  ],
+  "favorites": [
+    {
+      "filePath": "/storage/emulated/0/Music/a.flac",
+      "startPosition": 0,
+      "dateAdded": 1700000004000
+    },
+    {
+      "filePath": "/storage/emulated/0/Music/b.ogg",
+      "startPosition": 0,
+      "dateAdded": 1700000005000
+    }
+  ],
+  "hiddenSongs": [
+    {
+      "filePath": "/storage/emulated/0/Music/b.ogg",
+      "startPosition": 0,
+      "hiddenAt": 1700000006000
+    }
+  ],
+  "smartPlaylists": [
+    {
+      "id": 7,
+      "name": "专辑A",
+      "createdAt": 1700000007000,
+      "sql": "SELECT s.* FROM songs s WHERE s.album = 'Album A' ORDER BY s.startPosition"
+    }
+  ],
+  "preferences": {
+    "playback_prefs": [
+      {
+        "key": "app_theme_mode",
+        "type": "string",
+        "value": "DARK"
+      },
+      {
+        "key": "min_album_track_count",
+        "type": "int",
+        "value": 3
+      },
+      {
+        "key": "queue_ids",
+        "type": "string",
+        "value": "101,102,103"
+      },
+      {
+        "key": "current_song_id",
+        "type": "long",
+        "value": 101
+      },
+      {
+        "key": "startup_image_uri",
+        "type": "string",
+        "value": "content://com.android.providers.media.documents/document/image%3A42"
+      }
+    ],
+    "scan_prefs": [
+      {
+        "key": "scan_root_uri",
+        "type": "string",
+        "value": "content://com.android.externalstorage.documents/tree/primary%3AMusic"
+      }
+    ],
+    "loop_settings": [
+      {
+        "key": "loop_engine",
+        "type": "string",
+        "value": "m3"
+      }
+    ]
+  }
+}
