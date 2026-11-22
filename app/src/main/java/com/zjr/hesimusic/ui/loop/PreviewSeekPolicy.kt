@@ -67,17 +67,28 @@ object PreviewSeekPolicy {
      * @param window 当前循环窗口;null = 无循环(自由模式/非法窗口)
      * @param outsideLoop 播放器当前是否已处于自由试听
      * @param targetMs 本次 seek 的展示口径目标
+     * @param allowFreeAudition false = 本次 seek **禁止**进入/保持区外自由试听。
+     *   停止(回模式起点)必须走这条:停止不是"去区间外试听",不应换原生源;旧实现里
+     *   LOOP_ONLY 的落点 A−300ms 落在窗口外 → FREE_ENTER → 换源后暂停态 sink 仍周期性
+     *   写空帧(真机 #84 回归)。
      */
     fun decide(
         mode: PreviewMode,
         window: LoopWindow?,
         outsideLoop: Boolean,
         targetMs: Long,
+        allowFreeAudition: Boolean = true,
     ): PreviewSeekAction {
         val loopArmed = window != null && mode != PreviewMode.FREE
         val inside = window != null &&
             targetMs >= window.loopStartUs / 1000L &&
             targetMs < window.loopEndUs / 1000L
+        if (!allowFreeAudition) {
+            // 已在自由试听:先恢复循环(同一 A/B/模式),落点按 restoreTimelineMs 处理;
+            // 否则走区内快速 seek —— 即使目标落在窗口外(FULL 的前奏/模式起点),
+            // 也保持当前数据源不动(SOURCE 按 T 投影,M3′ 按 raw seek)。
+            return if (outsideLoop) PreviewSeekAction.LOOP_RESTORE else PreviewSeekAction.LOOP_FAST
+        }
         return when {
             // 区外 + 还没进自由试听:进入(只有这一次会换源)。
             loopArmed && !inside && !outsideLoop -> PreviewSeekAction.FREE_ENTER

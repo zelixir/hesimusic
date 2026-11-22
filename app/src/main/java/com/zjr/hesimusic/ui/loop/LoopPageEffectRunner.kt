@@ -22,6 +22,16 @@ interface LoopPageEffectHost {
 
     fun seekTo(positionMs: Long)
 
+    /**
+     * 停止/回模式起点(暂停后的重定位)。
+     *
+     * 与 [seekTo] 的区别:实现方**不得**进入区外自由试听(不换源)。
+     * 默认委托 [seekTo],纯测试宿主无需实现。
+     */
+    fun rewindTo(positionMs: Long) {
+        seekTo(positionMs)
+    }
+
     fun startPrefill(window: LoopWindow)
 
     fun cancelPrefill()
@@ -76,6 +86,8 @@ class LoopPageEffectRunner(
                 LoopPageEffect.Pause -> host.pause()
 
                 is LoopPageEffect.SeekTo -> host.seekTo(effect.positionMs)
+
+                is LoopPageEffect.RewindTo -> host.rewindTo(effect.positionMs)
 
                 is LoopPageEffect.StartPrefill -> host.startPrefill(effect.window)
 

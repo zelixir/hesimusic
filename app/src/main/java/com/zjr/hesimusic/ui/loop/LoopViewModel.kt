@@ -322,6 +322,25 @@ class LoopViewModel @Inject constructor(
             anchorElapsedRealtime = SystemClock.elapsedRealtime()
         }
 
+        /**
+         * 停止/回模式起点:**禁止**进入区外自由试听。
+         *
+         * 真机 #84 回归:旧停止用 SeekTo 回到 LOOP_ONLY 的 A−300ms 预卷,目标落在窗口外,
+         * 被 seek 策略判成 FREE_ENTER → 切原生整曲源;暂停后该源仍周期性写空帧,
+         * 表现为"停止后 outputFrames 还在涨"。
+         */
+        override fun rewindTo(positionMs: Long) {
+            if (!previewPlayer.isPrepared) {
+                seekAppliedForNextPlay = null
+                return
+            }
+            Log.i(TAG, "stop rewind target=" + positionMs + " allowFreeAudition=false")
+            previewPlayer.seekToDisplayMs(positionMs, allowFreeAudition = false)
+            seekAppliedForNextPlay = positionMs
+            anchorMs = positionMs
+            anchorElapsedRealtime = SystemClock.elapsedRealtime()
+        }
+
         override fun startPrefill(window: LoopWindow) {
             val ready = _pageState.value as? LoopPageState.Ready
             if (ready?.sourceMode == true) return
@@ -866,15 +885,17 @@ class LoopViewModel @Inject constructor(
         dispatch(LoopPageEvent.TogglePlay)
     }
 
-    /** 停止:暂停并回到当前模式起点。 */
+    /**
+     * 停止:暂停并回到当前模式起点(单次原子迁移,**不允许**任何路径自动恢复播放)。
+     *
+     * 旧实现是 TogglePlay + Seek 两次 dispatch:
+     * - 两次派发之间可能插入迟到的 PrefillReady/首块回调,把 playback 改回 Playing;
+     * - Seek 的落点(A−300ms 预卷)在窗口外 → 触发区外自由试听换源 → 暂停态仍写帧。
+     * 现在由 reducer 的 [LoopPageEvent.Stop] 一次产出 Pause + CancelPrefill + RewindTo。
+     */
     fun stopPreview() {
-        val ready = _pageState.value as? LoopPageState.Ready ?: return
-        if (ready.playback is PlaybackState.Playing ||
-            ready.playback is PlaybackState.AwaitingPrefill
-        ) {
-            dispatch(LoopPageEvent.TogglePlay)
-        }
-        dispatch(LoopPageEvent.Seek(modeStartMs(ready.mode, ready.aMs, ready.bMs)))
+        if (_pageState.value !is LoopPageState.Ready) return
+        dispatch(LoopPageEvent.Stop)
     }
 
     /** 波形点击 seek(展示口径);不自动开始播放。 */

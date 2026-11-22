@@ -19,13 +19,14 @@ import org.junit.Test
  * 预览页三个产品动作的**状态机契约**(场景 #84 / #85 / #86)。
  *
  * 纯 reducer + effect runner,不碰 Android/ExoPlayer:
- * - #84 停止:必须 Pause + SeekTo(模式起点),且之后任何"就绪"事件都不得重新 Play;
+ * - #84 停止:必须单次原子迁移 [LoopPageEffect.Pause] + [LoopPageEffect.CancelPrefill] +
+ *   [LoopPageEffect.RewindTo](模式起点),**禁止**走普通 SeekTo/换源/进入区外自由试听;
+ *   停止态下任何被动事件都不得产出 Play,也不得把 playback 改回 Playing;
  * - #85 当前位置→B:必须把 B 改成**派发那一刻**的页面位置,A 不变,并 ApplyWindow 新窗口;
  * - #86 重新分析:Pause/CancelPrefill 必须排在 RestartAnalysis 之前真实执行。
  *
- * 真机上的"停止后 sink 不再写帧"由 [PreviewPlayer.pause] 的既有路径保证
- * (pause → 渲染器停止喂 sink;尾帧 ≤ 硬件 in-flight ~50-100ms 见 docs);
- * 这里锁的是"应用侧不会在停止后再发出 Play"这条容易被回归的契约。
+ * 真机帧级判据(停止后 outputFrames Δ==0)由场景 84 覆盖;这里锁的是应用侧"谁也不能再
+ * 发 Play / 不再换源"的契约,避免再次出现"点停止后自己播起来"。
  */
 class PreviewProductActionsTest {
 
@@ -45,6 +46,10 @@ class PreviewProductActionsTest {
 
         override fun seekTo(positionMs: Long) {
             calls += "seek:" + positionMs
+        }
+
+        override fun rewindTo(positionMs: Long) {
+            calls += "rewind:" + positionMs
         }
 
         override fun startPrefill(window: LoopWindow) {
@@ -106,6 +111,7 @@ class PreviewProductActionsTest {
         bMs: Long = 50_000L,
         positionMs: Long = 40_272L,
         sourceMode: Boolean = true,
+        auditionOutside: Boolean = false,
     ) = LoopPageState.Ready(
         songId = songId,
         durationMs = 200_000L,
@@ -121,22 +127,31 @@ class PreviewProductActionsTest {
         positionMs = positionMs,
         drag = DragState.Idle,
         sourceMode = sourceMode,
+        auditionOutside = auditionOutside,
     )
 
-    /** 与 [LoopViewModel.stopPreview] 相同的两步派发:ToggerPlay(暂停) → Seek(模式起点)。 */
+    /** 与 [LoopViewModel.stopPreview] 相同的单次派发:reducer 的 [LoopPageEvent.Stop]。 */
     private fun dispatchStop(state: LoopPageState.Ready): Pair<LoopPageState.Ready, List<LoopPageEffect>> {
-        val (paused, pauseEffects) = LoopPageReducer.reduce(state, LoopPageEvent.TogglePlay)
-        assertEquals("停止第一步必须是暂停", listOf(LoopPageEffect.Pause), pauseEffects)
-        val pausedState = paused as LoopPageState.Ready
-        val startMs = when (pausedState.mode) {
-            LoopPageMode.FULL -> 0L
-            LoopPageMode.LOOP_ONLY -> (pausedState.aMs - 300L).coerceAtLeast(0L)
-            LoopPageMode.SEAM -> maxOf(pausedState.aMs, pausedState.bMs - 5_000L)
-            LoopPageMode.FREE -> 0L
-        }
-        val (stopped, stopEffects) = LoopPageReducer.reduce(paused, LoopPageEvent.Seek(startMs))
-        assertEquals("停止第二步是回到模式起点", listOf(LoopPageEffect.SeekTo(startMs)), stopEffects)
-        return stopped as LoopPageState.Ready to (pauseEffects + stopEffects)
+        val (stopped, effects) = LoopPageReducer.reduce(state, LoopPageEvent.Stop)
+        val stoppedState = stopped as LoopPageState.Ready
+        assertEquals(
+            "停止必须是单次原子迁移:先停音频、再取消预填、最后回模式起点(禁止区外自由试听)",
+            listOf(
+                LoopPageEffect.Pause,
+                LoopPageEffect.CancelPrefill,
+                LoopPageEffect.RewindTo(stopStartMs(stoppedState)),
+            ),
+            effects,
+        )
+        assertEquals("停止后必须是暂停态(任何迟到事件都不得把它改回 Playing)", PlaybackState.Paused, stoppedState.playback)
+        return stoppedState to effects
+    }
+
+    private fun stopStartMs(state: LoopPageState.Ready): Long = when (state.mode) {
+        LoopPageMode.FULL -> 0L
+        LoopPageMode.LOOP_ONLY -> state.aMs
+        LoopPageMode.SEAM -> maxOf(state.aMs, state.bMs - 5_000L)
+        LoopPageMode.FREE -> 0L
     }
 
     // ------------------------------------------------------------------ #84 停止
@@ -149,17 +164,19 @@ class PreviewProductActionsTest {
         val (after, effects) = dispatchStop(state)
         LoopPageEffectRunner(host).run(effects)
 
-        val startMs = (state.aMs - 300L).coerceAtLeast(0L)
+        val startMs = stopStartMs(after)
         assertEquals(
-            "停止只允许先 pause 再 seek 回起点,绝不允许再 play",
-            listOf("pause", "seek:" + startMs),
+            "停止只允许 pause → cancelPrefill → rewind 回起点,绝不允许再 play/换源",
+            listOf("pause", "cancelPrefill", "rewind:" + startMs),
             host.calls,
         )
         assertTrue(host.calls.none { it.startsWith("play:") })
+        assertTrue("停止不得走普通 SeekTo(旧实现会因 A−300 预卷落到区外而换源)", host.calls.none { it.startsWith("seek:") })
         assertEquals(PlaybackState.Paused, after.playback)
         assertEquals("停止必须回到模式起点", startMs, after.positionMs)
         assertEquals("停止不得改 A/B", state.aMs, after.aMs)
         assertEquals(state.bMs, after.bMs)
+        assertEquals("停止必须退出区外自由试听", false, after.auditionOutside)
     }
 
     @Test
@@ -179,6 +196,56 @@ class PreviewProductActionsTest {
         val (afterM3, m3Effects) = LoopPageReducer.reduce(m3Stopped, LoopPageEvent.PrefillReady)
         assertTrue(m3Effects.none { it is LoopPageEffect.Play })
         assertEquals(PlaybackState.Paused, (afterM3 as LoopPageState.Ready).playback)
+    }
+
+    @Test
+    fun `issue84 stopped state ignores every passive event without playing`() {
+        for (sourceMode in listOf(true, false)) {
+            val (stopped, _) = dispatchStop(ready(playback = PlaybackState.Playing, sourceMode = sourceMode))
+            val passiveEvents = listOf(
+                LoopPageEvent.Tick(12_345L),
+                LoopPageEvent.PrefillStarted,
+                LoopPageEvent.PrefillProgress(0.5f, 5_000L, 10_000L),
+                LoopPageEvent.PrefillPartialReady(5_000L, 10_000L),
+                LoopPageEvent.PrefillReady,
+                LoopPageEvent.PrefillFailed("boom"),
+                LoopPageEvent.DragAStart(20_000L),
+                LoopPageEvent.DragAEnd,
+                LoopPageEvent.DragBStart(30_000L),
+                LoopPageEvent.DragBEnd,
+                LoopPageEvent.CommitWindow,
+                LoopPageEvent.Demote,
+                LoopPageEvent.Back,
+                LoopPageEvent.Stop,
+            )
+            for (event in passiveEvents) {
+                val (next, effects) = LoopPageReducer.reduce(stopped, event)
+                assertTrue(
+                    "停止态(sourceMode=" + sourceMode + ")收到 " + event + " 不得自动 Play(否则就是看不见的续播)",
+                    effects.none { it is LoopPageEffect.Play },
+                )
+                val nextReady = next as? LoopPageState.Ready
+                if (nextReady != null && event != LoopPageEvent.Stop) {
+                    assertTrue(
+                        "停止态(sourceMode=" + sourceMode + ")收到 " + event + " 后播放状态不得变回 Playing",
+                        nextReady.playback !is PlaybackState.Playing,
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `issue84 stop in free audition returns to the loop without switching source`() {
+        val freeState = ready(playback = PlaybackState.Playing, auditionOutside = true, positionMs = 120_000L)
+        val (stopped, effects) = LoopPageReducer.reduce(freeState, LoopPageEvent.Stop)
+        val after = stopped as LoopPageState.Ready
+        assertEquals("停止必须退出自由试听", false, after.auditionOutside)
+        assertEquals(PlaybackState.Paused, after.playback)
+        assertTrue(
+            "停止的重定位必须走 RewindTo(禁止区外自由试听),不能是普通 SeekTo",
+            effects.any { it is LoopPageEffect.RewindTo } && effects.none { it is LoopPageEffect.SeekTo },
+        )
     }
 
     // ------------------------------------------------------------------ #85 当前位置→B

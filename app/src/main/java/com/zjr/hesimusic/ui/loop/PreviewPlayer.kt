@@ -720,8 +720,12 @@ class PreviewPlayer @Inject constructor(
      * - 自由试听里的普通 seek 走原生 seek(整曲源/直通),不重复换源。
      *
      * 循环区内 seek:保持原来的"快速 seek"路径(只 seekTo,不 prepare/不换源/不重建 player)。
+     *
+     * @param allowFreeAudition false = 本次 seek 禁止进入/保持区外自由试听(停止/回模式起点用)。
+     *   必须为 false 的场景:停止。停止不是"去区间外试听",不应换源;旧实现停止回
+     *   LOOP_ONLY 的 A−300ms 预卷被判定为区外 → 换原生源 → 暂停态 sink 周期性写空帧(#84)。
      */
-    fun seekToDisplayMs(ms: Long) {
+    fun seekToDisplayMs(ms: Long, allowFreeAudition: Boolean = true) {
         if (!prepared) return
         // 量测：先记请求（elapsedRealtime），真正 seekTo 后再记应用时刻（00023）。
         seekRequests += 1L
@@ -737,12 +741,12 @@ class PreviewPlayer @Inject constructor(
         }
         val target = ms.coerceAtLeast(0L)
         // 分区/时序判定集中在纯函数里(可为"刚切完模式立刻区外 seek"写单测)。
-        val action = PreviewSeekPolicy.decide(mode, w, _outsideLoop.value, target)
+        val action = PreviewSeekPolicy.decide(mode, w, _outsideLoop.value, target, allowFreeAudition)
         Log.d(
             TAG,
             "seek action=" + action + " target=" + target +
                 " landing=" + PreviewSeekPolicy.landingDisplayMs(action, target, w) +
-                " outside=" + _outsideLoop.value,
+                " outside=" + _outsideLoop.value + " allowFreeAudition=" + allowFreeAudition,
         )
         when (action) {
             PreviewSeekAction.FREE_ENTER -> {

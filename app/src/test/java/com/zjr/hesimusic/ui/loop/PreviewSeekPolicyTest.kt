@@ -85,6 +85,47 @@ class PreviewSeekPolicyTest {
     }
 
     @Test
+    fun stopRewindNeverEntersFreeAudition() {
+        // #84 回归:停止回「仅循环段」起点时旧落点是 A−300ms(窗口外),
+        // 不加限制会被判成 FREE_ENTER → 换原生源 → 暂停态 sink 仍周期性写帧。
+        for (target in listOf(aMs, aMs - 300L, 0L, bMs - 1L)) {
+            assertEquals(
+                "停止落点 target=" + target + " 绝不能进自由试听",
+                PreviewSeekAction.LOOP_FAST,
+                PreviewSeekPolicy.decide(
+                    PreviewMode.LOOP_ONLY,
+                    window,
+                    outsideLoop = false,
+                    targetMs = target,
+                    allowFreeAudition = false,
+                ),
+            )
+        }
+        // 已在自由试听里按停止:回到循环(不改模式),而不是继续原生 seek。
+        assertEquals(
+            PreviewSeekAction.LOOP_RESTORE,
+            PreviewSeekPolicy.decide(
+                PreviewMode.LOOP_ONLY,
+                window,
+                outsideLoop = true,
+                targetMs = aMs,
+                allowFreeAudition = false,
+            ),
+        )
+        // FULL 的前奏起点同样只是"回起点",不是"去区间外试听"。
+        assertEquals(
+            PreviewSeekAction.LOOP_FAST,
+            PreviewSeekPolicy.decide(
+                PreviewMode.FULL,
+                window,
+                outsideLoop = false,
+                targetMs = 0L,
+                allowFreeAudition = false,
+            ),
+        )
+    }
+
+    @Test
     fun freeModeIsNeverFreeAudition() {
         // 用户显式选「自由」= 整段直通,不存在"区外";区外 seek 仍是普通 seek。
         assertEquals(

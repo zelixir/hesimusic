@@ -198,6 +198,15 @@ sealed interface LoopPageEvent {
 
     data object TogglePlay : LoopPageEvent
 
+    /**
+     * 停止:暂停并回到当前模式起点(契约:停止后不得自动恢复播放)。
+     *
+     * 单次原子迁移,替代旧的 TogglePlay+Seek 两步派发 —— 两步之间若插入迟到事件
+     * (PrefillReady / 首块 / 旧 A-B 回调),播放状态可能被改回 Playing,用户听到
+     * "点停止后自己又播起来"(#84 回归)。同时禁止进入区外自由试听。
+     */
+    data object Stop : LoopPageEvent
+
     /** 播放器位置 tick（展示口径）。 */
     data class Tick(val positionMs: Long) : LoopPageEvent
 
@@ -235,6 +244,15 @@ sealed interface LoopPageEffect {
 
     /** 展示口径 seek。 */
     data class SeekTo(val positionMs: Long) : LoopPageEffect
+
+    /**
+     * 停止/回模式起点:暂停后的重定位。
+     *
+     * 与 [SeekTo] 的唯一区别:**禁止**进入区外自由试听。旧实现里停止回 LOOP_ONLY 的
+     * A−300ms 预卷落在窗口外,被 seek 策略判成 FREE_ENTER → 换原生整曲源 → 暂停态
+     * sink 仍周期性写帧(#84 回归);停止不应改变试听模式。
+     */
+    data class RewindTo(val positionMs: Long) : LoopPageEffect
 
     /** 为 window 启动后台环缓冲预填。 */
     data class StartPrefill(val window: LoopWindow) : LoopPageEffect
@@ -420,6 +438,8 @@ object LoopPageReducer {
         is LoopPageEvent.SwitchMode -> switchMode(state, event.mode)
 
         LoopPageEvent.TogglePlay -> togglePlay(state)
+
+        LoopPageEvent.Stop -> stopPlayback(state)
 
         is LoopPageEvent.Tick -> tick(state, event.positionMs)
 
@@ -655,6 +675,48 @@ object LoopPageReducer {
                     state.prefill
                 },
             ) to listOf(LoopPageEffect.Play(state.mode, state.positionMs))
+    }
+
+    /**
+     * 停止(暂停 + 回模式起点)。
+     *
+     * 与"TogglePlay(Pause) → Seek"两步派发相比:
+     * - **单次原子迁移**:不给"暂停之后、seek 之前"的迟到事件留出把 playback 改回
+     *   Playing 的窗口(真机 #84:点停止后 1s 内自己又播起来);
+     * - 用 [LoopPageEffect.RewindTo] 而不是 SeekTo:**停止绝不允许进入区外自由试听**。
+     *   旧实现的 LOOP_ONLY 落点是 A−300ms 预卷(窗口外)→ 被 seek 策略判成 FREE_ENTER
+     *   → 换原生整曲源;暂停态下新源仍会周期性写空帧(#84 回归);
+     * - **同时取消预填**,避免停止后 PrefillReady / 首块回调再推动播放。
+     */
+    private fun stopPlayback(
+        state: LoopPageState.Ready,
+    ): Pair<LoopPageState, List<LoopPageEffect>> {
+        val target = stopStartMs(state.mode, state.aMs, state.bMs)
+        val next = state.copy(
+            playback = PlaybackState.Paused,
+            positionMs = target,
+            auditionOutside = false,
+            drag = DragState.Idle,
+            prefill = PrefillState.NotStarted,
+        )
+        return next to listOf(
+            LoopPageEffect.Pause,
+            LoopPageEffect.CancelPrefill,
+            LoopPageEffect.RewindTo(target),
+        )
+    }
+
+    /**
+     * 停止的落点:与 [modeStartMs] 的唯一差别是 LOOP_ONLY 取 A 本身,而不是 A−300ms 预卷。
+     *
+     * 预卷只是**起播**前为了让 ring 覆盖 A 而做的数据准备偏移;停止是"回到循环段起点",
+     * 落在 A 才符合用户预期,也避免目标落在窗口外触发"区外自由试听"的换源路径。
+     */
+    private fun stopStartMs(mode: LoopPageMode, aMs: Long, bMs: Long): Long = when (mode) {
+        LoopPageMode.FULL -> 0L
+        LoopPageMode.LOOP_ONLY -> aMs
+        LoopPageMode.SEAM -> maxOf(aMs, bMs - SEAM_LEAD_MS)
+        LoopPageMode.FREE -> 0L
     }
 
     private fun tick(
