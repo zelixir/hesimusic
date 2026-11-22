@@ -64,23 +64,50 @@ android {
         }
     }
 
-    // 内置 demo 变体(独立包名/版本名/应用名,可与正式包并存):
-    // - prod:正式包,与加入 flavor 前行为一致(无任何后缀);
+    // 内置 demo / algolab 变体(独立包名/版本名/应用名,均可与正式包并存):
+    // - prod:正式包,与加入 flavor 前行为一致(无任何后缀);不含 Lab 入口;
     // - demo:只编译 app/src/demo 源集,自带 assets/demo(内置歌曲 + 预置循环结果),
-    //   冷启动由 DemoBootstrap 写入 filesDir/数据库后直达「无缝循环」结果页。
-    // 加入 flavor 后 AGP 的变体名变为 prodDebug/prodRelease 与 demoDebug/demoRelease;
-    // assembleDebug/assembleRelease 仍是 build-type 聚合任务(会构建全部 flavor),
-    // prod 产物由文末的兼容任务复制回旧 APK 路径。
+    //   冷启动由 DemoBootstrap 写入 filesDir/数据库后直达「无缝循环」结果页;
+    // - algolab(任务 B,issue 00030):只编译 app/src/algolab 源集,是**独立的算法
+    //   实验 app**,applicationId 追加 .algolab。它用同一次解码/分析同时输出
+    //   「初版分数/排名」与「接缝融合分数/排名」并导出 JSON/CSV。BuildConfig.ALGO_LAB
+    //   只在 algolab 变体为 true;prod/demo 源集与清单里根本不存在 Lab 类/入口,
+    //   因此正式包行为(含分析默认值)不受影响。
+    // 加入 flavor 后 AGP 的变体名变为 prodDebug/prodRelease、demoDebug/demoRelease、
+    // algolabDebug/algolabRelease、v2Debug/v2Release;assembleDebug/assembleRelease 仍是 build-type
+    // 聚合任务(会构建全部 flavor),prod 产物由文末的兼容任务复制回旧 APK 路径。
     flavorDimensions += "channel"
     productFlavors {
         create("prod") {
             dimension = "channel"
+            buildConfigField("boolean", "ALGO_LAB", "false")
         }
         create("demo") {
             dimension = "channel"
             applicationIdSuffix = ".demo"
             versionNameSuffix = "-demo"
             manifestPlaceholders["appLabel"] = "HesiMusic Demo"
+            buildConfigField("boolean", "ALGO_LAB", "false")
+        }
+        create("algolab") {
+            dimension = "channel"
+            applicationIdSuffix = ".algolab"
+            versionNameSuffix = "-algolab"
+            manifestPlaceholders["appLabel"] = "海瑟音乐 AlgoLab"
+            buildConfigField("boolean", "ALGO_LAB", "true")
+        }
+        // v2(任务 C,issue 00030):可并存安装的第二个正式版,applicationId 追加 .v2
+        // ("com.zjr.hesimusic.v2"),应用名 "Hesi v2"。代码与 prod 完全一致(同一 main 源集,
+        // 同一次扫描/分析/播放器改动),数据目录因 applicationId 不同而天然隔离;
+        // 额外只带 app/src/v2 源集里的「导入上一版数据」入口(见 docs/import-legacy-data.md)。
+        // 既有包 com.zjr.hesimusic 的安装与数据完全不受影响:不加权限、不改 provider 授权、
+        // 不共享 filesDir/数据库(Android 按 applicationId 隔离)。
+        create("v2") {
+            dimension = "channel"
+            applicationIdSuffix = ".v2"
+            versionNameSuffix = "-v2"
+            manifestPlaceholders["appLabel"] = "Hesi v2"
+            buildConfigField("boolean", "ALGO_LAB", "false")
         }
     }
 

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      algolab flavor(任务 B,issue 00030):独立的循环算法实验 app。
+      - applicationId 追加 .algolab(见 app/build.gradle.kts),可与正式包并存;
+      - 只把 LabActivity 作为启动器;
+      - 正式包的 MainActivity **整体移除**(只保留 Lab 一个入口,不把正式界面带进来)。
+        Lab 自己用 ScanRepository/FileScanner 扫描曲库(见 AlgoLabViewModel),不依赖
+        MainActivity;因此这里可以安全 remove。
+      - Lab 类只存在于 app/src/algolab,prod/demo/v2 不编译、不包含任何入口。
+    -->
+    <application>
+        <activity
+            android:name=".MainActivity"
+            tools:node="remove" />
+
+        <activity
+            android:name=".lab.AlgoLabActivity"
+            android:exported="true"
+            android:label="海瑟音乐 AlgoLab"
+            android:theme="@style/Theme.Hesimusic">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
