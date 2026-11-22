@@ -33,6 +33,9 @@ internal class RingBandMediaSource(
 
     override fun prepareSourceInternal() {
         super.prepareSourceInternal()
+        // 00029：预热源未接入播放器时解码线程是 BACKGROUND；一旦接入播放器，
+        // 它的前奏/尾奏块就是播放态音频，必须提回 AUDIO，不能为预热牺牲播放 seek。
+        extractor.setDecodePriority(android.os.Process.THREAD_PRIORITY_AUDIO)
         if (prewarmToken == null) {
             prewarmToken = registerPrewarm?.invoke()
         }

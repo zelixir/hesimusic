@@ -548,7 +548,25 @@ class MusicViewModel @Inject constructor(
         )
     }
 
-    /** 菜单关闭/离开结果页：释放未使用的预热源（入口成功取走后是 no-op）。 */
+    /**
+     * 00029：结果页**轻量预热**——只解前奏首块（约 176KB），不建环带、不常驻。
+     * 预览页 seek 与它并发时不会被 5.7MB 环/常驻解码会话拖慢；确认时工厂正常建源，
+     * 首块从 `PreludeBlockPrewarm` 种入。
+     */
+    fun prewarmSeamlessLoopEntryLight(song: Song, loopStartMs: Long, loopEndMs: Long) {
+        if (loopEndMs <= loopStartMs || song.filePath.isBlank()) return
+        loopEntryPrewarmer.prewarmPreludeOnly(
+            LoopEntryPrewarmer.PreludeRequest(
+                songId = song.id,
+                loopStartMs = loopStartMs,
+                loopEndMs = loopEndMs,
+                fullDurationUs = song.duration * 1_000L,
+                filePath = song.filePath,
+            ),
+        )
+    }
+
+    /** 菜单关闭/离开结果页：释放未使用的预热源/轻量块（入口成功取走后是 no-op）。 */
     fun cancelSeamlessLoopPrewarm(songId: Long) {
         loopEntryPrewarmer.cancel(songId)
     }

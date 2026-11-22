@@ -69,7 +69,14 @@ object RingBandSource {
         /** 00029：预热建源时把前奏/尾奏块解码线程降为 BACKGROUND。 */
         backgroundDecode: Boolean = false,
     ): MediaSource {
+        // 解块时用 AUDIO（正式播放）或 BACKGROUND（未接入的预热源）；
+        // 线程空闲优先级不能是 AUDIO，否则预热源一创建就占着高优先级。
         val decodePriority = if (backgroundDecode) {
+            android.os.Process.THREAD_PRIORITY_BACKGROUND
+        } else {
+            android.os.Process.THREAD_PRIORITY_AUDIO
+        }
+        val idlePriority = if (backgroundDecode) {
             android.os.Process.THREAD_PRIORITY_BACKGROUND
         } else {
             android.os.Process.THREAD_PRIORITY_DEFAULT
@@ -94,6 +101,12 @@ object RingBandSource {
         val tailResident = residentProvider(provider, timeline, logger)
         // issue 00028：整曲时间轴时，[0,A) 前奏与 (B,dur] 尾奏按需块解码（不整段进内存）。
         val preludeReader = if (timeline.wholeTimeline && timeline.aFrame > 0L) {
+            // 00029：结果页轻量预热只缓存前奏首块；这里命中就种进 reader，首声不再等解码。
+            val preludeBlocks = if (preludeResident != null) {
+                PreludeBlockPrewarm.take(PreludeBlockPrewarm.keyOf(timeline)).orEmpty()
+            } else {
+                emptyList()
+            }
             PcmRangeBlockReader(
                 provider = preludeResident ?: provider,
                 startFrame = 0L,
@@ -102,7 +115,9 @@ object RingBandSource {
                 channels = timeline.channels,
                 decodePrerollUs = if (preludeResident != null) 0L else PcmRangeBlockReader.DECODE_PREROLL_US,
                 logger = logger,
-                threadPriority = decodePriority,
+                threadPriority = idlePriority,
+                initialDecodePriority = decodePriority,
+                initialBlocks = preludeBlocks,
             )
         } else {
             null
@@ -118,7 +133,8 @@ object RingBandSource {
                 prefetchOnInit = false,
                 decodePrerollUs = if (tailResident != null) 0L else PcmRangeBlockReader.DECODE_PREROLL_US,
                 logger = logger,
-                threadPriority = decodePriority,
+                threadPriority = idlePriority,
+                initialDecodePriority = decodePriority,
             )
         } else {
             null

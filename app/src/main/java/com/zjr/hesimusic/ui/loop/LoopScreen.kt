@@ -274,7 +274,7 @@ fun LoopScreen(
         val s = song ?: return@LaunchedEffect
         if (s.id != ready.songId) return@LaunchedEffect
         prewarmConsumed = false
-        musicViewModel.prewarmSeamlessLoopEntry(s, ready.aMs, ready.bMs)
+        musicViewModel.prewarmSeamlessLoopEntryLight(s, ready.aMs, ready.bMs)
     }
     val prewarmSongId by rememberUpdatedState(song?.id)
     DisposableEffect(Unit) {

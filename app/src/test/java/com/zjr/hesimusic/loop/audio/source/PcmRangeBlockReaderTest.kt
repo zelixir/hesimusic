@@ -2,7 +2,9 @@ package com.zjr.hesimusic.loop.audio.source
 
 import com.zjr.hesimusic.loop.analysis.Pcm16Frames
 import com.zjr.hesimusic.loop.analysis.Pcm16Segment
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -374,6 +376,36 @@ class PcmRangeBlockReaderTest {
         val reader = PcmRangeBlockReader(provider, 0L, 2_000L, sr, ch)
         reader.release()
         assertTrue(provider.released)
+    }
+
+    @Test
+    fun seededFirstBlockIsServedWithoutProviderDecode() {
+        // 00029：结果页轻量预热把首块种进 reader；入口读第一帧时不能再解一次。
+        val provider = AbsoluteProvider(sr, ch)
+        val frameBytes = sr * ch * 2
+        val data = ByteArray(frameBytes)
+        for (i in 0 until sr) {
+            val value = (1000 + i).toShort()
+            data[i * 2] = (value.toInt() and 0xff).toByte()
+            data[i * 2 + 1] = ((value.toInt() shr 8) and 0xff).toByte()
+        }
+        val seeded = PcmBlock(index = 0, startFrame = 0L, frames = sr, data = data)
+        val reader = PcmRangeBlockReader(
+            provider = provider,
+            startFrame = 0L,
+            endFrameExclusive = 2L * sr,
+            sampleRate = sr,
+            channels = ch,
+            prefetchBlocks = 0,
+            prefetchOnInit = true,
+            initialBlocks = listOf(seeded),
+        )
+        val read = reader.read(16)
+        assertNotNull(read)
+        assertEquals(16, read!!.frames)
+        assertArrayEquals(data.copyOfRange(0, 16 * ch * 2), read.data)
+        assertTrue("首块已种，provider 不应被调用来解它", provider.calls.isEmpty())
+        reader.release()
     }
 
     @Test

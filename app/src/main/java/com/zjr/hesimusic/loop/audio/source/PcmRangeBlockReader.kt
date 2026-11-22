@@ -46,6 +46,15 @@ class PcmRangeBlockReader(
      * 生产/播放路径保持默认优先级。
      */
     private val threadPriority: Int = Process.THREAD_PRIORITY_DEFAULT,
+    /**
+     * 00029：真正解块时的优先级。旧行为固定 AUDIO（前奏/尾奏是用户正在等的音频）；
+     * 预热源必须显式降到 BACKGROUND，否则"线程初始优先级"会被 decodeBlock 里的
+     * AUDIO 覆盖，预热仍会和预览/播放抢 CPU。
+     * 预热源接入播放器后由 [setDecodePriority] 提回 AUDIO。
+     */
+    initialDecodePriority: Int = Process.THREAD_PRIORITY_AUDIO,
+    /** 00029：轻量预热已经解好的块，构造时直接种进缓存（不重复解码）。 */
+    initialBlocks: List<PcmBlock> = emptyList(),
 ) {
 
     data class Read(
@@ -90,6 +99,9 @@ class PcmRangeBlockReader(
     private val running = AtomicBoolean(false)
 
     @Volatile
+    private var decodePriority: Int = initialDecodePriority
+
+    @Volatile
     private var cursor: Long = startFrame
 
     @Volatile
@@ -113,7 +125,40 @@ class PcmRangeBlockReader(
     private var prewarmBlock: Int = -1
 
     init {
+        // 种块必须在 kick 之前：kick 的 selectBlockAhead 看到 READY 就不重复解。
+        for (block in initialBlocks) {
+            if (block.startFrame >= startFrame && block.index < blockCount) {
+                runCatching { cache.put(block) }
+            }
+        }
         if (prefetchOnInit && totalFrames > 0L) kick()
+    }
+
+    /** 00029：接入播放器时把解码优先级从 BACKGROUND 提回 AUDIO。 */
+    fun setDecodePriority(priority: Int) {
+        decodePriority = priority
+    }
+
+    /**
+     * 00029：轻量预热等待某块 READY（只读缓存，不改游标）。
+     * 返回 null = 超时/失败/已释放。
+     */
+    fun awaitReadyBlock(index: Int, timeoutMs: Long): PcmBlock? {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        synchronized(lock) {
+            while (!released) {
+                cache.get(index)?.let { return it }
+                if (cache.state(index) == PcmBlockCache.State.FAILED) return null
+                val left = deadline - System.currentTimeMillis()
+                if (left <= 0L) return null
+                try {
+                    lock.wait(left.coerceAtMost(50L))
+                } catch (_: InterruptedException) {
+                    return null
+                }
+            }
+            return null
+        }
     }
 
     fun totalFrames(): Long = totalFrames
@@ -339,7 +384,7 @@ class PcmRangeBlockReader(
             0
         }
         if (tid >= 0) {
-            try { Process.setThreadPriority(tid, Process.THREAD_PRIORITY_AUDIO) } catch (_: Throwable) {}
+            try { Process.setThreadPriority(tid, decodePriority) } catch (_: Throwable) {}
         }
         val startFrame = blockStartFrame(block)
         val expectedFrames = blockFrames(block)

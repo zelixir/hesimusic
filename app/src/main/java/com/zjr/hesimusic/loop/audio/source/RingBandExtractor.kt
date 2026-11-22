@@ -630,6 +630,15 @@ class RingBandExtractor(
     }
 
     /**
+     * 00029：预热源接入播放器后，把前奏/尾奏块解码从 BACKGROUND 提回 AUDIO。
+     * 未接入的预热源保持 BACKGROUND，不和预览/主播放抢 CPU。
+     */
+    fun setDecodePriority(priority: Int) {
+        preludeReader?.setDecodePriority(priority)
+        tailReader?.setDecodePriority(priority)
+    }
+
+    /**
      * seek 意图预热（issue 00029）：在 media3 真正 seek 之前，把目标 timeline 位置
      * 对应的 prelude/tail 块先解掉。环带 seek 则提前触发对应的跳填。
      *
