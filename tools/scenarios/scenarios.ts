@@ -145,7 +145,12 @@ function audioCheck(name: string, m: FrameMeasurement, minRatio: number, hint?: 
 }
 
 async function playSong(ctx: ScenarioCtx, songId: number): Promise<State> {
-  const r = await ctx.api.post("/player/play", { songId, repeatOne: false });
+  // #43/#45 的恢复性重启后 controller 可能还没连上；503 是启动竞态，短暂重试而不是判场景失败。
+  let r = await ctx.api.post("/player/play", { songId, repeatOne: false });
+  for (let i = 0; i < 12 && r.status === 503 && /controller_not_connected/.test(r.text); i++) {
+    await sleep(500);
+    r = await ctx.api.post("/player/play", { songId, repeatOne: false });
+  }
   if (r.status !== 200) throw new Error("/player/play -> " + r.status + " " + r.text.slice(0, 200));
   const wait = await waitFor(
     async () => ctx.api.state(),

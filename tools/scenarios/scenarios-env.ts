@@ -847,6 +847,7 @@ const sEnv43: Scenario = {
   name: "音频焦点被其它 App 抢走",
   tag: "环境",
   exclusive: true,
+  allowPidRestart: true,
   timeoutMs: 180000,
   async run(ctx) {
     const checks: Check[] = [];
