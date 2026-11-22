@@ -1374,8 +1374,8 @@ const s106: Scenario = {
 // 却没暂停干净"的半死态；分析结束后旧窗口还在不在、新候选是否被自动套用（不确认就改窗口），
 // 以及分析完成后还能不能恢复正常出声。
 //
-// 注意：按现行为(00020/1258),开始分析会主动暂停正在播的歌。所以"分析期间播放不中断"这一条
-// 不硬判 FAIL，而是按 pendingCheck + pendingDecision 记录现状，交产品裁决。
+// 注意：#107 已由产品裁决为"分析期间不打断播放"(2026-11-22)，所以"分析期间播放不中断"
+// 现在是硬判据；只有真正进入结果页才会暂停主播放。
 // ---------------------------------------------------------------------------
 
 const s107: Scenario = {
@@ -1490,19 +1490,14 @@ const s107: Scenario = {
           halfDead > 0 ? "分析把窗口拆了但引擎还标着 loop:之后位置/出声都会错" : undefined,
         ),
       );
-      if (pausedDuring) {
-        checks.push(
-          pendingCheck(
-            "分析期间播放不中断",
-            "分析期间 playing=false(现行为:开始分析即暂停)",
-            "product-decision:analysis-pauses-playback",
-            "与场景 8 的现行判据一致;若产品决定改成就地分析不打断,再转硬判",
-          ),
-        );
-        pending.push("循环中重新分析:分析期间播放被暂停(现行契约),而交互期望是'不中断';需要产品裁决");
-      } else {
-        checks.push(check("分析期间播放不中断", true, "分析期间 playing 一直为 true"));
-      }
+      checks.push(
+        check(
+          "分析期间播放不中断",
+          !pausedDuring,
+          pausedDuring ? "分析期间出现 playing=false(分析不该打断播放)" : "分析期间 playing 一直为 true",
+          pausedDuring ? "#107 裁决:分析不打断播放,只有进结果页才暂停" : undefined,
+        ),
+      );
 
       const stEnd = await ctx.api.state();
       const analysisEnd = (await ctx.api.get("/analysis")).json;

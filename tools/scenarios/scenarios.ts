@@ -856,17 +856,18 @@ const s8: Scenario = {
     const silent = await measureMainFrames(ctx.api, 1200, sr);
     const p1 = await ctx.api.state();
     ctx.evidence.step("analysis-silence", { deltaFrames: silent.deltaFrames, spanMs: silent.spanMs, position0: pos0, position1: p1.playback.positionMs, phase: p1.analysis.phase });
-    checks.push(check("分析期间播放已暂停", p1.playback.playing === false, "playing=" + p1.playback.playing + " playWhenReady=" + p1.playback.playWhenReady));
+    // #107 产品裁决:分析期间不打断播放(只有真正进入结果页才暂停)。
+    checks.push(check("分析期间播放继续", p1.playback.playing === true, "playing=" + p1.playback.playing + " playWhenReady=" + p1.playback.playWhenReady));
     checks.push(
       check(
-        "分析期间输出帧为 0",
-        silent.deltaFrames === 0,
+        "分析期间仍在出声",
+        silent.deltaFrames > 0,
         "Δ=" + silent.deltaFrames + "f / " + silent.spanMs + "ms",
-        silent.deltaFrames > 0 ? "分析开始后 sink 仍在写帧 → pause 未 flush 或分析没有暂停播放" : undefined,
+        silent.deltaFrames === 0 ? "分析开始后 sink 停止写帧 → 分析打断了播放(与 #107 裁决相反)" : undefined,
       ),
     );
     const travel = Math.abs(Number(p1.playback.positionMs) - pos0);
-    checks.push(check("分析期间位置不动", travel <= 250, "位置变化 " + travel + "ms (阈值 250ms)"));
+    checks.push(check("分析期间位置继续前进", travel >= 300, "位置变化 " + travel + "ms (阈值 300ms)"));
 
     const done = await ctx.api.analysisWait(150000);
     const st = await ctx.api.state();

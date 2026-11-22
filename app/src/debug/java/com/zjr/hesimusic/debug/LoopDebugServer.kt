@@ -687,9 +687,9 @@ object LoopDebugServer {
         try {
             val song = d.songRepository().getSongsByIds(listOf(songId)).firstOrNull()
                 ?: throw HttpError(404, "song not found: $songId")
-            // 产品口径:开始分析即暂停正在播的歌(UI 进页时已 pause,协议路径补齐)。
-            // player 未就绪/冷启动无效时跳过 pause,绝不让分析因此失败。
-            val paused = pausePlaybackForAnalysis()
+            // #107 产品裁决:分析期间不打断播放。只有调用方显式要求(body.pause=true)才暂停,
+            // 用于复现"进结果页才暂停"之外的旧口径。默认不 pause。
+            val paused = if (body?.optBoolean("pause", false) == true) pausePlaybackForAnalysis() else false
             analyzingSongId = songId
             analyzeJob = analysisScope.launch {
                 try {
