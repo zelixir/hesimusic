@@ -18,6 +18,8 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.zjr.hesimusic.R
 import com.zjr.hesimusic.data.mapper.mediaIdToSongId
 import com.zjr.hesimusic.data.mapper.toMediaItem
@@ -321,7 +323,7 @@ class MusicService : MediaSessionService() {
 
             override fun onPlayerError(error: PlaybackException) {
                 Log.e(TAG, "onPlayerError: code=${error.errorCode}", error)
-                showPlaybackErrorToast(error)
+                reportPlaybackError(error)
             }
         })
 
@@ -341,38 +343,57 @@ class MusicService : MediaSessionService() {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     /**
-     * 播放失败时弹 Toast 告知用户（否则点击播放无反应，用户无从得知原因）。
-     * 连续报错（如整个队列都不可读）按时间间隔节流。
+     * 播放失败的分发点（issue 00030）。
+     *
+     * - 存储权限/文件不可读错误：发布 [PlaybackBlock]，前台由 UI 弹「去授权」对话框；
+     * - 后台或非存储错误：保留原来的 Toast 作为兜底（Toast 没有按钮、无法跳转，所以
+     *   前台不再重复弹它，避免和对话框叠在一起）。
+     *
+     * 分布到主线程：ExoPlayer 的错误回调不保证在主线程，且 [ProcessLifecycleOwner]
+     * 只能在主线程读取。
      */
-    private fun showPlaybackErrorToast(error: PlaybackException) {
+    private fun reportPlaybackError(error: PlaybackException) {
         mainHandler.post {
-            val now = System.currentTimeMillis()
-            if (now - lastPlaybackErrorToastTime < PLAYBACK_ERROR_TOAST_INTERVAL_MS) return@post
-            lastPlaybackErrorToastTime = now
-
-            val title = player.currentMediaItem?.mediaMetadata?.title?.toString()
-            val message = when {
-                isStorageAccessError(error) ->
-                    "无法播放${title.orEmpty().ifEmpty { "歌曲" }}：无法读取音频文件，请在系统设置中授予「所有文件访问」权限"
-                else -> "播放失败（${error.errorCode}）${title?.let { ": $it" }.orEmpty()}"
-            }
-            Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
+            val block = StorageAccessErrors.blockFor(
+                error = error,
+                songId = songIdOf(player.currentMediaItem),
+                title = player.currentMediaItem?.mediaMetadata?.title?.toString(),
+                nowMs = System.currentTimeMillis(),
+            )
+            val plan = PlaybackErrorRouter.plan(block, isAppInForeground())
+            plan.publish?.let { PlaybackBlockStore.publish(it) }
+            if (plan.toast) showPlaybackErrorToast(error)
         }
     }
 
-    private fun isStorageAccessError(error: PlaybackException): Boolean {
-        if (error.errorCode == PlaybackException.ERROR_CODE_IO_NO_PERMISSION ||
-            error.errorCode == PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND
-        ) {
-            return true
+    /**
+     * 应用是否在前台（至少有一个 Activity STARTED）。
+     *
+     * 判不出来时按后台处理：多弹一条 Toast 无害，但漏掉提示会让用户无从下手。
+     */
+    private fun isAppInForeground(): Boolean = try {
+        ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+    } catch (t: Throwable) {
+        Log.w(TAG, "isAppInForeground: fallback to background", t)
+        false
+    }
+
+    /**
+     * 播放失败时弹 Toast 告知用户（后台兜底；否则点击播放无反应，用户无从得知原因）。
+     * 连续报错（如整个队列都不可读）按时间间隔节流。调用方必须已在主线程。
+     */
+    private fun showPlaybackErrorToast(error: PlaybackException) {
+        val now = System.currentTimeMillis()
+        if (now - lastPlaybackErrorToastTime < PLAYBACK_ERROR_TOAST_INTERVAL_MS) return
+        lastPlaybackErrorToastTime = now
+
+        val title = player.currentMediaItem?.mediaMetadata?.title?.toString()
+        val message = when {
+            StorageAccessErrors.isStorageAccessError(error) ->
+                "无法播放${title.orEmpty().ifEmpty { "歌曲" }}：无法读取音频文件，请在系统设置中授予「所有文件访问」权限"
+            else -> "播放失败（${error.errorCode}）${title?.let { ": $it" }.orEmpty()}"
         }
-        // EACCES 等底层错误可能被包在多层 cause 里
-        var cause: Throwable? = error.cause
-        while (cause != null) {
-            if (cause.message?.contains("EACCES") == true) return true
-            cause = cause.cause
-        }
-        return false
+        Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
     }
 
     private fun updateSessionAudioSessionId(audioSessionId: Int = player.audioSessionId) {

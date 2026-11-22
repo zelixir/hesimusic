@@ -53,6 +53,7 @@ import com.zjr.hesimusic.data.preferences.PlaylistType
 import com.zjr.hesimusic.data.preferences.SongSortMode
 import com.zjr.hesimusic.ui.common.MusicViewModel
 import com.zjr.hesimusic.ui.common.SortModeMenuButton
+import com.zjr.hesimusic.ui.common.StoragePermissionDialogHost
 import com.zjr.hesimusic.ui.common.ListBackground
 import com.zjr.hesimusic.ui.library.AlbumList
 import com.zjr.hesimusic.ui.library.ArtistList
@@ -610,6 +611,9 @@ fun MainScreen(
             }
         }
     }
+
+    // issue 00030：播放因文件权限失败时，前台由这里弹「去授权」对话框（Service 只发布事件）。
+    StoragePermissionDialogHost()
 }
 
 /**

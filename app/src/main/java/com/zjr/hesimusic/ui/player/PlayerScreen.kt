@@ -38,6 +38,7 @@ import com.zjr.hesimusic.loop.LoopPosition
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.service.LoopClaimStore
 import com.zjr.hesimusic.ui.common.MusicViewModel
+import com.zjr.hesimusic.ui.common.StoragePermissionDialogHost
 import com.zjr.hesimusic.utils.TimeFormatter
 import kotlin.math.abs
 import kotlinx.coroutines.delay
@@ -101,6 +102,10 @@ fun PlayerScreen(
             }
         },
     )
+
+    // issue 00030：从播放页触发的播放失败同样由这个 host 弹「去授权」对话框
+    // （NavHost 同一时刻只组合一个目标页，事件消费是原子的，不会和主界面重复弹）。
+    StoragePermissionDialogHost()
 
     Scaffold(
         topBar = {
