@@ -15,6 +15,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -59,11 +60,19 @@ fun SongActionHost(
      * 「无缝分析」:始终显示(仅 CUE 分轨置灰 + 点击提示),点击导航到「分析与预览」页
      * (已存结果直接加载,无行则自动分析)。
      */
-    onSeamlessAnalysis: ((Song) -> Unit)? = null
+    onSeamlessAnalysis: ((Song) -> Unit)? = null,
+    /**
+     * 00029：菜单打开、且该歌已确认循环时预热入口源（后台建源+解前奏首块，不播放）。
+     * 关闭菜单/选别的动作时由 [onCancelPrewarm] 释放。
+     */
+    onPrewarmSeamlessLoop: ((Song, Long, Long) -> Unit)? = null,
+    onCancelPrewarm: ((Long) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val loopEntryViewModel: LoopEntryViewModel = hiltViewModel()
     var showAddDialog by remember(selectedSong) { mutableStateOf(false) }
+    // 入口已被点击：对话框销毁时不能再取消预热（协调器还要取走它）。
+    var prewarmConsumed by remember { mutableStateOf(false) }
     var showInfoDialog by remember(selectedSong) { mutableStateOf(false) }
     var showHideConfirmDialog by remember(selectedSong) { mutableStateOf(false) }
     var showDeleteDialog by remember(selectedSong) { mutableStateOf(false) }
@@ -74,8 +83,21 @@ fun SongActionHost(
     val menuTextStyle = largeMenuTextStyle()
 
     LaunchedEffect(selectedSong) {
+        prewarmConsumed = false
         val song = selectedSong ?: return@LaunchedEffect
-        loopConfirmed = runCatching { loopEntryViewModel.loopRow(song.id) }.getOrNull()?.confirmed
+        val row = runCatching { loopEntryViewModel.loopRow(song.id) }.getOrNull()
+        loopConfirmed = row?.confirmed
+        if (row?.confirmed == true) {
+            onPrewarmSeamlessLoop?.invoke(song, row.loopStartMs, row.loopEndMs)
+        }
+    }
+
+    // 菜单关闭（selectedSong -> null / 离开宿主）时释放未消费的预热源。
+    DisposableEffect(selectedSong) {
+        val songId = selectedSong?.id
+        onDispose {
+            if (songId != null && !prewarmConsumed) onCancelPrewarm?.invoke(songId)
+        }
     }
 
     if (selectedSong != null && !showAddDialog && !showInfoDialog && !showHideConfirmDialog && !showDeleteDialog) {
@@ -151,6 +173,9 @@ fun SongActionHost(
                                         if (!seamlessMenu.seamlessLoopEnabled) {
                                             Toast.makeText(context, "CUE 分轨暂不支持无缝循环", Toast.LENGTH_SHORT).show()
                                         } else {
+                                            // 入口立即消费预热源：不能让 onDismiss 的
+                                            // DisposableEffect 在协调器取源前把它释放。
+                                            prewarmConsumed = true
                                             onSeamlessLoop.invoke(selectedSong)
                                             onDismiss()
                                         }
@@ -173,6 +198,9 @@ fun SongActionHost(
                                         if (!seamlessMenu.seamlessAnalysisEnabled) {
                                             Toast.makeText(context, "CUE 分轨暂不支持无缝循环", Toast.LENGTH_SHORT).show()
                                         } else {
+                                            // 去了分析页，入口源不再需要，立刻释放（TTL 兜底仍在）。
+                                            prewarmConsumed = true
+                                            onCancelPrewarm?.invoke(selectedSong.id)
                                             onSeamlessAnalysis.invoke(selectedSong)
                                             onDismiss()
                                         }

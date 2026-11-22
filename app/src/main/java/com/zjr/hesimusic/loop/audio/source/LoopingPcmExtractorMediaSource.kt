@@ -65,6 +65,8 @@ object LoopingPcmExtractorMediaSource {
         prefetchBlocks: Int = SOURCE_PREFETCH_BLOCKS,
         onSeamOutputFrames: ((Long) -> Unit)? = null,
         ringBudgetDivisor: Long = RingBandSource.BUDGET_DIVISOR_MAIN,
+        /** 00029：入口预热建源时把块解码线程降为 BACKGROUND。 */
+        backgroundDecode: Boolean = false,
     ): MediaSource {
         val heap = Runtime.getRuntime().maxMemory()
         val ringProvider = provider as? PcmDecoderRangeProvider
@@ -93,6 +95,7 @@ object LoopingPcmExtractorMediaSource {
                 provider = provider,
                 logger = logger,
                 onSeamOutputFrames = onSeamOutputFrames,
+                backgroundDecode = backgroundDecode,
             )
         }
         logger(

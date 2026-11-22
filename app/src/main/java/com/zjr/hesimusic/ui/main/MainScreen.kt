@@ -87,7 +87,10 @@ fun MainScreen(
     onLogsClick: () -> Unit,
     // 无缝循环菜单事件(仅透传给 SongActionHost;决策/播放/导航在 MainActivity)
     onSeamlessLoop: ((Song) -> Unit)? = null,
-    onSeamlessAnalysis: ((Song) -> Unit)? = null
+    onSeamlessAnalysis: ((Song) -> Unit)? = null,
+    /** 00029：菜单打开时预热入口源（不播放）；关闭菜单时取消。 */
+    onPrewarmSeamlessLoop: ((Song, Long, Long) -> Unit)? = null,
+    onCancelPrewarm: ((Long) -> Unit)? = null
 ) {
     // Get AppLogger from Application context
     val context = LocalContext.current
@@ -570,7 +573,9 @@ fun MainScreen(
                     musicViewModel.addSongsToPlayQueue(listOf(song))
                 } else null,
                 onSeamlessLoop = onSeamlessLoop,
-                onSeamlessAnalysis = onSeamlessAnalysis
+                onSeamlessAnalysis = onSeamlessAnalysis,
+                onPrewarmSeamlessLoop = onPrewarmSeamlessLoop,
+                onCancelPrewarm = onCancelPrewarm
             )
             if (showBatchAddDialog) {
                 AddToPlaylistDialog(

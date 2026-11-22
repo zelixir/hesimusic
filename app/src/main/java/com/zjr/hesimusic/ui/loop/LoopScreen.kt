@@ -265,6 +265,25 @@ fun LoopScreen(
     // 配置变更重建会重新跑这个 effect,由 PreviewMainPlaybackHold 保证只暂停一次;
     // 分析中(Loading/Analyzing)不产生暂停,所以分析不会打断主播放(判据 1/4)。
     val resultPageVisible = pageState is LoopPageState.Ready
+    // 00029：结果页 Ready 时预热入口源（后台建源+解前奏首块，不播放）；
+    // 点「确认并保存」后由入口消费，dispose 时不能再取消（否则协调器取不到）。
+    var prewarmConsumed by remember { mutableStateOf(false) }
+    val readyForPrewarm = pageState as? LoopPageState.Ready
+    LaunchedEffect(readyForPrewarm?.songId) {
+        val ready = readyForPrewarm ?: return@LaunchedEffect
+        val s = song ?: return@LaunchedEffect
+        if (s.id != ready.songId) return@LaunchedEffect
+        prewarmConsumed = false
+        musicViewModel.prewarmSeamlessLoopEntry(s, ready.aMs, ready.bMs)
+    }
+    val prewarmSongId by rememberUpdatedState(song?.id)
+    DisposableEffect(Unit) {
+        onDispose {
+            if (!prewarmConsumed) {
+                prewarmSongId?.let { musicViewModel.cancelSeamlessLoopPrewarm(it) }
+            }
+        }
+    }
     LaunchedEffect(resultPageVisible, pageStarted.value) {
         if (resultPageVisible && pageStarted.value &&
             viewModel.onPageStateChanged(pageState, musicViewModel.isMainPlaybackPlaying())
@@ -360,7 +379,11 @@ fun LoopScreen(
                     peaks = peaks,
                     song = song,
                     viewModel = viewModel,
-                    onSavedAndPlay = onSavedAndPlay,
+                    onSavedAndPlay = { saved ->
+                        // 入口立刻消费预热源；页面随后 pop，dispose 不能再取消。
+                        prewarmConsumed = true
+                        onSavedAndPlay(saved)
+                    },
                     onExitSeamless = if (showExitSeamless) {
                         {
                             exitSeamless(

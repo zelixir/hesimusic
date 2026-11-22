@@ -26,6 +26,7 @@ import com.zjr.hesimusic.loop.LoopIntent
 import com.zjr.hesimusic.loop.LoopRuntime
 import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.service.LoopClaimStore
+import com.zjr.hesimusic.service.LoopEntryPrewarmer
 import com.zjr.hesimusic.service.MusicNavigationPolicy
 import com.zjr.hesimusic.service.MusicService
 import com.zjr.hesimusic.ui.player.state.PlayerPageShadow
@@ -60,7 +61,8 @@ class MusicViewModel @Inject constructor(
     private val favoriteRepository: FavoriteRepository,
     private val tagLibHelper: TagLibHelper,
     private val loopRuntime: LoopRuntime,
-    private val loopIntent: LoopIntent
+    private val loopIntent: LoopIntent,
+    private val loopEntryPrewarmer: LoopEntryPrewarmer,
 ) : ViewModel() {
 
     companion object {
@@ -516,6 +518,39 @@ class MusicViewModel @Inject constructor(
         // 位置必须在旧位置被看到之前归 0（入口的 UI 语义：显示即 0）。
         // 走 viewModel.seekTo：它会立即 updateState（乐观 0），UI 不必等 session 位置事件。
         seekTo(0L)
+    }
+
+    /**
+     * 00029：入口**预热**（菜单打开 / 结果页 Ready 时调用，不播放）。
+     *
+     * 后台建环带源 + 解前奏首块；用户点确认时工厂按 mediaId+tag 精确取走，
+     * 省掉入口窗口里的 174~220ms。预热源不接播放器、不写帧、解码线程 BACKGROUND。
+     *
+     * @param loopStartMs/loopEndMs 已确认的 A/B（菜单里的 song_loop 行 / 结果页 Ready）
+     */
+    fun prewarmSeamlessLoopEntry(song: Song, loopStartMs: Long, loopEndMs: Long) {
+        if (loopEndMs <= loopStartMs || song.filePath.isBlank()) return
+        val state = _uiState.value
+        val current = state.currentMediaItem?.takeIf {
+            state.currentPlayingSongId?.toLongOrNull() == song.id
+        }
+        loopEntryPrewarmer.prewarm(
+            LoopEntryPrewarmer.Request(
+                songId = song.id,
+                loopStartMs = loopStartMs,
+                loopEndMs = loopEndMs,
+                fullDurationUs = song.duration * 1_000L,
+                filePath = song.filePath,
+                // 入口时当前项若不是这首歌，beginSeamlessLoopEntry 会用 song.toMediaItem()
+                // 切过去；这里用同一个 item，mediaId 才能与工厂精确命中。
+                mediaItem = current ?: song.toMediaItem(),
+            ),
+        )
+    }
+
+    /** 菜单关闭/离开结果页：释放未使用的预热源（入口成功取走后是 no-op）。 */
+    fun cancelSeamlessLoopPrewarm(songId: Long) {
+        loopEntryPrewarmer.cancel(songId)
     }
 
     /**

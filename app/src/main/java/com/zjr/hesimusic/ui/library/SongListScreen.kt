@@ -54,6 +54,9 @@ fun SongListScreen(
     // 无缝循环菜单事件(仅透传;决策/播放/导航在 MainActivity)
     onSeamlessLoop: ((Song) -> Unit)? = null,
     onSeamlessAnalysis: ((Song) -> Unit)? = null,
+    /** 00029：菜单打开时预热入口源（不播放）；关闭菜单时取消。 */
+    onPrewarmSeamlessLoop: ((Song, Long, Long) -> Unit)? = null,
+    onCancelPrewarm: ((Long) -> Unit)? = null,
     /**
      * 视图 epoch(issue 00002),原样透传给列表。
      * 本页作为详情页(nav route details/...)只有一个固定视图,调用点保持默认 0 即可;
@@ -240,7 +243,9 @@ fun SongListScreen(
                     musicViewModel.addSongsToPlayQueue(listOf(song))
                 } else null,
                 onSeamlessLoop = onSeamlessLoop,
-                onSeamlessAnalysis = onSeamlessAnalysis
+                onSeamlessAnalysis = onSeamlessAnalysis,
+                onPrewarmSeamlessLoop = onPrewarmSeamlessLoop,
+                onCancelPrewarm = onCancelPrewarm
             )
             if (showBatchAddDialog) {
                 AddToPlaylistDialog(

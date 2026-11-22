@@ -41,6 +41,11 @@ class PcmRangeBlockReader(
      */
     private val decodePrerollUs: Long = DECODE_PREROLL_US,
     private val logger: (String) -> Unit = {},
+    /**
+     * 00029：预热源把解码线程降到 BACKGROUND，避免和正在播放的主源抢 CPU。
+     * 生产/播放路径保持默认优先级。
+     */
+    private val threadPriority: Int = Process.THREAD_PRIORITY_DEFAULT,
 ) {
 
     data class Read(
@@ -74,7 +79,13 @@ class PcmRangeBlockReader(
     private val lock = Object()
     private val decodeLock = Any()
     private val executor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "PcmRangeBlock").apply { isDaemon = true }
+        Thread({
+            // 用 Process.setThreadPriority 而不是 Thread.priority：Android 的
+            // THREAD_PRIORITY_DEFAULT=0 不是合法 Java priority（1..10），直接赋 0 会让
+            // 线程工厂抛异常、块永远解不出来（00029 预热版真机 buffering 卡死的根因）。
+            runCatching { Process.setThreadPriority(threadPriority) }
+            runnable.run()
+        }, "PcmRangeBlock").apply { isDaemon = true }
     }
     private val running = AtomicBoolean(false)
 

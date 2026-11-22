@@ -266,6 +266,12 @@ class MainActivity : ComponentActivity() {
                                     onLogsClick = { navController.navigate("logs") },
                                     onSeamlessLoop = loopActions.onSeamlessLoop,
                                     onSeamlessAnalysis = loopActions.onSeamlessAnalysis,
+                                    onPrewarmSeamlessLoop = { song, aMs, bMs ->
+                                        homeMusicViewModel.prewarmSeamlessLoopEntry(song, aMs, bMs)
+                                    },
+                                    onCancelPrewarm = { songId ->
+                                        homeMusicViewModel.cancelSeamlessLoopPrewarm(songId)
+                                    },
                                 )
                             }
                         }
@@ -355,6 +361,12 @@ class MainActivity : ComponentActivity() {
                                 onLogsClick = { navController.navigate("logs") },
                                 onSeamlessLoop = loopActions.onSeamlessLoop,
                                 onSeamlessAnalysis = loopActions.onSeamlessAnalysis,
+                                onPrewarmSeamlessLoop = { song, aMs, bMs ->
+                                    detailMusicViewModel.prewarmSeamlessLoopEntry(song, aMs, bMs)
+                                },
+                                onCancelPrewarm = { songId ->
+                                    detailMusicViewModel.cancelSeamlessLoopPrewarm(songId)
+                                },
                             )
                         }
 

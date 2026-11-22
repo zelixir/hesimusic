@@ -43,6 +43,27 @@ class LoopAwareMediaSourceFactory(
         try {
         val tag = loopTagOf(mediaItem.localConfiguration?.tag, enabled)
         if (tag != null) {
+            // 00029：入口预热源命中（tag/mediaId 全等）→ 直接把已经建好、前奏首块已解完的源
+            // 交给播放器；入口窗口只剩切项/起播，不再付 174~220ms 的首块解码。
+            val prebuilt = LoopSourcePrewarm.take(mediaItem, tag)
+            if (prebuilt != null) {
+                recordSelect(
+                    kind = SELECT_LOOP,
+                    mediaItem = mediaItem,
+                    songId = tag.songId,
+                    loopStartUs = tag.loopStartUs,
+                    loopEndUs = tag.loopEndUs,
+                )
+                loopSourceCount.incrementAndGet()
+                RingBandLog.i(
+                    "source factory select=loop PREWARMED songId=" + tag.songId +
+                        " [" + tag.loopStartUs + "," + tag.loopEndUs + ")" +
+                        " mediaId=" + mediaItem.mediaId +
+                        " cacheKey=" + mediaItem.localConfiguration?.customCacheKey +
+                        " created=" + loopSourceCount.get(),
+                )
+                return prebuilt
+            }
             recordSelect(
                 kind = SELECT_LOOP,
                 mediaItem = mediaItem,
@@ -186,6 +207,8 @@ class LoopAwareMediaSourceFactory(
         fun defaultSourceFactory(
             pcmDecoder: PcmDecoder,
             onSeamOutputFrames: ((Long) -> Unit)? = null,
+            /** 00029：预热建源时块解码线程降为 BACKGROUND（不抢正在播放的主源）。 */
+            backgroundDecode: Boolean = false,
         ): (MediaItem, LoopSourceItemTag) -> MediaSource =
             { item, tag ->
                 val startedNs = System.nanoTime()
@@ -206,6 +229,7 @@ class LoopAwareMediaSourceFactory(
                     // "RingBand select/fallback" 都吞了，无法判断到底走了环带还是块缓存）。
                     logger = { message -> RingBandLog.i(message) },
                     onSeamOutputFrames = onSeamOutputFrames,
+                    backgroundDecode = backgroundDecode,
                 )
                 RingBandLog.i(
                     "source build songId=" + tag.songId +

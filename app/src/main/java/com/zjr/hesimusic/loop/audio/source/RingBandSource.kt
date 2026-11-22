@@ -66,7 +66,14 @@ object RingBandSource {
         logger: (String) -> Unit = {},
         onSeamOutputFrames: ((Long) -> Unit)? = null,
         testDecoder: RingBandStreamDecoder? = null,
+        /** 00029：预热建源时把前奏/尾奏块解码线程降为 BACKGROUND。 */
+        backgroundDecode: Boolean = false,
     ): MediaSource {
+        val decodePriority = if (backgroundDecode) {
+            android.os.Process.THREAD_PRIORITY_BACKGROUND
+        } else {
+            android.os.Process.THREAD_PRIORITY_DEFAULT
+        }
         val decoder = testDecoder ?: run {
             val real = provider as? PcmDecoderRangeProvider
                 ?: throw IllegalArgumentException("RingBand requires PcmDecoderRangeProvider")
@@ -95,6 +102,7 @@ object RingBandSource {
                 channels = timeline.channels,
                 decodePrerollUs = if (preludeResident != null) 0L else PcmRangeBlockReader.DECODE_PREROLL_US,
                 logger = logger,
+                threadPriority = decodePriority,
             )
         } else {
             null
@@ -110,6 +118,7 @@ object RingBandSource {
                 prefetchOnInit = false,
                 decodePrerollUs = if (tailResident != null) 0L else PcmRangeBlockReader.DECODE_PREROLL_US,
                 logger = logger,
+                threadPriority = decodePriority,
             )
         } else {
             null
@@ -137,14 +146,18 @@ object RingBandSource {
         if (!timeline.wholeTimeline || timeline.aFrame <= 0L) {
             renderer.start()
         }
-        val prewarmToken = RingBandPrewarm.register { timelineUs ->
-            extractor.prewarmTimelineUs(timelineUs)
+        // 00029：注册动作交给 RingBandMediaSource 在 prepareSourceInternal 时执行；
+        // 预热源在菜单里闲置时不会挂在全局 seek 预热广播上。
+        val registerPrewarm = {
+            RingBandPrewarm.register { timelineUs ->
+                extractor.prewarmTimelineUs(timelineUs)
+            }
         }
         return RingBandMediaSource(
             delegate = factory.createMediaSource(item),
             extractor = extractor,
             ring = ring,
-            prewarmToken = prewarmToken,
+            registerPrewarm = registerPrewarm,
         )
     }
 

@@ -15,7 +15,11 @@ internal class RingBandMediaSource(
     delegate: MediaSource,
     private val extractor: RingBandExtractor,
     ring: LoopRing,
-    private val prewarmToken: RingBandPrewarm.Token? = null,
+    /**
+     * 00029：seek 预热钩子改为**接入播放器时**才注册。
+     * 预热的源在菜单/结果页长时间闲置，绝不能挂在全局 prewarm 广播上为空转解块。
+     */
+    private val registerPrewarm: (() -> RingBandPrewarm.Token)? = null,
 ) : WrappingMediaSource(delegate) {
 
     @Volatile
@@ -23,6 +27,16 @@ internal class RingBandMediaSource(
 
     @Volatile
     private var released = false
+
+    @Volatile
+    private var prewarmToken: RingBandPrewarm.Token? = null
+
+    override fun prepareSourceInternal() {
+        super.prepareSourceInternal()
+        if (prewarmToken == null) {
+            prewarmToken = registerPrewarm?.invoke()
+        }
+    }
 
     internal fun ringForTest(): LoopRing? = ringRef
 
@@ -42,6 +56,7 @@ internal class RingBandMediaSource(
         val bytes = ringRef?.let { it.frames * it.bytesPerFrame } ?: 0L
         ringRef = null
         RingBandPrewarm.unregister(prewarmToken)
+        prewarmToken = null
         extractor.release()
         RingBandLog.i("RingBand release bandBytes=" + bytes + " released=true")
     }
