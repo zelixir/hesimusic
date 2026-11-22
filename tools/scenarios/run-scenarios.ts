@@ -176,7 +176,7 @@ function pickDevice(adbExe: string, wanted: string): string {
   return devices[0];
 }
 
-function pickSongs(all: SongInfo[], opts: Opts): {
+async function pickSongs(all: SongInfo[], opts: Opts, adb: Adb): {
   primary: SongInfo;
   short: SongInfo;
   unconfirmed: SongInfo;
@@ -248,6 +248,29 @@ function pickSongs(all: SongInfo[], opts: Opts): {
     long = longCands[0] ?? null;
   }
 
+  // 曲库可能残留“记录存在、磁盘文件已删”的歌（如 #41524）：确认候选必须有真实文件。
+  const firstExisting = async (cands: SongInfo[], limit = 40): Promise<SongInfo | null> => {
+    for (const s of cands.slice(0, limit)) {
+      if (await adb.fileExists(s.path)) return s;
+    }
+    return null;
+  };
+  if (!(await adb.fileExists(primary.path))) {
+    const alt = await firstExisting(conf);
+    if (alt) primary = alt;
+  }
+  if (!(await adb.fileExists(short.path))) {
+    const alt = await firstExisting(conf.filter((s) => s.id !== primary!.id));
+    if (alt) short = alt;
+  }
+  if (!(await adb.fileExists(unconfirmed.path))) {
+    const alt = await firstExisting(all.filter((s) => s.hasLoop && !s.loopConfirmed && s.loopStartMs != null && s.loopEndMs != null));
+    if (alt) unconfirmed = alt;
+  }
+  if (long && !(await adb.fileExists(long.path))) {
+    const alt = await firstExisting(conf.filter((s) => s.durationMs >= 240000));
+    if (alt) long = alt;
+  }
   return { primary: primary!, short: short!, unconfirmed: unconfirmed!, long };
 }
 
@@ -540,7 +563,9 @@ const pid0 = await adb.pidof(cfg.pkg);
   console.log("foreground: " + (await adb.foregroundActivity()));
 
   const all = await api.songsAll();
-  const songs = pickSongs(all, opts);
+  const songs = await pickSongs(all, opts, adb);
+  // 数据卫生：跑前快照 loopConfirmed，跑后校验（任何写 song_loop 的场景都应恢复）。
+  const confirmedSnapshot = new Map<number, boolean>(all.map((s) => [s.id, s.loopConfirmed === true]));
   console.log("primary: " + songLine(songs.primary));
   console.log("short:   " + songLine(songs.short));
   console.log("unconf:  " + songLine(songs.unconfirmed));
@@ -988,7 +1013,15 @@ const pid0 = await adb.pidof(cfg.pkg);
       );
     }
     const pidAfter = await adb.pidof(cfg.pkg);
-    if (status !== "SKIP" || pidBefore !== pidAfter) {
+    if (scenario.allowPidRestart && pidBefore !== pidAfter) {
+      checks.push(
+        check(
+          "进程存活(未重启)",
+          pidAfter !== null,
+          "pid " + pidBefore + " -> " + pidAfter + "（场景声明允许为恢复导航 hook 重启）",
+        ),
+      );
+    } else if (status !== "SKIP" || pidBefore !== pidAfter) {
       checks.push(
         check(
           "进程存活(未重启)",
@@ -1123,6 +1156,24 @@ const pid0 = await adb.pidof(cfg.pkg);
   if (finalScreen && !finalScreen.awake) console.warn("!! 收尾后屏幕仍不是 Awake: " + finalScreen.wakefulness);
   if (finalVolume && !finalVolume.ok) console.warn("!! 收尾后媒体音量不是 0: " + String(finalVolume.volume));
 
+  // ---- 数据卫生校验：loopConfirmed 快照对比 ----
+  let dataMismatches: { id: number; before: boolean; after: boolean }[] = [];
+  try {
+    const finalAll = await api.songsAll();
+    for (const s of finalAll) {
+      const before = confirmedSnapshot.get(s.id);
+      if (before !== undefined && before !== (s.loopConfirmed === true)) {
+        dataMismatches.push({ id: s.id, before, after: s.loopConfirmed === true });
+      }
+    }
+  } catch (e: any) {
+    console.warn("数据快照校验失败: " + e.message);
+  }
+  if (dataMismatches.length > 0) {
+    console.warn("!! 数据卫生: " + dataMismatches.length + " 首 loopConfirmed 与跑前不一致");
+    console.warn("   " + dataMismatches.slice(0, 6).map((m) => "#" + m.id + " " + m.before + "->" + m.after).join(", "));
+  }
+
   // ---- 报告 ----
   const failedResults = results.filter((r) => r.status === "FAIL");
   const skipResults = results.filter((r) => r.status === "SKIP");
@@ -1150,6 +1201,7 @@ const pid0 = await adb.pidof(cfg.pkg);
     finalScreen,
     finalVolume,
     aborted: abortRun,
+    confirmedSnapshotMismatches: dataMismatches,
     pendingDecisions,
     results: results.map((r) => ({
       ...r,
@@ -1290,6 +1342,12 @@ function buildMarkdown(report: any, results: any[], runDir: string): string {
   L.push("- pid: " + report.pidStart + " -> " + report.pidEnd + "  adb 调用: " + report.adbCalls);
   L.push("- 总耗时: " + Math.round(report.totalMs / 1000) + "s");
   if (report.aborted) L.push("- **整轮中止**: " + report.aborted);
+  if ((report.confirmedSnapshotMismatches ?? []).length > 0) {
+    L.push("- !! **数据卫生告警**: loopConfirmed 与跑前不一致 " +
+      report.confirmedSnapshotMismatches.map((m: any) => "#" + m.id + " " + m.before + "->" + m.after).join(", "));
+  } else {
+    L.push("- 数据卫生: loopConfirmed 快照与跑后一致");
+  }
   L.push("- 选歌: primary " + songLine(report.songs.primary) + "; short " + songLine(report.songs.short) + "; unconfirmed " + songLine(report.songs.unconfirmed));
   L.push("");
   L.push("## 结果总览");

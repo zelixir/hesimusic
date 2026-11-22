@@ -891,6 +891,10 @@ const sEnv43: Scenario = {
       if (!started) {
         await ctx.adb.shell("am force-stop " + otherPkg, 20000).catch(() => "");
         await ctx.adb.bringForeground(ctx.cfg.pkg).catch(() => false);
+        // 竞品 Activity 会顶掉主界面；重启应用确保 UiNavigationHooks 重新接线（#45 依赖）。
+        await ctx.adb.shell("am force-stop " + ctx.cfg.pkg).catch(() => "");
+        await ctx.adb.shell("am start -W -n " + ctx.cfg.pkg + "/.MainActivity").catch(() => "");
+        await sleep(1200);
         return await skipEnv("第三方播放器拒绝 VIEW 播放: " + out.slice(0, 200));
       }
 
@@ -918,6 +922,10 @@ const sEnv43: Scenario = {
         if (!competitorPlaying) {
           await ctx.adb.shell("am force-stop " + otherPkg, 20000).catch(() => "");
           await ctx.adb.bringForeground(ctx.cfg.pkg).catch(() => false);
+        // 竞品 Activity 会顶掉主界面；重启应用确保 UiNavigationHooks 重新接线（#45 依赖）。
+        await ctx.adb.shell("am force-stop " + ctx.cfg.pkg).catch(() => "");
+        await ctx.adb.shell("am start -W -n " + ctx.cfg.pkg + "/.MainActivity").catch(() => "");
+        await sleep(1200);
           return await skipEnv(
             "竞品 " + otherPkg + " 被拉起但未真正起播/未请求音频焦点（dumpsys media_session 无 PLAYING）；" +
               "环境未证实，换一个确定会起播的播放器再测",
@@ -1024,6 +1032,10 @@ const sEnv43: Scenario = {
         engine: cleanup?.playback?.engine,
         window: cleanup ? loopWindowOf(cleanup) : null,
       });
+      // 竞品 Activity 退出后主界面导航 hook 可能未重挂；重启一次，隔离后续 #45。
+      await ctx.adb.shell("am force-stop " + ctx.cfg.pkg).catch(() => "");
+      await ctx.adb.shell("am start -W -n " + ctx.cfg.pkg + "/.MainActivity").catch(() => "");
+      await sleep(1200);
     }
   },
 };
@@ -1163,6 +1175,7 @@ const sEnv45: Scenario = {
   name: "屏幕旋转 -> 结果页重建 -> 预览仍在 [A,B)",
   tag: "环境",
   exclusive: true,
+  allowPidRestart: true,
   timeoutMs: 180000,
   async run(ctx) {
     const checks: Check[] = [];
@@ -1194,14 +1207,38 @@ const sEnv45: Scenario = {
       const backToStart = await setRotation(ctx, startRot);
       ctx.evidence.step("rotation-back-to-start", { startRot, ...backToStart });
       await sleep(600);
-      await ctx.ensureLoopPage(song.id);
+      try {
+        await ctx.ensureLoopPage(song.id);
+      } catch (e: any) {
+        // #43 拉起竞品后返回，主 Activity 的导航 hook 可能未重挂；重启一次应用再试。
+        if (/navigate 未接线|preview probe not attached/.test(String(e?.message ?? e))) {
+          ctx.evidence.step("navigate-retry", { error: String(e?.message ?? e) });
+          await ctx.adb.shell("am force-stop " + ctx.cfg.pkg);
+          await ctx.adb.shell("am start -W -n " + ctx.cfg.pkg + "/.MainActivity");
+          await sleep(1500);
+          await ctx.ensureLoopPage(song.id);
+        } else {
+          throw e;
+        }
+      }
       await ctx.uiTap("仅循环段");
-      const ready = await waitFor(
+      let ready = await waitFor(
         async () => (await ctx.api.preview()).snapshot,
         (s) => s && s.mode === "LOOP_ONLY" && s.isPlaying === true,
         10000,
         120,
       );
+      if (!ready.ok || !ready.value) {
+        // 页面重建后按钮可能晚一拍：再等一拍并重试一次点击。
+        await sleep(800);
+        await ctx.uiTap("仅循环段");
+        ready = await waitFor(
+          async () => (await ctx.api.preview()).snapshot,
+          (s) => s && s.mode === "LOOP_ONLY" && s.isPlaying === true,
+          8000,
+          120,
+        );
+      }
       if (!ready.ok || !ready.value) {
         return await skipEnv("结果页「仅循环段」未起播,无法验证旋转后重建(先按 docs §1.4 确认引擎)");
       }

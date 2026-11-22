@@ -33,7 +33,25 @@
  * 写域：本文件。不改 app，不碰其它 scenarios-*.ts。
  */
 
-import { check, measureMainFrames, measurePreviewFrames, pendingCheck, positionPhaseCheck, round, sleep, waitFramesSettled, waitFor } from "./harness";
+import {
+  analyzeWriteGaps,
+  check,
+  deviceFrameGapCheck,
+  fetchDeviceFrameGaps,
+  measureMainFrames,
+  relativeWriteGapCheck,
+  samplingIntervalStats,
+  writeStallStats,
+  measurePreviewFrames,
+  pendingCheck,
+  positionPhaseCheck,
+  round,
+  sleep,
+  waitFramesSettled,
+  waitFor,
+  writeGapCheck,
+  WrittenFrameSampler,
+} from "./harness";
 import type { Check, SongInfo, State } from "./harness";
 import { createProber, defaultWorkDir } from "./content-probe";
 import type { ProbeResult, ProbeStack } from "./content-probe";
@@ -1288,11 +1306,36 @@ const g88: Scenario = {
     const pid0 = await ctx.adb.pidof(ctx.cfg.pkg);
     await ctx.resetForMain();
     await playSong(ctx, song.id);
+    // 基线必须在进入结果页之前采：结果页会暂停主播放，页面里的“静默”不是写帧基线。
+    const gapOpts = { intervalMs: 5, concurrency: 6 };
+    const baseSampler0 = new WrittenFrameSampler(ctx.api, gapOpts);
+    baseSampler0.start();
+    await sleep(1500);
+    const baseSamples = await baseSampler0.stop();
+    const base = writeStallStats(baseSamples);
+    let gapSampler: WrittenFrameSampler | null = null;
     try {
       await ctx.ensureLoopPage(song.id);
       if (!(await hasText(ctx, "确认并保存"))) {
         throw newSkip("结果页没有「确认并保存」按钮");
       }
+      // 00029：基线已在进入结果页前采好；这里只覆盖确认入口。
+      gapSampler = new WrittenFrameSampler(ctx.api, gapOpts);
+      gapSampler.start();
+      // 设备侧同步取证：点击前开始轮询 lastWriteGapMs（未过滤），覆盖整个入口。
+      const gapProbes: any[] = [];
+      let probingEntry = true;
+      const probeTask = (async () => {
+        for (let i = 0; i < 80 && probingEntry; i++) {
+          try {
+            const g = await fetchDeviceFrameGaps(ctx.api, 4000);
+            gapProbes.push({ lastWriteGapMs: g.raw?.lastWriteGapMs, thresholdMs: g.thresholdMs });
+          } catch {
+            // 端点抖动忽略
+          }
+          await sleep(60);
+        }
+      })();
       const saveTapped = await tapTextInView(ctx, "确认并保存", 3);
       if (!saveTapped) throw newSkip("「确认并保存」按钮在可视区内点不到");
       checks.push(check("已点「确认并保存」", saveTapped, "via tapTextInView"));
@@ -1303,6 +1346,10 @@ const g88: Scenario = {
         150,
       );
       const st = claimed.value ?? (await ctx.api.state());
+      probingEntry = false;
+      await probeTask;
+      const worstLastGapMs = Math.max(0, ...gapProbes.map((p) => Number(p.lastWriteGapMs ?? 0)));
+      ctx.evidence.step("entry-gap-probes", { worstLastGapMs, probes: gapProbes });
       ctx.evidence.step("after-save", {
         claimActive: (st as any).loop?.claimActive,
         window: loopWin(st),
@@ -1311,6 +1358,23 @@ const g88: Scenario = {
         positionMs: st.playback?.positionMs,
         previewAvailable: (await ctx.api.preview()).available,
       });
+      const gapSamples = await gapSampler.stop();
+      const saveGaps = analyzeWriteGaps(gapSamples, { minGapMs: 0 });
+      const iv = samplingIntervalStats(gapSamples);
+      ctx.evidence.step("save-write-gaps", {
+        baseline: { samples: baseSamples.length, max: base.max, p95: base.p95, durations: base.durations },
+        intervals: iv,
+        samples: gapSamples.length,
+        failed: gapSamples.filter((s) => !s.ok).length,
+        gaps: saveGaps,
+      });
+      const dev = await fetchDeviceFrameGaps(ctx.api, 4000);
+      ctx.evidence.step("device-frame-gaps", { available: dev.available, reason: dev.reason, precisionMs: dev.precisionMs, thresholdMs: dev.thresholdMs, gaps: dev.gaps, raw: dev.raw });
+      if (dev.available && dev.precisionMs <= 25) {
+        checks.push(deviceFrameGapCheck("确认并保存入口停写空洞", dev, 1, 120));
+      } else {
+        checks.push(relativeWriteGapCheck("确认并保存入口停写空洞", saveGaps, base.max, 1, 120, iv.p95));
+      }
       checks.push(check("保存后进入无缝循环(claimActive)", claimed.ok, "engine=" + st.playback?.engine + " 耗时 " + claimed.elapsedMs + "ms"));
       const w = loopWin(st);
       checks.push(
@@ -1350,6 +1414,7 @@ const g88: Scenario = {
       const pid1 = await ctx.adb.pidof(ctx.cfg.pkg);
       checks.push(check("进程未重启", pid0 != null && pid1 === pid0, "pid " + pid0 + " -> " + pid1));
     } finally {
+      if (gapSampler) await gapSampler.stop().catch(() => []);
       let restore = await restoreWindow(ctx, song.id, origA, origB);
       checks.push(restore);
       await ctx.api.post("/loop/exit").catch(() => null);
@@ -1500,11 +1565,75 @@ const g90: Scenario = {
         );
       }
       await sleep(500);
-      const silent = await measureMainFrames(ctx.api, 1200, ctx.sampleRateFor(newId || song.id));
+      // 主播放器目前没有 outputFrames（已渲染）计数；按 lead 裁决用 writtenFrames 辅助判据：
+      // 允许 1 个 buffer（<=4608 帧），且不得连续两次增长。
+      const fs: number[] = [];
+      for (let i = 0; i < 24; i++) {
+        try {
+          const p = (await ctx.api.state()).invariantProbe;
+          fs.push(Number(p?.writtenFrames ?? NaN));
+        } catch {
+          // 采样失败忽略
+        }
+        await sleep(50);
+      }
+      const ds: number[] = [];
+      for (let i = 1; i < fs.length; i++) {
+        if (Number.isFinite(fs[i]) && Number.isFinite(fs[i - 1])) ds.push(fs[i] - fs[i - 1]);
+      }
+      const totalWritten = ds.reduce((a, b) => a + Math.max(0, b), 0);
+      // 一个 buffer 的填充可能跨多个 50ms 采样，连续正增量仍属于同一次增长；
+      // “不允许第 2 个”按增长 burst 计数：最多 1 次连续增长 + 总量 <=1 buffer。
+      let growthBursts = 0;
+      let prevPositive = false;
+      for (const d of ds) {
+        if (d > 0) {
+          if (!prevPositive) growthBursts += 1;
+          prevPositive = true;
+        } else {
+          prevPositive = false;
+        }
+      }
       if (nextPath === "WRAP_TO_START") {
-        checks.push(pendingCheck("单曲队列回退路径无输出", "Δ=" + silent.deltaFrames + "f（回退路径会主动 play）", "debug-next-wrap-plays"));
+        checks.push(pendingCheck("单曲队列回退路径无输出", "writtenΔ=" + totalWritten + "f（回退路径会主动 play）", "debug-next-wrap-plays"));
       } else {
-        checks.push(check("切歌后无输出", silent.deltaFrames === 0, "Δ=" + silent.deltaFrames + "f/" + silent.spanMs + "ms"));
+        checks.push(
+          check(
+            "切歌后 writtenFrames 增量<=1 buffer 且不连续增长",
+            totalWritten <= 4608 && growthBursts <= 1,
+            "writtenΔ=" + totalWritten + "f (<=4608), 增长bursts=" + growthBursts + ", samples=" + fs.length,
+            totalWritten > 4608 || growthBursts > 1 ? "暂停态出现第 2 个 buffer 增长：AudioTrack 可能被预填/播放" : undefined,
+          ),
+        );
+      }
+      const rendered = Number(
+        (before as any).invariantProbe?.outputFrames ??
+          (before.playback as any)?.outputFrames ??
+          (before.playback as any)?.renderedFrames,
+      );
+      if (!Number.isFinite(rendered)) {
+        checks.push(
+          pendingCheck(
+            "切歌后已渲染帧 Δ==0",
+            "主播放器 /state 未暴露 outputFrames/renderedFrames（目前只有 invariantProbe.writtenFrames）",
+            "missing-outputFrames",
+            "service 侧补 playback.outputFrames（累计已渲染帧）后启用主判据",
+          ),
+        );
+      } else {
+        // 字段到位后按 lead 裁决：outputFrames Δ == 0（tick 500ms，至少隔 600ms 再取）
+        await sleep(700);
+        const afterState: any = await ctx.api.state();
+        const afterRender = Number(
+          afterState.invariantProbe?.outputFrames ?? afterState.playback?.outputFrames ?? NaN,
+        );
+        checks.push(
+          check(
+            "切歌后已渲染帧 Δ==0",
+            Number.isFinite(afterRender) && afterRender === rendered,
+            "outputFrames " + rendered + " -> " + afterRender,
+          ),
+        );
       }
       const w = loopWin(st);
       checks.push(
@@ -1848,6 +1977,100 @@ function exitCondition(position: number, claimNow: boolean, w: Win | null, phase
 }
 
 // ---------------------------------------------------------------------------
+// 场景 94：播放中进循环 —— 入口可听空洞（00029 writtenFrames 停写）
+// ---------------------------------------------------------------------------
+
+const g94: Scenario = {
+  id: 94,
+  key: "enter-loop-write-gap",
+  name: "播放中进循环:可听空洞(10ms writtenFrames)",
+  tag: "循环",
+  exclusive: false,
+  timeoutMs: 120000,
+  async run(ctx) {
+    const checks: Check[] = [];
+    const song = ctx.songs.primary;
+    const info = await ctx.api.song(song.id);
+    const aMs = Math.round(Number(info.loopStartMs));
+    await ctx.resetForMain();
+    await playSong(ctx, song.id);
+    await ctx.api.post("/player/seek", { positionMs: aMs + 3000 });
+    await waitDisplayNear(ctx, aMs + 3000, 900);
+    const before = await ctx.api.state();
+    if (before.invariantProbe?.routeSource !== true) {
+      throw newSkip("主播放器不在 SOURCE 路线(writtenFrames 不更新)，无法测入口停写");
+    }
+
+    let sampler: WrittenFrameSampler | null = null;
+    let baselineMax = 0;
+    let intervalP95 = 0;
+    let gaps: any[] = [];
+    try {
+      const opts = { intervalMs: 5, concurrency: 6 };
+      const baseSampler = new WrittenFrameSampler(ctx.api, opts);
+      baseSampler.start();
+      await sleep(1500); // 基线：平稳播放的帧更新粒度
+      const baseSamples = await baseSampler.stop();
+      const base = writeStallStats(baseSamples);
+      baselineMax = base.max;
+      sampler = new WrittenFrameSampler(ctx.api, opts);
+      sampler.start();
+      // 设备侧同步取证：/loop/enter 前开始轮询 lastWriteGapMs（未过滤），覆盖整个入口。
+      const gapProbes: any[] = [];
+      let probingEntry = true;
+      const probeTask = (async () => {
+        for (let i = 0; i < 80 && probingEntry; i++) {
+          try {
+            const g = await fetchDeviceFrameGaps(ctx.api, 4000);
+            gapProbes.push({ lastWriteGapMs: g.raw?.lastWriteGapMs, thresholdMs: g.thresholdMs });
+          } catch {
+            // 端点抖动忽略
+          }
+          await sleep(60);
+        }
+      })();
+      const enter = await enterLoop(ctx, song.id, true, false);
+      const claim = await waitClaim(ctx, song.id, 12000);
+      probingEntry = false;
+      await probeTask;
+      const worstLastGapMs = Math.max(0, ...gapProbes.map((p) => Number(p.lastWriteGapMs ?? 0)));
+      ctx.evidence.step("entry-gap-probes", { worstLastGapMs, probes: gapProbes });
+      await sleep(1200); // 覆盖入口后的 sink 起播
+      const samples = await sampler.stop();
+      const allGaps = analyzeWriteGaps(samples, { minGapMs: 0 });
+      gaps = allGaps;
+      const iv = samplingIntervalStats(samples);
+      intervalP95 = iv.p95;
+      ctx.evidence.step("enter-write-gaps", {
+        enter: enter.status,
+        claimActive: !!(claim.state as any)?.loop?.claimActive,
+        baseline: { samples: baseSamples.length, max: base.max, p95: base.p95, durations: base.durations },
+        intervals: iv,
+        samples: samples.length,
+        failed: samples.filter((s) => !s.ok).length,
+        gaps: allGaps,
+      });
+      checks.push(check("进入循环(claimActive)", claim.ok, "engine=" + claim.state?.playback?.engine + " 耗时 " + claim.elapsedMs + "ms"));
+      const dev = await fetchDeviceFrameGaps(ctx.api, 4000);
+      ctx.evidence.step("device-frame-gaps", { available: dev.available, reason: dev.reason, precisionMs: dev.precisionMs, thresholdMs: dev.thresholdMs, gaps: dev.gaps, raw: dev.raw });
+      if (dev.available && dev.precisionMs <= 25) {
+        checks.push(deviceFrameGapCheck("播放中进循环入口停写空洞", dev, 1, 300));
+      } else {
+        checks.push(relativeWriteGapCheck("播放中进循环入口停写空洞", allGaps, baselineMax, 1, 300, intervalP95));
+      }
+      return {
+        checks,
+        summary: "enter gap=" + (gaps.length ? gaps.map((g) => Math.round(g.durationMs) + "ms").join(",") : "none"),
+      };
+    } finally {
+      if (sampler) await sampler.stop().catch(() => []);
+      await ctx.api.post("/loop/exit").catch(() => null);
+      await ctx.resetForMain().catch(() => null);
+    }
+  },
+};
+
+// ---------------------------------------------------------------------------
 // 导出（由 lead 合并注册）
 // ---------------------------------------------------------------------------
 
@@ -1866,4 +2089,5 @@ export const GAP_SCENARIOS: Scenario[] = [
   g91,
   g92,
   g93,
+  g94,
 ];

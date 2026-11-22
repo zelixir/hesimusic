@@ -104,6 +104,8 @@ export interface Scenario {
   screenChanges?: boolean;
   /** 会改用户可见状态(锁屏/熄屏/音量/省电/充电)：默认 SKIP，且强制排到常规场景之后。 */
   visibleStateChanges?: boolean;
+  /** 允许场景为恢复导航 hook 重启应用（#45 用），runner 不把清零的 pid 判 FAIL。 */
+  allowPidRestart?: boolean;
   /** 覆盖单场景硬超时（长稳定性需要 10 分钟+）。 */
   timeoutMs?: number;
   run: (ctx: ScenarioCtx) => Promise<ScenarioRunResult>;

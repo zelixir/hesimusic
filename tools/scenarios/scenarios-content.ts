@@ -430,7 +430,8 @@ class DisplayMonitor {
   async stop(): Promise<void> {
     this.stopped = true;
     try {
-      await this.done;
+      // 预览页关闭后 /debug/preview 可能挂住：给 stop 一个硬上限，避免整条场景被采样器拖死。
+      await Promise.race([this.done, sleep(5000)]);
     } catch {
       // 采样失败的最后一拍忽略
     }

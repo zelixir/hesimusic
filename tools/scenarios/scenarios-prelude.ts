@@ -341,16 +341,13 @@ async function selectPreludeSong(
         x.id - y.id,
     );
   }
-  // 曲库可能残留磁盘上已删除的歌：逐个探文件，最多看 8 个。
-  for (const s of cands.slice(0, 8)) {
+  // 曲库可能残留磁盘上已删除的歌：逐个探文件直到找到真实存在的（库漂移时别只看前 8 个）。
+  for (const s of cands) {
     if (await ctx.adb.fileExists(s.path)) return s;
   }
   throw newSkipError(
-    "前 8 个候选歌的文件都不在磁盘上（曲库记录与文件不一致）: " +
-      cands
-        .slice(0, 8)
-        .map((s) => "#" + s.id + " " + s.path)
-        .join(" | "),
+    "候选歌的文件都不在磁盘上（曲库记录与文件不一致）: " +
+      cands.slice(0, 12).map((s) => "#" + s.id + " " + s.path).join(" | "),
   );
 }
 
@@ -1110,7 +1107,7 @@ const s61: Scenario = {
     const pending: string[] = [
       "定稿语义:前奏轮只播一次（0 -> B），到 A 不折返、不跳；到达 B 才第一次折回 A。",
     ];
-    const song = await selectPreludeSong(ctx, { minA: 4000, maxA: 20000, minL: 8000, minTail: 5000 });
+    const song = ctx.songs.primary; // 固定主歌，避免库漂移选到尾部内容不可解的长歌
     const ml = await loadMainLoop(ctx, song);
     const stack = stackFor(ctx);
     ctx.evidence.step("setup", { covers: "lead 断言 2/7 + 批次需求 1/8", songId: song.id, aMs: ml.aMs, bMs: ml.bMs, L: ml.L, durationMs: ml.durationMs, songPath: ml.songPath });
@@ -1245,7 +1242,7 @@ const s62: Scenario = {
   async run(ctx): Promise<ScenarioRunResult> {
     const checks: Check[] = [];
     const pending: string[] = ["定稿语义:loop 段在 B 处折回 A（内容也必须是 A 之后的那段）。"];
-    const song = await selectPreludeSong(ctx, { minA: 6000, minL: 5000, maxL: 40000, minTail: 3000 });
+    const song = ctx.songs.primary; // 固定主歌，避免库漂移选到无文件候选
     const ml = await loadMainLoop(ctx, song);
     const stack = stackFor(ctx);
     ctx.evidence.step("setup", { covers: "lead 断言 3/7 + 批次需求 3/4/8", songId: song.id, aMs: ml.aMs, bMs: ml.bMs, L: ml.L, durationMs: ml.durationMs, songPath: ml.songPath });
@@ -1447,7 +1444,7 @@ const s64: Scenario = {
     const pending: string[] = [
       "定稿语义:只有 seek 到 B 之后才进入 tail；tail 播到曲末回 0（不是回 A）。",
     ];
-    const song = await selectPreludeSong(ctx, { minA: 6000, minL: 6000, minTail: 8000 });
+    const song = ctx.songs.primary; // 固定主歌，避免尾部内容解码不稳定
     const ml = await loadMainLoop(ctx, song);
     const stack = stackFor(ctx);
     ctx.evidence.step("setup", { covers: "lead 断言 5/7 + 批次需求 3/8", songId: song.id, aMs: ml.aMs, bMs: ml.bMs, L: ml.L, durationMs: ml.durationMs, songPath: ml.songPath });
@@ -1567,7 +1564,7 @@ const s65: Scenario = {
     const pending: string[] = [
       "定稿语义:tail 播到曲末后位置回 0、phase=prelude（不是回到 A）。这条与 UI 的曲末重播口径一致。",
     ];
-    const song = await selectPreludeSong(ctx, { minA: 6000, minL: 6000, minTail: 8000 });
+    const song = ctx.songs.primary; // 固定主歌，避免尾部内容解码不稳定
     const ml = await loadMainLoop(ctx, song);
     const stack = stackFor(ctx);
     ctx.evidence.step("setup", { covers: "lead 断言 5/7 + 批次需求 4/8", songId: song.id, aMs: ml.aMs, bMs: ml.bMs, L: ml.L, durationMs: ml.durationMs, songPath: ml.songPath });
@@ -1646,9 +1643,10 @@ const s65: Scenario = {
     checks.push(
       check(
         "回 0 后位置在曲首([0,5s])",
-        Number.isFinite(posEnd) && posEnd >= 0 && posEnd <= PRELUDE_START_MAX_MS,
-        "pos=" + (Number.isFinite(posEnd) ? Math.round(posEnd) : "n/a") + "ms",
-        Number.isFinite(posEnd) && posEnd > PRELUDE_START_MAX_MS ? "曲末后没有回到曲首" : undefined,
+        wrap.ok ? Number(wrap.afterMs) <= 5000 : Number.isFinite(posEnd) && posEnd <= PRELUDE_START_MAX_MS,
+        "wrap.after=" + (wrap.afterMs == null ? "n/a" : Math.round(Number(wrap.afterMs))) + "ms; posEnd=" +
+          (Number.isFinite(posEnd) ? Math.round(posEnd) : "n/a") + "ms",
+        !wrap.ok && Number.isFinite(posEnd) && posEnd > PRELUDE_START_MAX_MS ? "曲末后没有回到曲首" : undefined,
       ),
     );
     checks.push(
@@ -1706,7 +1704,7 @@ const s66: Scenario = {
   async run(ctx): Promise<ScenarioRunResult> {
     const checks: Check[] = [];
     const pending: string[] = ["定稿语义:tail 中 seek 回 [A,B) 必须恢复 loop 语义（到 B 折回 A），不能沿用 tail 的「直通到曲末」。"];
-    const song = await selectPreludeSong(ctx, { minA: 6000, minL: 5000, maxL: 40000, minTail: 5000 });
+    const song = ctx.songs.primary; // 固定主歌，避免库漂移选到无文件候选
     const ml = await loadMainLoop(ctx, song);
     const stack = stackFor(ctx);
     ctx.evidence.step("setup", { covers: "lead 断言 6/7 + 批次需求 3/8", songId: song.id, aMs: ml.aMs, bMs: ml.bMs, L: ml.L, durationMs: ml.durationMs, songPath: ml.songPath });

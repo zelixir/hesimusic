@@ -1108,6 +1108,312 @@ export async function releaseDeviceLock(adb: Adb, runId: string): Promise<{ rele
 }
 
 // ---------------------------------------------------------------------------
+// 进入循环可听空洞：writtenFrames 停写间隔（10ms 流水线采样）
+// ---------------------------------------------------------------------------
+
+export interface WrittenFrameSample {
+  atMs: number;
+  frames: number;
+  ok: boolean;
+  error?: string;
+}
+
+export interface WriteGap {
+  startMs: number;
+  endMs: number;
+  durationMs: number;
+  open: boolean;
+}
+
+/**
+ * 10ms 节奏、并发在途的 /state 采样器。
+ * - 不串行 await：每 tick 补满 concurrency 个 GET，避免 HTTP 往返把采样拖到 >30ms；
+ * - 用响应里的 invariantProbe.atMs（设备实时时间戳）而不是主机收包时间；
+ * - 失败样本保留 ok=false，分析时直接丢弃，绝不把“采样丢失”算成停写。
+ */
+export class WrittenFrameSampler {
+  private running = false;
+  private done: Promise<void> = Promise.resolve();
+  private samples: WrittenFrameSample[] = [];
+  private inflight = 0;
+
+  constructor(
+    private api: Api,
+    private opts: { intervalMs?: number; concurrency?: number } = {},
+  ) {}
+
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    this.samples = [];
+    this.done = this.loop();
+  }
+
+  private async loop(): Promise<void> {
+    const interval = this.opts.intervalMs ?? 10;
+    const concurrency = this.opts.concurrency ?? 4;
+    const tasks: Promise<void>[] = [];
+    while (this.running) {
+      while (this.inflight < concurrency) {
+        this.inflight += 1;
+        const p = this.api
+          .get("/state", 8000)
+          .then((r) => {
+            const probe = r.status === 200 ? (r.json as any)?.invariantProbe : null;
+            const atMs = Number(probe?.atMs);
+            const frames = Number(probe?.writtenFrames);
+            if (probe && Number.isFinite(atMs) && Number.isFinite(frames)) {
+              this.samples.push({ atMs, frames, ok: true });
+            } else {
+              this.samples.push({ atMs: Date.now(), frames: NaN, ok: false, error: "status=" + r.status });
+            }
+          })
+          .catch((e: any) => {
+            this.samples.push({ atMs: Date.now(), frames: NaN, ok: false, error: String(e?.message ?? e) });
+          })
+          .finally(() => {
+            this.inflight -= 1;
+          });
+        tasks.push(p);
+      }
+      await sleep(interval);
+    }
+    await Promise.all(tasks);
+  }
+
+  async stop(): Promise<WrittenFrameSample[]> {
+    this.running = false;
+    await this.done;
+    return this.samples;
+  }
+}
+
+/**
+ * 把连续两次成功采样“frames 不增”的区间合并成停写段。
+ * - 只合并相邻成功样本，dt 超过 maxPairMs 视为采样丢失，断开（不算停写）；
+ * - 段起点=最后一次写帧的采样时间，终点=恢复写帧的采样时间；
+ * - 末尾仍 flat 的段标 open=true（至少观察到 durationMs）。
+ */
+export function analyzeWriteGaps(
+  samples: WrittenFrameSample[],
+  opts: { minGapMs?: number; maxPairMs?: number } = {},
+): WriteGap[] {
+  const minGapMs = opts.minGapMs ?? 30;
+  const maxPairMs = opts.maxPairMs ?? 40;
+  const sorted = [...samples].sort((a, b) => a.atMs - b.atMs);
+  // 同一 atMs 只保留最后一个（并发响应可能乱序）
+  const dedup: WrittenFrameSample[] = [];
+  for (const s of sorted) {
+    if (dedup.length && dedup[dedup.length - 1].atMs === s.atMs) dedup[dedup.length - 1] = s;
+    else dedup.push(s);
+  }
+  const gaps: WriteGap[] = [];
+  let gapStart: number | null = null;
+  let gapLast: number | null = null;
+  const close = (endMs: number, open: boolean) => {
+    if (gapStart == null) return;
+    const duration = endMs - gapStart;
+    if (duration >= minGapMs) gaps.push({ startMs: gapStart, endMs, durationMs: duration, open });
+    gapStart = null;
+    gapLast = null;
+  };
+  let prev: WrittenFrameSample | null = null;
+  for (const cur of dedup) {
+    // 失败样本是屏障：跨越失败样本的 flat 对不算停写（无法证明中间没写）。
+    if (!cur.ok || !Number.isFinite(cur.atMs) || !Number.isFinite(cur.frames)) {
+      if (prev) close(prev.atMs, true);
+      prev = null;
+      continue;
+    }
+    if (!prev) {
+      prev = cur;
+      continue;
+    }
+    const dt = cur.atMs - prev.atMs;
+    if (dt <= 0 || dt > maxPairMs || cur.frames < prev.frames) {
+      close(prev.atMs, true);
+      prev = cur;
+      continue;
+    }
+    if (cur.frames === prev.frames) {
+      if (gapStart == null) gapStart = prev.atMs;
+      gapLast = cur.atMs;
+    } else if (gapStart != null) {
+      close(cur.atMs, false);
+    }
+    prev = cur;
+  }
+  if (gapStart != null && gapLast != null) {
+    // 末尾仍 flat：按最后观测点闭合，避免把未知尾巴算长
+    close(gapLast, true);
+  }
+  return gaps;
+}
+
+export function writeGapCheck(name: string, gaps: WriteGap[], expectCount: number, maxMs: number): Check {
+  const max = gaps.length ? Math.max(...gaps.map((g) => g.durationMs)) : 0;
+  const ok = gaps.length === expectCount && max <= maxMs;
+  return check(
+    name,
+    ok,
+    "停写段 " + gaps.length + " 段, 最长 " + Math.round(max) + "ms (期望 " + expectCount + " 段, 单段 <=" + maxMs + "ms); " +
+      gaps.map((g) => Math.round(g.durationMs) + "ms").join(","),
+    ok ? undefined : gaps.length === 0 ? "没有检测到入口停写段:可能采样丢失/探针不可用" : "停写段数或单段超阈值:入口有可听空洞",
+  );
+}
+
+/** 采样间隔分布（只取成功样本的 atMs，返回 p95/max/中位）。 */
+export function samplingIntervalStats(samples: WrittenFrameSample[]): {
+  p50: number;
+  p95: number;
+  max: number;
+  n: number;
+} {
+  const at = samples.filter((s) => s.ok && Number.isFinite(s.atMs)).map((s) => s.atMs).sort((a, b) => a - b);
+  const ds: number[] = [];
+  for (let i = 1; i < at.length; i++) ds.push(at[i] - at[i - 1]);
+  ds.sort((a, b) => a - b);
+  const q = (p: number) => (ds.length ? ds[Math.min(ds.length - 1, Math.floor(ds.length * p))] : 0);
+  return { p50: q(0.5), p95: q(0.95), max: ds.length ? ds[ds.length - 1] : 0, n: ds.length };
+}
+
+/** 基线停写分布：所有“帧不增”段的时长（>=0）。 */
+export function writeStallStats(samples: WrittenFrameSample[]): {
+  durations: number[];
+  max: number;
+  p95: number;
+} {
+  const gaps = analyzeWriteGaps(samples, { minGapMs: 0 });
+  const ds = gaps.map((g) => g.durationMs).sort((a, b) => a - b);
+  const p95 = ds.length ? ds[Math.min(ds.length - 1, Math.floor(ds.length * 0.95))] : 0;
+  return { durations: ds, max: ds.length ? ds[ds.length - 1] : 0, p95 };
+}
+
+/** 基线相对空洞判据：阈值 = max(80, baselineMax+20)；采样 p95>10ms 时只报“采样不足”，不判 FAIL。 */
+export function relativeWriteGapCheck(
+  name: string,
+  gaps: WriteGap[],
+  baselineMax: number,
+  expectCount: number,
+  maxMs: number,
+  intervalP95: number,
+): Check {
+  if (intervalP95 > 10) {
+    return pendingCheck(
+      name,
+      "采样不足: p95=" + Math.round(intervalP95) + "ms (>10ms)，不能据此判入口空洞",
+      "sampling-interval",
+      "降低 /state 负载或提高并发；不要用这条数据判产品 PASS/FAIL",
+    );
+  }
+  const threshold = Math.max(80, baselineMax + 20);
+  const holes = gaps.filter((g) => g.durationMs > threshold);
+  const max = holes.length ? Math.max(...holes.map((g) => g.durationMs)) : 0;
+  const ok = holes.length === expectCount && max <= maxMs;
+  return check(
+    name,
+    ok,
+    "基线max=" + Math.round(baselineMax) + "ms 阈值=" + Math.round(threshold) + "ms; 空洞 " + holes.length +
+      " 段, 最长 " + Math.round(max) + "ms; " + holes.map((g) => Math.round(g.durationMs) + "ms").join(","),
+    ok ? undefined : "入口空洞超过基线+" + Math.round(threshold) + "ms 阈值或段数不符",
+  );
+}
+
+export interface DeviceFrameGaps {
+  available: boolean;
+  reason?: string;
+  gaps: WriteGap[];
+  precisionMs: number;
+  thresholdMs: number;
+  raw: any;
+}
+
+/**
+ * 设备侧 /debug/frame-gaps（方案端点）：一次 GET 返回最近窗口的停写段。
+ * 兼容不同字段命名；端点未就绪(404/400/501)时 available=false，调用方回退轮询。
+ */
+export async function fetchDeviceFrameGaps(api: Api, windowMs = 5000): Promise<DeviceFrameGaps> {
+  const paths = ["/debug/frame-gaps?windowMs=" + windowMs, "/debug/frame-gaps"];
+  let lastReason = "";
+  for (const p of paths) {
+    const r = await api.get(p, 6000);
+    if (r.status !== 200 || !r.json) {
+      lastReason = "http-" + r.status;
+      continue;
+    }
+    const j: any = r.json;
+    const raw = j.gaps ?? j.segments ?? j.stalls ?? j.frames ?? (Array.isArray(j) ? j : []);
+    if (!Array.isArray(raw)) {
+      lastReason = "no-gaps-array";
+      continue;
+    }
+    const gaps: WriteGap[] = [];
+    for (const g of raw) {
+      const start = Number(g.startMs ?? g.start ?? g.atMs ?? g.startUs / 1000 ?? NaN);
+      const end = Number(g.endMs ?? g.end ?? g.endUs / 1000 ?? NaN);
+      let duration = Number(g.durationMs ?? g.ms ?? g.duration ?? g.lengthMs ?? NaN);
+      if (!Number.isFinite(duration) && Number.isFinite(start) && Number.isFinite(end)) duration = end - start;
+      if (!Number.isFinite(start) || !Number.isFinite(duration)) continue;
+      gaps.push({ startMs: start, endMs: Number.isFinite(end) ? end : start + duration, durationMs: duration, open: !!g.open });
+    }
+    const precisionMs = Number(
+      j.sampleIntervalP50Ms ??
+        j.writeIntervalP50Ms ??
+        j.precisionMs ??
+        j.resolutionMs ??
+        j.sampleIntervalMs ??
+        j.precision ??
+        j.intervalMs ??
+        20,
+    );
+    const thresholdMs = Number(j.thresholdMs ?? j.adaptiveThresholdMs ?? NaN);
+    return {
+      available: true,
+      gaps,
+      precisionMs: Number.isFinite(precisionMs) ? precisionMs : 20,
+      thresholdMs: Number.isFinite(thresholdMs) ? thresholdMs : 80,
+      raw: j,
+    };
+  }
+  return { available: false, reason: lastReason || "endpoint-missing", gaps: [], precisionMs: NaN, thresholdMs: NaN, raw: null };
+}
+
+/** 设备侧停写段判据；精度 >25ms 时只报采样不足，不判 FAIL。 */
+export function deviceFrameGapCheck(
+  name: string,
+  result: DeviceFrameGaps,
+  expectCount: number,
+  maxMs: number,
+): Check {
+  if (!result.available) {
+    return pendingCheck(
+      name,
+      "设备侧 /debug/frame-gaps 未就绪(" + (result.reason ?? "?") + ")，回退轮询",
+      "device-frame-gaps",
+      "端点上线后自动启用",
+    );
+  }
+  if (!(result.precisionMs <= 25)) {
+    return pendingCheck(
+      name,
+      "设备侧采样精度 " + String(result.precisionMs) + "ms (>25ms)，不能判入口空洞",
+      "device-frame-gaps-precision",
+    );
+  }
+  const gaps = result.gaps.filter((g) => g.durationMs >= 30);
+  const max = gaps.length ? Math.max(...gaps.map((g) => g.durationMs)) : 0;
+  // 设备侧 thresholdMs 是自适应阈值；0 段 = 没有超过正常写帧节奏的空洞，优于“恰好 1 段”。
+  const ok = gaps.length <= expectCount && max <= maxMs;
+  return check(
+    name,
+    ok,
+    "设备侧: 停写段 " + gaps.length + " 段, 最长 " + Math.round(max) + "ms, threshold=" +
+      Math.round(result.thresholdMs) + "ms; " + gaps.map((g) => Math.round(g.durationMs) + "ms").join(","),
+    ok ? undefined : "设备侧停写段数/单段超阈值",
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 证据
 // ---------------------------------------------------------------------------
 
