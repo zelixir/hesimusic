@@ -375,6 +375,7 @@ class LoopPlaybackCoordinator @Inject constructor(
      */
     suspend fun refresh(songId: Long?, repeatMode: Int, player: Player, reason: String) {
         val startedAtMs = System.currentTimeMillis()
+        Log.i(TAG_PERF, "refresh enter reason=" + reason + " songId=" + songId)
         refreshMutex.withLock {
             playerRef = player
             // 0) 显式意图：进入时在唯一写点同时应用 repeat=ONE + shuffle=false；退出时恢复 prev。
@@ -401,13 +402,20 @@ class LoopPlaybackCoordinator @Inject constructor(
                 }
                 // 00029：入口的起播权在协调器（UI 已 pause 等源）。超时兜底。
                 if (loopIntent.isEntryPendingFor(armedBefore.songId)) {
+                    Log.i(TAG_PERF, "entry armed observed songId=" + armedBefore.songId)
                     armEntryTimeout(armedBefore.songId, player)
                     // UI 的 pause 命令与 arm 是同一帧发出的两条路径：先等它真的落到
                     // 播放器上（最多 60ms），否则我们起播后那条迟到的 pause 会把新循环暂停。
+                    val pauseStartMs = SystemClock.elapsedRealtime()
                     awaitEntryPause(player)
+                    Log.i(TAG_PERF, "entry pause done waitMs=" + (SystemClock.elapsedRealtime() - pauseStartMs))
                     // 让出一帧：UI 需要先把 entryPending（"正在进入无缝循环…"）和乐观 0
                     // 画出来，再被这里的换源（主线程同步 work）挡住。否则用户先看到旧位置。
-                    delay(ENTRY_UI_SETTLE_MS)
+                    // 00029：结果页确认后页面正在 pop、播放页不可见，没有旧位置 UI 需要保护，
+                    // 这次 delay 只会等主线程 pop 结束（1333 trace 实测 142ms），跳过。
+                    val skipUiSettle = loopIntent.shouldSkipEntryUiSettle(armedBefore.songId)
+                    if (!skipUiSettle) delay(ENTRY_UI_SETTLE_MS)
+                    Log.i(TAG_PERF, "entry ui settle done skipped=" + skipUiSettle)
                 }
             }
             // 上一轮的窗口必须在任何 clear 之前读：D13 的 demote 检测靠它判断“刚才是否真在循环”。
@@ -431,13 +439,21 @@ class LoopPlaybackCoordinator @Inject constructor(
                 )
                 return
             }
+            val depsStartMs = SystemClock.elapsedRealtime()
             val row = songId?.takeIf { it > 0L }?.let { rowFor(it) }
+            val rowDoneMs = SystemClock.elapsedRealtime()
             // 只有「武装歌 == 当前歌」时才需要整曲时长（D14 的时长上界判据）；其它情况跳过 DB。
             val durationUs = if (armedBefore != null && songId != null && armedBefore.songId == songId) {
                 songDurationUs(songId)
             } else {
                 0L
             }
+            Log.i(
+                TAG_PERF,
+                "entry deps reason=" + reason + " rowMs=" + (rowDoneMs - depsStartMs) +
+                    " totalMs=" + (SystemClock.elapsedRealtime() - depsStartMs) +
+                    " armed=" + armedBefore?.songId,
+            )
 
             // 0a) D13：正在循环的歌被 demote / delete → 显式退场（清 intent + 恢复模式 + notice）。
             val revocation = LoopRevocation.detect(
@@ -1015,6 +1031,7 @@ class LoopPlaybackCoordinator @Inject constructor(
         scope.launch {
             loopIntent.armed.collect { armed ->
                 val player = playerRef ?: return@collect
+                Log.i(TAG_PERF, "entry collector armed songId=" + armed?.songId)
                 Log.d(TAG, "refresh reason=intent armed=" + armed?.songId)
                 refresh(currentSongId(player), player.repeatMode, player, REASON_INTENT)
             }
@@ -1886,6 +1903,13 @@ class LoopPlaybackCoordinator @Inject constructor(
     /** Song（路径/时长）：同一首歌复用，避免入口 refresh 里的第二次 Room 查询。 */
     private suspend fun songFor(songId: Long): Song? {
         if (cachedSongId == songId) return cachedSong
+        // 00029：结果页/菜单入口把 Song 一起带过来，入口不再等 Room（1334 trace 132ms）。
+        loopIntent.entrySongFor(songId)?.let { song ->
+            cachedSongId = songId
+            cachedSong = song
+            durationCacheUs[songId] = song.duration * LoopSessionProjection.US_PER_MS
+            return song
+        }
         val song = songRepository.getSongsByIds(listOf(songId)).firstOrNull()
         if (song != null) {
             cachedSongId = songId

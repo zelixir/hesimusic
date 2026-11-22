@@ -63,6 +63,13 @@ class LoopEntryPrewarmer @Inject constructor(
         val filePath: String,
     )
 
+    /** 轻量预热结果：skipReason 非空 = 预期降级（例如 A=0 没有前奏段），不是失败。 */
+    private data class PreludeOutcome(
+        val key: PreludeBlockPrewarm.Key? = null,
+        val blocks: List<PcmBlock>? = null,
+        val skipReason: String? = null,
+    )
+
     private val lock = Any()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val executor = Executors.newSingleThreadExecutor { runnable ->
@@ -197,7 +204,7 @@ class LoopEntryPrewarmer @Inject constructor(
                 buildPrelude(request)
             } catch (t: Throwable) {
                 Log.w(TAG, "entry prewarm light build failed songId=" + request.songId, t)
-                null
+                PreludeOutcome()
             }
             synchronized(lock) {
                 if (gen != generation) {
@@ -205,11 +212,20 @@ class LoopEntryPrewarmer @Inject constructor(
                     return@execute
                 }
             }
-            if (result == null) {
+            if (result.skipReason != null) {
+                Log.i(
+                    TAG,
+                    "entry prewarm light skipped reason=" + result.skipReason +
+                        " songId=" + request.songId,
+                )
+                return@execute
+            }
+            val key = result.key
+            val blocks = result.blocks
+            if (key == null || blocks == null) {
                 Log.w(TAG, "entry prewarm light failed songId=" + request.songId)
                 return@execute
             }
-            val (key, blocks) = result
             PreludeBlockPrewarm.put(key, blocks)
             synchronized(lock) {
                 if (gen != generation) {
@@ -298,7 +314,7 @@ class LoopEntryPrewarmer @Inject constructor(
      * 只解前奏第一块：resident 会话只活到块 ready，随后 reader.release() 关闭；
      * 全程不建 LoopRing / 不启动 RingBandRenderer。
      */
-    private fun buildPrelude(request: PreludeRequest): Pair<PreludeBlockPrewarm.Key, List<PcmBlock>>? {
+    private fun buildPrelude(request: PreludeRequest): PreludeOutcome {
         val format = PcmFileFormatProbe.probe(request.filePath)
         val timeline = LoopingPcmTimeline(
             songId = request.songId,
@@ -308,7 +324,8 @@ class LoopEntryPrewarmer @Inject constructor(
             entryPositionUs = request.loopStartMs * 1_000L,
             fullDurationUs = request.fullDurationUs,
         )
-        if (!timeline.wholeTimeline || timeline.aFrame <= 0L) return null
+        if (!timeline.wholeTimeline) return PreludeOutcome(skipReason = "no-whole-timeline")
+        if (timeline.aFrame <= 0L) return PreludeOutcome(skipReason = "no-prelude")
         val provider = PcmResidentRangeProvider(
             path = request.filePath,
             expectedSampleRate = timeline.sampleRate,
@@ -332,9 +349,12 @@ class LoopEntryPrewarmer @Inject constructor(
         return try {
             val block = reader.awaitReadyBlock(0, LIGHT_TIMEOUT_MS)
             if (block == null) {
-                null
+                PreludeOutcome()
             } else {
-                PreludeBlockPrewarm.keyOf(timeline) to listOf(block)
+                PreludeOutcome(
+                    key = PreludeBlockPrewarm.keyOf(timeline),
+                    blocks = listOf(block),
+                )
             }
         } finally {
             reader.release()

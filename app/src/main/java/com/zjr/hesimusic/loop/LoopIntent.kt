@@ -3,6 +3,7 @@ package com.zjr.hesimusic.loop
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.media3.common.Player
+import com.zjr.hesimusic.data.model.Song
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -74,6 +75,20 @@ class LoopIntent @Inject constructor() {
     val entryPendingSongId: StateFlow<Long?> = _entryPendingSongId.asStateFlow()
 
     /**
+     * 00029：本次入口是否跳过协调器的 ENTRY_UI_SETTLE_MS 让帧。
+     *
+     * 结果页「确认并保存」后页面立刻 pop，主线程被 pop/重组占住，16ms 的 delay 实际
+     * 会等约 140ms（1333 trace 实测 142ms），纯属入口静音；没有旧位置 UI 需要保护。
+     * 播放页可见时仍需要这一帧把「正在进入」画出来，保持 false。
+     */
+    @Volatile
+    private var entrySkipUiSettle: Boolean = false
+
+    /** 入口歌对象（路径/时长）由 UI 直接传来，省掉协调器入口上的 Room 查询。 */
+    @Volatile
+    private var entrySong: Song? = null
+
+    /**
      * Hilt 成员注入：安装 SharedPreferences 后端并读回上次的意图。
      *
      * 由 Hilt 在构造后、首次使用前调用（框架用，业务代码不要调）。
@@ -106,6 +121,8 @@ class LoopIntent @Inject constructor() {
         if (songId <= 0L) return
         // 非入口 arm（debug /loop/enter 等）没有"准备中"语义：清掉上一次的入口标记。
         _entryPendingSongId.value = null
+        entrySkipUiSettle = false
+        entrySong = null
         applyArmed(songId, previousRepeatMode, previousShuffleEnabled)
     }
 
@@ -119,11 +136,27 @@ class LoopIntent @Inject constructor() {
      * 入口标记必须先落值，否则第一次 refresh 会看到 entry=null 而走整表重建
      * （真机 1318：整表重建 231ms 把 pause 命令堵在主线程后面，旧位置又播了 ~300ms）。
      */
-    fun armEntry(songId: Long, previousRepeatMode: Int, previousShuffleEnabled: Boolean) {
+    fun armEntry(
+        songId: Long,
+        previousRepeatMode: Int,
+        previousShuffleEnabled: Boolean,
+        skipUiSettle: Boolean = false,
+        song: Song? = null,
+    ) {
         if (songId <= 0L) return
         _entryPendingSongId.value = songId
+        entrySkipUiSettle = skipUiSettle
+        entrySong = song
         applyArmed(songId, previousRepeatMode, previousShuffleEnabled)
     }
+
+    /** 入口时 UI 手里的 Song；协调器用它填 songFor 缓存，避免入口 Room 查询。 */
+    fun entrySongFor(songId: Long): Song? =
+        entrySong?.takeIf { it.id == songId }
+
+    /** 该入口是否跳过 UI 让帧（播放页不可见=true；播放页可见=false）。 */
+    fun shouldSkipEntryUiSettle(songId: Long): Boolean =
+        entrySkipUiSettle && _entryPendingSongId.value == songId
 
     private fun applyArmed(songId: Long, previousRepeatMode: Int, previousShuffleEnabled: Boolean) {
         val armed = Armed(
@@ -139,6 +172,8 @@ class LoopIntent @Inject constructor() {
     fun clearEntry(songId: Long? = null) {
         if (songId == null || _entryPendingSongId.value == songId) {
             _entryPendingSongId.value = null
+            entrySkipUiSettle = false
+            entrySong = null
         }
     }
 
@@ -149,6 +184,8 @@ class LoopIntent @Inject constructor() {
     /** 清空意图(切歌退出 / 用户改 repeat 或 shuffle / 测试重置)。幂等。 */
     fun clear() {
         _entryPendingSongId.value = null
+        entrySkipUiSettle = false
+        entrySong = null
         if (_armed.value == null) return
         _armed.value = null
         store.save(null)

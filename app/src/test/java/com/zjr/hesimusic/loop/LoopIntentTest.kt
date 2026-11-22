@@ -6,7 +6,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -148,6 +150,23 @@ class LoopIntentTest {
         intent.armEntry(42L, Player.REPEAT_MODE_ALL, previousShuffleEnabled = false)
         intent.clear()
         assertNull("退出循环必须同时结束入口准备", intent.entryPendingSongId.value)
+    }
+
+    @Test
+    fun `skipUiSettle 是每次入口的状态并随入口结束清掉`() {
+        val intent = LoopIntent()
+        intent.armEntry(42L, Player.REPEAT_MODE_ONE, previousShuffleEnabled = false, skipUiSettle = true)
+        assertTrue(intent.shouldSkipEntryUiSettle(42L))
+        intent.clearEntry(42L)
+        assertFalse("入口结束后不能再跳过让帧", intent.shouldSkipEntryUiSettle(42L))
+    }
+
+    @Test
+    fun `非入口 arm 会清掉上一次的 skipUiSettle`() {
+        val intent = LoopIntent()
+        intent.armEntry(42L, Player.REPEAT_MODE_ONE, previousShuffleEnabled = false, skipUiSettle = true)
+        intent.arm(42L, Player.REPEAT_MODE_ONE, previousShuffleEnabled = false)
+        assertFalse(intent.shouldSkipEntryUiSettle(42L))
     }
 
     @Test

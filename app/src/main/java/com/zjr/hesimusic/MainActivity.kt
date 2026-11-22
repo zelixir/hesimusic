@@ -392,7 +392,11 @@ class MainActivity : ComponentActivity() {
                                     // 00029：入口必须**先停旧声、位置归 0**，等环带源 READY 由
                                     // 播放层从 0 起播；不再走 playKeepPosition（那会先播 ~100ms
                                     // 旧位置再跳回 0，用户肉眼可见）。
-                                    sharedMusicViewModel.beginSeamlessLoopEntry(song)
+                                    // 约束：skip 由"播放页是否可见"决定，不硬编码入口。
+                                    sharedMusicViewModel.beginSeamlessLoopEntry(
+                                        song,
+                                        skipUiSettle = shouldSkipEntryUiSettle(navController),
+                                    )
                                     navController.popBackStack()
                                 },
                             )
@@ -464,6 +468,15 @@ private data class LoopMenuActions(
  *
  * 「重新分析 / 取消最终结果 / 删除分析结果」已从长按菜单移入结果页(页内自行处理)。
  */
+/**
+ * 00029：入口是否需要协调器让一帧保护旧位置 UI。
+ *
+ * 只有播放页可见时，进度条/位置才可能先显示旧位置；结果页 pop、列表、首页都不显示
+ * 播放位置。放在这里由路由状态计算，新的入口（通知栏/快捷方式）也会走同一判断。
+ */
+private fun shouldSkipEntryUiSettle(navController: NavHostController): Boolean =
+    navController.currentDestination?.route != "player"
+
 @Composable
 private fun rememberLoopMenuActions(
     navController: NavHostController,
@@ -475,7 +488,10 @@ private fun rememberLoopMenuActions(
             onSeamlessLoop = { song ->
                 // 00029：显式进入 = armEntry + 立刻停旧声/位置归 0，源 READY 后由播放层
                 // 从 0 起播（repeat=ONE / shuffle=false 仍由播放层唯一写点应用）。
-                musicViewModel.beginSeamlessLoopEntry(song)
+                musicViewModel.beginSeamlessLoopEntry(
+                    song,
+                    skipUiSettle = shouldSkipEntryUiSettle(navController),
+                )
             },
             onSeamlessAnalysis = { song -> navController.navigate("loop/${song.id}") },
         )

@@ -486,7 +486,7 @@ class MusicViewModel @Inject constructor(
      * 5. 由 [com.zjr.hesimusic.service.LoopPlaybackCoordinator] 在环带源 READY 后
      *    从 0 起播（entry 标记就是"要自动播放"的唯一依据）。
      */
-    fun beginSeamlessLoopEntry(song: Song) {
+    fun beginSeamlessLoopEntry(song: Song, skipUiSettle: Boolean = false) {
         val controller = mediaController ?: return
         val currentMediaId = controller.currentMediaItem?.mediaId
         val sameQueueHead = currentMediaId != null &&
@@ -505,8 +505,24 @@ class MusicViewModel @Inject constructor(
         // 先停声：入口请求一旦发生，旧位置的内容不允许再出声（00029 的第一判据）。
         // 已经暂停时**不要**再发 pause：MediaController 的命令是异步的，迟到的 pause 会在
         // 协调器 play() 之后落地，把刚起播的循环重新暂停（#88 结果页正是已暂停态）。
-        if (controller.playWhenReady) controller.pause()
-        loopIntent.armEntry(song.id, state.repeatMode, state.shuffleModeEnabled)
+        val wasPlaying = controller.playWhenReady
+        if (wasPlaying) controller.pause()
+        // skipUiSettle 必须同时满足"调用方判断没有旧位置 UI"且"本来就已经暂停"：
+        // 播放态入口若跳过让帧，协调器的同步换源会把 pause 命令堵在主线程后面，
+        // 真机实测旧声会多播 116~146ms（1335 菜单 20ms 采样）。已暂停的入口没有这个风险。
+        val effectiveSkipUiSettle = skipUiSettle && !wasPlaying
+        loopIntent.armEntry(
+            songId = song.id,
+            previousRepeatMode = state.repeatMode,
+            previousShuffleEnabled = state.shuffleModeEnabled,
+            skipUiSettle = effectiveSkipUiSettle,
+            song = song,
+        )
+        Log.d(
+            TAG,
+            "begin seamless entry arm done songId=" + song.id +
+                " t=" + android.os.SystemClock.elapsedRealtime(),
+        )
         if (!keepCurrent) {
             // 让目标歌成为当前项；armed 已置位，LoopSessionPlayer 会保留完整队列。
             // 这里**不** prepare/play 普通源 —— 环带源重建会负责加载与起播。
@@ -518,6 +534,11 @@ class MusicViewModel @Inject constructor(
         // 位置必须在旧位置被看到之前归 0（入口的 UI 语义：显示即 0）。
         // 走 viewModel.seekTo：它会立即 updateState（乐观 0），UI 不必等 session 位置事件。
         seekTo(0L)
+        Log.d(
+            TAG,
+            "begin seamless entry seek0 done songId=" + song.id +
+                " t=" + android.os.SystemClock.elapsedRealtime(),
+        )
     }
 
     /**
