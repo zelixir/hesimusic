@@ -1130,9 +1130,16 @@ int64_t nearestZeroCrossing(const float* pcm, int channels, int64_t totalFrames,
 }
 
 // --------------------------------------------------------------- seam quality
-// v8: the legacy pipeline ranks candidates purely by chroma-sequence similarity
-// and never inspects the waveform that is actually spliced at B->A. This stage
-// measures the splice itself and feeds a 0..1 quality into the final ranking.
+// v8 experiment: the initial (pre-v8) pipeline ranks candidates purely by
+// chroma-sequence similarity and never inspects the waveform that is actually
+// spliced at B->A. This stage measures the splice itself and can feed a 0..1
+// quality into the final ranking.
+//
+// PRODUCTION DEFAULT: OFF. The user has not accepted the v8 ranking yet, so the
+// shipped app must rank exactly like the initial engine (pure chroma score).
+// The whole stage (measurement, sub-beat refinement and blending) stays
+// compiled in for the task-B experiment app, which opts in with
+// LOOP_ENGINE_SEAM=1 (plus LOOP_ENGINE_SEAM_WEIGHT=0.50 to actually blend).
 //
 // Why the *head* windows: after the cut, playback continues with [A, A+W).
 // If the loop is a true repetition, that equals the natural continuation
@@ -1147,12 +1154,14 @@ constexpr int kSeamRefineRangeMs = 30;  // sub-beat local search radius
 constexpr int kSeamRefineCoarseMs = 5;  // coarse step
 constexpr int kSeamRefineFineMs = 1;    // fine step
 
-// v8 debug/A-B switch. The app never sets this, so production keeps seam ranking
-// ON. Host tooling sets LOOP_ENGINE_SEAM=0 to reproduce the pre-v8 ordering
-// bitwise, and LOOP_ENGINE_SEAM_WEIGHT=0..1 to sweep the blend weight.
+// Seam-stage switch. Default OFF: without an explicit opt-in the engine takes
+// the initial pure-score path (no seam measurement, no sub-beat refinement, no
+// blending), so the production ordering is bitwise the pre-v8 ordering.
+// The task-B experiment build sets LOOP_ENGINE_SEAM=1 to run the stage again;
+// LOOP_ENGINE_SEAM=0 is still accepted (explicit off, same as the default).
 bool seamEnabled() {
     const char* env = std::getenv("LOOP_ENGINE_SEAM");
-    if (env == nullptr || env[0] == '\0') return true;
+    if (env == nullptr || env[0] == '\0') return false;
     return env[0] != '0';
 }
 
@@ -1165,11 +1174,14 @@ bool seamRefineEnabled() {
 }
 
 double seamWeight() {
-    // 0.50 is the measured knee: it promotes every clearly better-seam candidate
+    // Production default 0.0: even when the seam stage is switched on for
+    // measurement, the ranking must stay the initial chroma-only ordering unless
+    // someone opts into a blend explicitly. 0.50 is the measured knee of the v8
+    // experiment and is what the task-B experiment sets via
+    // LOOP_ENGINE_SEAM_WEIGHT: it promotes every clearly better-seam candidate
     // (shiny/katatsumuri/guren) while keeping the worst chroma-score drop at
-    // 0.123 and leaving the demo-confirmed unfurling loop untouched. 0.60 starts
-    // overriding that confirmed loop for a marginal seam gain.
-    double w = 0.50;
+    // 0.123 and leaving the demo-confirmed unfurling loop untouched.
+    double w = 0.0;
     const char* env = std::getenv("LOOP_ENGINE_SEAM_WEIGHT");
     if (env != nullptr && env[0] != '\0') {
         char* end = nullptr;
@@ -1183,8 +1195,36 @@ struct SeamQuality {
     double correlation = 0.0;  // peak normalized xcorr of [B,B+W) and [A,A+W)
     double rmsJumpDb = 0.0;    // |RMS([A,A+W)) - RMS([B-W,B))| in dB
     double fluxRatio = 1.0;    // seam spectral distance / local mean distance
+    // The three normalized 0..1 sub-scores before weighting. Kept separately so
+    // the algorithm lab can re-blend them with user weights (and sweep the
+    // legacy<->seam blend) without re-running the analysis. `quality` is exactly
+    // corrWeight*corrScore + rmsWeight*energyScore + fluxWeight*timbreScore.
+    double corrScore = 0.0;
+    double energyScore = 0.0;
+    double timbreScore = 0.0;
     double quality = 0.0;      // blended 0..1 score
 };
+
+// Lab weights are normalized defensively: sliders may be all-zero or not sum
+// to 1. Production call sites pass the historical 0.50/0.30/0.20 constants.
+struct SeamWeights {
+    double corr = 0.50;
+    double rms = 0.30;
+    double flux = 0.20;
+};
+
+SeamWeights normalizeSeamWeights(double corr, double rms, double flux) {
+    if (!std::isfinite(corr) || corr < 0.0) corr = 0.0;
+    if (!std::isfinite(rms) || rms < 0.0) rms = 0.0;
+    if (!std::isfinite(flux) || flux < 0.0) flux = 0.0;
+    const double sum = corr + rms + flux;
+    if (!(sum > 0.0)) return SeamWeights{}; // fall back to 0.50/0.30/0.20
+    SeamWeights w;
+    w.corr = corr / sum;
+    w.rms = rms / sum;
+    w.flux = flux / sum;
+    return w;
+}
 
 double rmsAt(const std::vector<double>& y, int64_t begin, int64_t end) {
     begin = std::max<int64_t>(0, begin);
@@ -1295,7 +1335,8 @@ double seamFluxRatio(const std::vector<double>& y, int64_t a, int64_t b, int sr)
     return seamDist / std::max(localMean, 1e-4);
 }
 
-SeamQuality evaluateSeam(const std::vector<double>& y, int64_t a, int64_t b, int sr) {
+SeamQuality evaluateSeam(const std::vector<double>& y, int64_t a, int64_t b, int sr,
+                         const SeamWeights& weights = SeamWeights{}) {
     SeamQuality q;
     const int64_t win = std::max<int64_t>(64, int64_t(sr) * kSeamWindowMs / 1000);
     const int lagMax = int(std::max<int64_t>(8, int64_t(sr) * kSeamMaxLagMs / 1000));
@@ -1306,10 +1347,12 @@ SeamQuality evaluateSeam(const std::vector<double>& y, int64_t a, int64_t b, int
                       ? std::fabs(20.0 * std::log10(ra / rb))
                       : 60.0;
     q.fluxRatio = seamFluxRatio(y, a, b, sr);
-    const double corrScore = std::max(0.0, std::min(1.0, (q.correlation - 0.25) / 0.75));
-    const double energyScore = std::exp(-q.rmsJumpDb / 3.0);
-    const double timbreScore = 1.0 / (1.0 + std::max(0.0, q.fluxRatio - 1.0));
-    q.quality = 0.50 * corrScore + 0.30 * energyScore + 0.20 * timbreScore;
+    q.corrScore = std::max(0.0, std::min(1.0, (q.correlation - 0.25) / 0.75));
+    q.energyScore = std::exp(-q.rmsJumpDb / 3.0);
+    q.timbreScore = 1.0 / (1.0 + std::max(0.0, q.fluxRatio - 1.0));
+    q.quality = weights.corr * q.corrScore + weights.rms * q.energyScore +
+                weights.flux * q.timbreScore;
+    q.quality = std::max(0.0, std::min(1.0, q.quality));
     return q;
 }
 
@@ -1357,14 +1400,19 @@ double cheapSeamCost(const std::vector<double>& y, int64_t a, int64_t b, int sr)
     return -(0.55 * corrScore + 0.30 * energyScore + 0.15 * smoothScore);
 }
 
-// Coordinate descent around the beat-aligned cut: coarse 5 ms grid over ±30 ms,
-// then a 1 ms grid over ±5 ms. Loop-length bounds are enforced at every step.
+// Coordinate descent around the beat-aligned cut: coarse 5 ms grid over ±rangeMs,
+// then a 1 ms grid over ±min(5, rangeMs). Loop-length bounds are enforced at
+// every step. rangeMs defaults to the production 30; the algorithm lab passes
+// a user-selected radius (0 disables the search).
 void refineSeam(const std::vector<double>& y, int sr, int64_t minLen, int64_t maxLen,
-                int64_t& a, int64_t& b) {
+                int64_t& a, int64_t& b, int rangeMs = kSeamRefineRangeMs) {
     const int64_t total = int64_t(y.size());
+    const int radius = std::max(0, std::min(100, rangeMs));
+    if (radius <= 0) return;
     struct Stage { int stepMs; int rangeMs; int passes; };
-    const Stage stages[2] = {{kSeamRefineCoarseMs, kSeamRefineRangeMs, 2},
-                             {kSeamRefineFineMs, 5, 1}};
+    const int coarseStepMs = std::min(kSeamRefineCoarseMs, std::max(1, radius));
+    const Stage stages[2] = {{coarseStepMs, radius, 2},
+                             {kSeamRefineFineMs, std::min(5, radius), 1}};
     for (const Stage& st : stages) {
         const int64_t step = std::max<int64_t>(1, int64_t(sr) * st.stepMs / 1000);
         const int64_t range = std::max<int64_t>(step, int64_t(sr) * st.rangeMs / 1000);
@@ -1398,10 +1446,12 @@ namespace debug {
 
 Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frames,
                         int sampleRate, int maxCandidates, DebugInfo* dbg,
-                        const ProgressFn& onProgress) {
+                        const ProgressFn& onProgress, const LabParams* labParams,
+                        LabInfo* labOut) {
     Result result;
     result.totalFrames = frames > 0 ? frames : 0;
     result.sampleRate = sampleRate;
+    if (labOut != nullptr) *labOut = LabInfo{};
     try {
         ProgressReporter prog(onProgress);
         if (interleavedPcm == nullptr || channels <= 0 || frames <= 0 || sampleRate <= 0 ||
@@ -1631,6 +1681,12 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
             bool seamEvaluated = false;
             int64_t seamStart = 0;
             int64_t seamEnd = 0;
+            // Algorithm-lab bookkeeping (never affects ranking).
+            int legacyRank = -1;   // 0-based rank over every scored pair
+            int fusedRank = -1;    // 0-based rank over the evaluated pool
+            double corrScore = 0.0;
+            double energyScore = 0.0;
+            double timbreScore = 0.0;
         };
         // v6 §10.4-2: scoring parallel by candidate index (scored[i] disjoint writes;
         // stable_sort input sequence identical to serial push order)
@@ -1647,21 +1703,45 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
         if (!prog.report(0.95)) return result;
         std::stable_sort(scored.begin(), scored.end(),
                          [](const ScoredPair& a, const ScoredPair& b) { return a.score > b.score; });
+        // Lab: the legacy ranking is exactly this sorted order (the pre-v8
+        // output). Record the global rank before any pool slicing/moving.
+        for (size_t i = 0; i < scored.size(); i++) scored[i].legacyRank = int(i);
+        const int scoredPairCount = int(scored.size());
 
-        // ---- v8: seam quality + sub-beat refinement ----
-        // LOOP_ENGINE_SEAM=0 keeps the legacy ordering bitwise, so host tooling
-        // can A/B the two rankings with the same binary. Production never sets it.
-        const bool useSeam = seamEnabled();
+        // ---- v8 experiment: seam quality + sub-beat refinement ----
+        // Default path (!useSeam) is the initial algorithm: the stable_sort above
+        // is already the final ranking and legacyScore == score. The seam stage
+        // only runs when LOOP_ENGINE_SEAM=1 is set explicitly (task-B experiment).
+        //
+        // Algorithm lab: when LabParams is passed, the switches/weights below
+        // come from JNI instead of the environment. The production call sites
+        // never pass LabParams, so their defaults/ranking stay untouched.
+        const bool useSeam = labParams != nullptr ? labParams->seamEnabled : seamEnabled();
+        const SeamWeights seamWeights =
+            labParams != nullptr
+                ? normalizeSeamWeights(labParams->corrWeight, labParams->rmsWeight,
+                                       labParams->fluxWeight)
+                : SeamWeights{};
+        const int refineRangeMs =
+            labParams != nullptr ? std::max(0, std::min(100, labParams->refineRangeMs))
+                                 : kSeamRefineRangeMs;
+        std::chrono::steady_clock::time_point seamStageBegin{};
         std::vector<ScoredPair> ranked;
         if (!useSeam) {
             ranked = std::move(scored);
             for (ScoredPair& sp : ranked) sp.legacyScore = sp.score;
+            // No blend happened: fused == legacy and the ranks coincide.
+            for (size_t i = 0; i < ranked.size(); i++) ranked[i].fusedRank = int(i);
         } else {
+            seamStageBegin = std::chrono::steady_clock::now();
             const size_t seamCount =
                 std::min<size_t>(scored.size(), size_t(std::max(32, maxCandidates * 3)));
             ranked.assign(scored.begin(), scored.begin() + ptrdiff_t(seamCount));
-            const double wSeam = seamWeight();
-            const bool refineOn = seamRefineEnabled();
+            double wSeam = labParams != nullptr ? labParams->seamWeight : seamWeight();
+            if (!std::isfinite(wSeam)) wSeam = 0.0;
+            wSeam = std::max(0.0, std::min(1.0, wSeam));
+            const bool refineOn =
+                labParams != nullptr ? labParams->refineEnabled : seamRefineEnabled();
             const int64_t minLenSamples = int64_t(minLoopFrames) * kHop;
             const int64_t maxLenSamples = int64_t(maxLoopFrames) * kHop;
             const int64_t yTotal = int64_t(y.size());
@@ -1713,7 +1793,7 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
                     int64_t yb = std::max<int64_t>(ya + 1, std::min<int64_t>(yTotal - 1,
                                                                     bSnap - trimStart));
                     // Full metric at the beat-aligned anchor...
-                    SeamQuality best = evaluateSeam(y, ya, yb, sampleRate);
+                    SeamQuality best = evaluateSeam(y, ya, yb, sampleRate, seamWeights);
                     int64_t bestA = ya;
                     int64_t bestB = yb;
                     // ...then at the refined position; keep whichever is better so
@@ -1721,7 +1801,8 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
                     if (refineOn && ya >= 2 && yb >= 2 && yb > ya && yb < yTotal) {
                         int64_t ra = ya;
                         int64_t rb = yb;
-                        refineSeam(y, sampleRate, minLenSamples, maxLenSamples, ra, rb);
+                        refineSeam(y, sampleRate, minLenSamples, maxLenSamples, ra, rb,
+                                   refineRangeMs);
                         if (ra != ya || rb != yb) {
                             const int64_t raSnap = nearestZeroCrossing(
                                 interleavedPcm, channels, frames, sampleRate, ra + trimStart);
@@ -1730,7 +1811,8 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
                             const int64_t rya = raSnap - trimStart;
                             const int64_t ryb = rbSnap - trimStart;
                             if (rya >= 0 && ryb > rya && ryb < yTotal) {
-                                const SeamQuality qr = evaluateSeam(y, rya, ryb, sampleRate);
+                                const SeamQuality qr =
+                                    evaluateSeam(y, rya, ryb, sampleRate, seamWeights);
                                 // Require a meaningful gain (2% of the 0..1 scale):
                                 // moving the cut for noise-level differences can buy
                                 // RMS in exchange for a spectral-flux regression.
@@ -1749,7 +1831,13 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
                     sp.seamCorrelation = q.correlation;
                     sp.seamRmsJumpDb = q.rmsJumpDb;
                     sp.seamFluxRatio = q.fluxRatio;
+                    sp.corrScore = q.corrScore;
+                    sp.energyScore = q.energyScore;
+                    sp.timbreScore = q.timbreScore;
                     sp.seamEvaluated = true;
+                    // wSeam == 0 (the default) leaves the initial ordering intact:
+                    // the expression is exactly legacyScore and the stable_sort
+                    // below re-emits the same sequence it received.
                     sp.score = (1.0 - wSeam) * sp.legacyScore + wSeam * q.quality;
                 }
             }, 4);
@@ -1758,6 +1846,12 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
                              [](const ScoredPair& a, const ScoredPair& b) {
                                  return a.score > b.score;
                              });
+            for (size_t i = 0; i < ranked.size(); i++) ranked[i].fusedRank = int(i);
+        }
+        int64_t seamStageUs = 0;
+        if (useSeam) {
+            seamStageUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                              std::chrono::steady_clock::now() - seamStageBegin).count();
         }
 
         // ---- frame -> sample (trim offset + zero-crossing snap) ----
@@ -1823,6 +1917,69 @@ Result analyzeWithDebug(const float* interleavedPcm, int channels, int64_t frame
         if (!prog.report(1.0)) { // final callback: cancellation still wins
             result.candidates.clear();
             return result;
+        }
+        // ---- algorithm lab: dual-algorithm output from this single pass ----
+        // The emitted Result is unchanged (top maxCandidates by score). LabInfo
+        // carries the whole evaluated pool with both scores/ranks and the seam
+        // components, so the lab UI can compare/export/sweep without decoding or
+        // analysing the song a second time.
+        if (labOut != nullptr) {
+            labOut->seamEnabled = useSeam;
+            labOut->scoredPairs = scoredPairCount;
+            // "evaluated pool" means candidates the seam stage actually scored;
+            // the legacy-only path has no seam pool (0), even though it emits the
+            // top of the legacy ranking below.
+            labOut->evaluatedPool = useSeam ? int(ranked.size()) : 0;
+            labOut->seamStageUs = seamStageUs;
+            int evaluatedSeams = 0;
+            for (const ScoredPair& sp : ranked)
+                if (sp.seamEvaluated) evaluatedSeams++;
+            labOut->seamEvaluatedCount = evaluatedSeams;
+            const size_t labLimit =
+                useSeam ? ranked.size()
+                        : std::min<size_t>(ranked.size(),
+                                           size_t(std::max(32, maxCandidates * 3)));
+            labOut->candidates.reserve(labLimit);
+            for (size_t i = 0; i < labLimit; i++) {
+                const ScoredPair& sp = ranked[i];
+                // Boundaries the initial (pre-v8) path emits: trim-remapped frame
+                // -> sample, then nearest rising zero crossing.
+                int sf = sp.p.startF;
+                int ef = sp.p.endF;
+                if (trimStart > 0) {
+                    sf = int((int64_t(sf) * kHop + trimStart) / kHop);
+                    ef = int((int64_t(ef) * kHop + trimStart) / kHop);
+                }
+                const int64_t anchorStart = nearestZeroCrossing(
+                    interleavedPcm, channels, frames, sampleRate, int64_t(sf) * kHop);
+                const int64_t anchorEnd = nearestZeroCrossing(
+                    interleavedPcm, channels, frames, sampleRate, int64_t(ef) * kHop);
+                LabCandidate lc;
+                lc.anchorStart = anchorStart;
+                lc.anchorEnd = anchorEnd;
+                if (useSeam && sp.seamEvaluated) {
+                    lc.loopStart = sp.seamStart;
+                    lc.loopEnd = sp.seamEnd;
+                } else {
+                    lc.loopStart = anchorStart;
+                    lc.loopEnd = anchorEnd;
+                }
+                lc.legacyScore = sp.legacyScore;
+                lc.fusedScore = sp.score;
+                lc.legacyRank = sp.legacyRank;
+                lc.fusedRank = sp.fusedRank >= 0 ? sp.fusedRank : int(i);
+                lc.seamQuality = sp.seamQuality;
+                lc.seamCorrelation = sp.seamCorrelation;
+                lc.seamRmsJumpDb = sp.seamRmsJumpDb;
+                lc.seamFluxRatio = sp.seamFluxRatio;
+                lc.corrScore = sp.corrScore;
+                lc.energyScore = sp.energyScore;
+                lc.timbreScore = sp.timbreScore;
+                lc.noteDistance = sp.p.nd;
+                lc.loudnessDifference = sp.p.ld;
+                lc.seamEvaluated = sp.seamEvaluated;
+                labOut->candidates.push_back(lc);
+            }
         }
         return result;
     } catch (...) {

@@ -15,10 +15,10 @@ namespace loop_engine {
 // v8 appended seamQuality; v8.1 appended legacyScore (the pre-blend, pre-v8
 // score semantics). Appends are strictly "add, never remove/reorder": the first
 // five positions/meanings are unchanged, so fields keep their old offsets.
-// seamQuality is 0.0 when the seam stage did not run (LOOP_ENGINE_SEAM=0 or
-// bounds fallback); legacyScore equals score in that path because ranking never
-// blends (both carry the pre-v8 score). Kotlin treats seamQuality 0 as
-// "unknown", never as a real 0%.
+// seamQuality is 0.0 when the seam stage did not run (the production default,
+// LOOP_ENGINE_SEAM=0, or a bounds fallback); legacyScore equals score in that
+// path because ranking never blends (both carry the pre-v8 score). Kotlin
+// treats seamQuality 0 as "unknown", never as a real 0%.
 constexpr int kFlatFieldsPerCandidate = 7;
 
 inline std::vector<double> flattenCandidates(const Result& result) {

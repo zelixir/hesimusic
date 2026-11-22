@@ -46,7 +46,13 @@ sealed interface AnalysisState {
 data class LoopCandidateKt(
     val startSamples: Long,
     val endSamples: Long,
-    /** 引擎排序分(v8 起为"相似度 + 接缝"的融合分,0..1,越大越好)。 */
+    /**
+     * 引擎排序分(0..1,越大越好)。
+     *
+     * 生产默认走初版算法:排序只看纯和弦相似度,因此 **score == legacyScore**;
+     * 只有显式打开接缝实验(LOOP_ENGINE_SEAM=1 + LOOP_ENGINE_SEAM_WEIGHT>0)时,
+     * 这里才是"相似度 + 接缝"的融合分。
+     */
     val score: Double,
     val noteDistance: Double,
     val loudnessDifference: Double,
@@ -62,7 +68,8 @@ data class LoopCandidateKt(
      *
      * UI 的「相似度」用它,而不是 [score](融合分)。0.0 = **未知**(老 JSON / 6 字段
      * 过渡格式 / 用户手动微调后的合成候选),此时 UI 回退显示「综合分 = score」。
-     * seam 关闭时引擎保证 legacyScore == score(排序未融合,两者都是旧语义分)。
+     * 生产默认(接缝阶段关闭)下引擎保证 legacyScore == score(排序未融合,
+     * 两者都是初版语义分)。
      */
     val legacyScore: Double = 0.0,
 )

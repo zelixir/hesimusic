@@ -34,6 +34,21 @@ if(NOT MSVC)
 endif()
 target_link_libraries(loop_engine_flat_test PRIVATE Threads::Threads)
 
+# Production-ranking regression: the default configuration must rank exactly
+# like the initial engine (pure chroma score), and the v8 seam fusion must stay
+# retained behind LOOP_ENGINE_SEAM / LOOP_ENGINE_SEAM_WEIGHT for the experiment.
+add_executable(loop_engine_ranking_test
+    loop_engine_ranking_test.cpp
+    ../loop_engine.cpp
+    ../fft.cpp
+)
+target_include_directories(loop_engine_ranking_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_compile_features(loop_engine_ranking_test PRIVATE cxx_std_17)
+if(NOT MSVC)
+    target_compile_options(loop_engine_ranking_test PRIVATE -O2)
+endif()
+target_link_libraries(loop_engine_ranking_test PRIVATE Threads::Threads)
+
 # Offline evaluation CLI: reads a WAV, runs the engine, and prints candidates
 # plus an independent seam-quality measurement (host only, not shipped).
 add_executable(loop_engine_eval

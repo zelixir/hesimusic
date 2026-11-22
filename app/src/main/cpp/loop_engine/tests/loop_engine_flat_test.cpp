@@ -3,10 +3,14 @@
 //
 // v8 appended seamQuality as the 6th double, v8.1 appended legacyScore as the
 // 7th. This test pins the contract old consumers rely on: the first five fields
-// keep their positions and values, the record grows 5 -> 6 -> 7 doubles,
-// legacyScore is the pre-blend score (score == 0.5*legacy + 0.5*seam with the
-// default weight), and the seam stage being disabled (LOOP_ENGINE_SEAM=0)
-// writes 0.0 as the seam "unknown" sentinel while legacyScore == score.
+// keep their positions and values, the record grows 5 -> 6 -> 7 doubles, and the
+// PRODUCTION default (seam stage off) writes 0.0 as the seam "unknown" sentinel
+// while legacyScore == score.
+//
+// The seam stage is retained for the task-B experiment: with LOOP_ENGINE_SEAM=1
+// and LOOP_ENGINE_SEAM_WEIGHT=0.50 the record still carries the v8 fused score
+// (score == 0.5*legacy + 0.5*seam). With the stage on and the weight at its
+// default 0.0 the seam is measured but the ranking stays the legacy one.
 //
 // Build/run (host, no Android device needed):
 //   cmake -S app/src/main/cpp/loop_engine/tests -B build/loop-engine-tests
@@ -36,15 +40,28 @@ void check(bool cond, const std::string& what) {
     }
 }
 
-void setSeam(int on) {
+// Pin the seam switches so the test never depends on the developer shell.
+// clearSeamEnv() = production default (stage off, blend weight 0.0).
+void clearSeamEnv() {
 #ifdef _WIN32
-    _putenv_s("LOOP_ENGINE_SEAM", on ? "1" : "0");
-    // Pin the default blend weight (0.50) so the fused-score identity is stable
-    // even if the developer shell exported LOOP_ENGINE_SEAM_WEIGHT.
+    _putenv_s("LOOP_ENGINE_SEAM", "");
     _putenv_s("LOOP_ENGINE_SEAM_WEIGHT", "");
 #else
-    setenv("LOOP_ENGINE_SEAM", on ? "1" : "0", 1);
+    unsetenv("LOOP_ENGINE_SEAM");
     unsetenv("LOOP_ENGINE_SEAM_WEIGHT");
+#endif
+}
+
+// Explicit experiment configuration: on/off plus an optional weight override
+// ("" leaves the engine default 0.0 in place).
+void setSeam(int on, const char* weight) {
+#ifdef _WIN32
+    _putenv_s("LOOP_ENGINE_SEAM", on ? "1" : "0");
+    _putenv_s("LOOP_ENGINE_SEAM_WEIGHT", weight);
+#else
+    setenv("LOOP_ENGINE_SEAM", on ? "1" : "0", 1);
+    if (weight[0] == '\0') unsetenv("LOOP_ENGINE_SEAM_WEIGHT");
+    else setenv("LOOP_ENGINE_SEAM_WEIGHT", weight, 1);
 #endif
 }
 
@@ -126,43 +143,76 @@ void testManualLayout() {
 
 void testAnalyzedLayout(const std::vector<float>& pcm, int sr) {
     const int64_t frames = static_cast<int64_t>(pcm.size());
-    setSeam(1);
-    const loop_engine::Result on =
+
+    // Production default (no env): the initial algorithm. The seam stage does
+    // not run, so seamQuality is the 0.0 "unknown" sentinel and the score is
+    // the pure legacy score in the initial score-descending order.
+    clearSeamEnv();
+    const loop_engine::Result legacy =
         loop_engine::analyze(pcm.data(), 1, frames, sr, 10);
-    check(!on.candidates.empty(), "seam on: analysis returns candidates");
-    const std::vector<double> flatOn = loop_engine::flattenCandidates(on);
-    check(flatOn.size() == on.candidates.size() * 7, "seam on: flat length is 7 x N");
-    check(flatOn.size() == on.candidates.size() * size_t(loop_engine::kFlatFieldsPerCandidate),
-          "seam on: flat length matches kFlatFieldsPerCandidate");
-    int measured = 0;
-    for (size_t i = 0; i < on.candidates.size(); i++) {
-        const loop_engine::LoopCandidate& c = on.candidates[i];
-        const std::string label = "seamOn[" + std::to_string(i) + "]";
-        checkRecord(flatOn, i, c, label);
+    check(!legacy.candidates.empty(), "default: analysis returns candidates");
+    const std::vector<double> flatLegacy = loop_engine::flattenCandidates(legacy);
+    check(flatLegacy.size() == legacy.candidates.size() * 7,
+          "default: flat length is 7 x N");
+    check(flatLegacy.size() ==
+              legacy.candidates.size() * size_t(loop_engine::kFlatFieldsPerCandidate),
+          "default: flat length matches kFlatFieldsPerCandidate");
+    for (size_t i = 0; i < legacy.candidates.size(); i++) {
+        const loop_engine::LoopCandidate& c = legacy.candidates[i];
+        const std::string label = "default[" + std::to_string(i) + "]";
+        checkRecord(flatLegacy, i, c, label);
+        check(c.seamQuality == 0.0, label + " seamQuality is the 0.0 unknown sentinel");
+        check(c.legacyScore == c.score, label + " default: legacyScore == score");
+        if (i > 0) {
+            check(legacy.candidates[i - 1].score >= c.score,
+                  label + " score is non-increasing (initial ranking)");
+        }
+    }
+
+    // Seam stage explicitly on with the default weight (0.0): the seam is
+    // measured, but the ranking and score stay the legacy ones.
+    setSeam(1, "");
+    const loop_engine::Result measured =
+        loop_engine::analyze(pcm.data(), 1, frames, sr, 10);
+    check(!measured.candidates.empty(), "seam on w=0: analysis returns candidates");
+    int measuredCount = 0;
+    for (size_t i = 0; i < measured.candidates.size(); i++) {
+        const loop_engine::LoopCandidate& c = measured.candidates[i];
+        const std::string label = "seamOnW0[" + std::to_string(i) + "]";
+        check(c.legacyScore == c.score, label + " seam on w=0: legacyScore == score");
+        if (c.seamQuality > 0.0) measuredCount++;
+    }
+    check(measuredCount > 0, "seam on w=0: at least one candidate has a measured seam");
+    check(measured.candidates.size() == legacy.candidates.size(),
+          "seam on w=0: candidate count unchanged");
+    for (size_t i = 0; i < measured.candidates.size() && i < legacy.candidates.size(); i++) {
+        check(measured.candidates[i].legacyScore == legacy.candidates[i].legacyScore,
+              "seam on w=0: legacy ranking position unchanged at " + std::to_string(i));
+    }
+
+    // Task-B configuration: the retained v8 fusion is still wired and writes the
+    // 0.5/0.5 blend.
+    setSeam(1, "0.50");
+    const loop_engine::Result fused =
+        loop_engine::analyze(pcm.data(), 1, frames, sr, 10);
+    check(!fused.candidates.empty(), "seam fused: analysis returns candidates");
+    const std::vector<double> flatFused = loop_engine::flattenCandidates(fused);
+    check(flatFused.size() == fused.candidates.size() * 7,
+          "seam fused: flat length is 7 x N");
+    int fusedMeasured = 0;
+    for (size_t i = 0; i < fused.candidates.size(); i++) {
+        const loop_engine::LoopCandidate& c = fused.candidates[i];
+        const std::string label = "seamFused[" + std::to_string(i) + "]";
+        checkRecord(flatFused, i, c, label);
         check(c.seamQuality >= 0.0 && c.seamQuality <= 1.0, label + " seamQuality in [0,1]");
         check(c.legacyScore >= 0.0 && c.legacyScore <= 1.0, label + " legacyScore in [0,1]");
-        // Engine contract: fused score = (1-w)*legacy + w*seam with w = 0.50.
         check(std::fabs(c.score - (0.5 * c.legacyScore + 0.5 * c.seamQuality)) < 1e-12,
               label + " score is the 0.5/0.5 blend of legacy and seam");
-        if (c.seamQuality > 0.0) measured++;
+        if (c.seamQuality > 0.0) fusedMeasured++;
     }
-    check(measured > 0, "seam on: at least one candidate has a measured seam");
+    check(fusedMeasured > 0, "seam fused: at least one candidate has a measured seam");
 
-    setSeam(0);
-    const loop_engine::Result off =
-        loop_engine::analyze(pcm.data(), 1, frames, sr, 10);
-    setSeam(1);
-    check(!off.candidates.empty(), "seam off: analysis still returns candidates");
-    const std::vector<double> flatOff = loop_engine::flattenCandidates(off);
-    check(flatOff.size() == off.candidates.size() * 7, "seam off: flat length is 7 x N");
-    for (size_t i = 0; i < off.candidates.size(); i++) {
-        const std::string label = "seamOff[" + std::to_string(i) + "]";
-        checkRecord(flatOff, i, off.candidates[i], label);
-        check(off.candidates[i].seamQuality == 0.0,
-              label + " seamQuality is the 0.0 unknown sentinel");
-        check(off.candidates[i].legacyScore == off.candidates[i].score,
-              label + " seam off: legacyScore == score (no blend happened)");
-    }
+    clearSeamEnv();
 }
 
 } // namespace

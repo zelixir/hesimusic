@@ -13,8 +13,8 @@ object LoopEngineJni {
     /** mono PCM → 候选,无进度回调。返回 DoubleArray = [startSamples, endSamples, score,
      *  noteDistance, loudnessDifference, seamQuality, legacyScore] × N,按 score 降序;
      *  失败返回空数组。v8/v8.1 只在尾部追加第 6/7 个字段,前 5 个位置/语义不变;
-     *  seamQuality=0 表示接缝阶段未运行(未知);seam 关闭时 legacyScore==score。
-     *  旧 5/6 字段数组仍可被 [LoopCandidates] 解析。 */
+     *  seamQuality=0 表示接缝阶段未运行(未知,生产默认即是);生产默认排序为初版
+     *  纯分数,legacyScore==score。旧 5/6 字段数组仍可被 [LoopCandidates] 解析。 */
     external fun analyzePcm(monoPcm: FloatArray, sampleRate: Int, maxCandidates: Int): DoubleArray
 
     /**

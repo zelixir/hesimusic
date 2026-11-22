@@ -46,13 +46,27 @@ void setThreads(int n) {
 #endif
 }
 
-// v8: seam ranking is deterministic too, but pin the switch so the test never
-// depends on an ambient LOOP_ENGINE_SEAM value.
+// Pin the seam switches so the test never depends on an ambient
+// LOOP_ENGINE_SEAM / LOOP_ENGINE_SEAM_WEIGHT value. clearSeamEnv() is the
+// production default (stage off, weight 0.0); setSeam(1) is the task-B
+// experiment path.
+void clearSeamEnv() {
+#ifdef _WIN32
+    _putenv_s("LOOP_ENGINE_SEAM", "");
+    _putenv_s("LOOP_ENGINE_SEAM_WEIGHT", "");
+#else
+    unsetenv("LOOP_ENGINE_SEAM");
+    unsetenv("LOOP_ENGINE_SEAM_WEIGHT");
+#endif
+}
+
 void setSeam(int on) {
 #ifdef _WIN32
     _putenv_s("LOOP_ENGINE_SEAM", on ? "1" : "0");
+    _putenv_s("LOOP_ENGINE_SEAM_WEIGHT", "");
 #else
     setenv("LOOP_ENGINE_SEAM", on ? "1" : "0", 1);
+    unsetenv("LOOP_ENGINE_SEAM_WEIGHT");
 #endif
 }
 
@@ -319,8 +333,13 @@ void testDegenerate() {
 
 int main() {
     std::printf("loop_engine parallel/serial bit-exactness test\n");
-    setSeam(1); // production default: seam-aware ranking enabled
     const int sr = 44100;
+    // Production default (initial pure-score ranking, seam stage off) must be
+    // bit-exact across thread counts as well.
+    clearSeamEnv();
+    testSignal("default-music-12s-stereo", makeMusic(12.0, sr, 2));
+    // Task-B experiment path: seam-aware ranking stays deterministic too.
+    setSeam(1);
     testSignal("music-12s-stereo", makeMusic(12.0, sr, 2));
     testSignal("music-6s-mono", makeMusic(6.0, sr, 1));
     testSignal("music-9s-silent-edges", makeSilentEdges(9.0, sr, 2));
