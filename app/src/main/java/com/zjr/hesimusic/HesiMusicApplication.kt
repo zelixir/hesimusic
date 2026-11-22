@@ -10,7 +10,7 @@ import javax.inject.Inject
 class HesiMusicApplication : Application() {
     @Inject
     lateinit var appLogger: AppLogger
-    
+
     private val TAG = "HesiMusicApplication"
     
     override fun onCreate() {

@@ -1,39 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  v2 专属清单(只在 v2Debug/v2Release 变体合并,prod/demo/algolab 完全不受影响)。
+  v2 专属清单:故意为空。
 
-  只做两件事:
-  1. 注册「导入上一版数据」页面(LegacyImportActivity);
-  2. 给它一个桌面入口(activity-alias),因为 main 侧的设置页/导航不在本任务的写域内,
-     不能在那里加一行入口。
-
-  ⚠️ 不新增任何权限、不声明任何 provider:导入只读用户通过 SAF 选中的文件,
-  并使用 main 清单里已有的存储/媒体能力。既有包 com.zjr.hesimusic 的安装与数据不受影响。
+  v2 与正式版是同一份代码,只是 applicationId 追加 .v2,用于与现有 app 并存。
+  它**不包含**任何额外的页面、图标或导入入口;数据迁移走 app 自己已有的 adb 协议:
+    content://com.zjr.hesimusic.adbdb      (上一版导出)
+    content://com.zjr.hesimusic.v2.adbdb   (v2 导入)
+  两者使用同一套 export / import 方法,见 docs/adb-api.md。
 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
-    <application>
-
-        <activity
-            android:name="com.zjr.hesimusic.v2.legacyimport.LegacyImportActivity"
-            android:exported="true"
-            android:label="导入上一版数据"
-            android:theme="@style/Theme.Hesimusic" />
-
-        <!-- 桌面入口:与「Hesi v2」主图标并存,点开直接进入导入页。 -->
-        <activity-alias
-            android:name="com.zjr.hesimusic.v2.legacyimport.LegacyImportLauncher"
-            android:exported="true"
-            android:icon="@mipmap/ic_launcher"
-            android:label="导入上一版数据"
-            android:targetActivity="com.zjr.hesimusic.v2.legacyimport.LegacyImportActivity">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity-alias>
-
-    </application>
-
-</manifest>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
