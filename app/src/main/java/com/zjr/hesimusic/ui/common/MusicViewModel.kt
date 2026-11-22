@@ -548,6 +548,15 @@ class MusicViewModel @Inject constructor(
     fun resume() {
         mediaController?.play()
     }
+
+    /**
+     * 主播放**此刻**是否真的在播（供分析/预览页做「暂停前记录、离开时还原」的交接）。
+     *
+     * 优先读 MediaController 的实时值:进度/状态事件有 1s 级延迟,而暂停发生在
+     * 进入结果页的那一帧,必须用真实播放器状态判断「进入前是否在播」(#107 / D11)。
+     */
+    fun isMainPlaybackPlaying(): Boolean =
+        mediaController?.isPlaying ?: _uiState.value.isPlaying
     
     fun skipToNext() {
         mediaController?.let { controller ->

@@ -236,12 +236,41 @@ fun LoopScreen(
         viewModel.clearNotice()
     }
 
-    // 进入页面即暂停主播放(不改变队列/repeat;契约 §2.1 / §2.5)。
-    // **只在首次进入**时暂停:配置变更重建(旋转/分屏/深色模式/字体缩放)再 pause 一次,
-    // 主播放的暂停会透传到进程级 SOURCE 闸门,把正在播放的预览数据源一起停住(场景 #45)。
-    // onHostCreated() 同时负责重建后的预览恢复(常规路径只重挂探针、不 seek)。
+    // #107 用户裁决:分析期间**不暂停**主播放 —— 从列表/长按启动分析,正在听的歌继续播。
+    // onHostCreated() 只负责重建后的预览恢复(常规路径只重挂探针、不 seek),不再 pause。
     LaunchedEffect(Unit) {
-        if (viewModel.onHostCreated()) musicViewModel.pause()
+        viewModel.onHostCreated()
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    // 「页面在前台可见」= STARTED 及以上。分析在后台完成(App 切后台/息屏)时,
+    // 不能悄悄暂停仍在播的主播放(#107 判据 4);回到前台后才按结果页规则暂停。
+    val pageStarted = remember(lifecycleOwner) {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+    }
+    DisposableEffect(lifecycleOwner) {
+        val visibilityObserver = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START, Lifecycle.Event.ON_RESUME -> pageStarted.value = true
+                Lifecycle.Event.ON_STOP -> pageStarted.value = false
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(visibilityObserver)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(visibilityObserver) }
+    }
+
+    // 真正进入结果页(Ready)才暂停主播放(预览试听要独占音频),并记下进入前是否在播。
+    // 配置变更重建会重新跑这个 effect,由 PreviewMainPlaybackHold 保证只暂停一次;
+    // 分析中(Loading/Analyzing)不产生暂停,所以分析不会打断主播放(判据 1/4)。
+    val resultPageVisible = pageState is LoopPageState.Ready
+    LaunchedEffect(resultPageVisible, pageStarted.value) {
+        if (resultPageVisible && pageStarted.value &&
+            viewModel.onPageStateChanged(pageState, musicViewModel.isMainPlaybackPlaying())
+        ) {
+            musicViewModel.pause()
+        }
     }
 
     // effect NavigateBack(含删除持久化成功)统一从这里回到上一页。
@@ -249,14 +278,14 @@ fun LoopScreen(
         viewModel.backRequests.collect { currentOnBack() }
     }
 
-    // 宿主销毁/离开页面:只有**真正离开**才释放预览并恢复主播放(原歌原位)。
+    // 宿主销毁/离开页面:只有**真正离开**才释放预览,并按进入结果页前的记录恢复主播放
+    // (原歌原位;#107 起不再无条件 resume —— 进入前是暂停就保持暂停)。
     //
     // 旋转/分屏/深色模式/字体缩放在未声明 configChanges 的 Activity 上都会重建宿主,
     // 此时 Activity.isChangingConfigurations() == true:预览播放器由 ViewModel 持有、
     // 必须原样活着(位置连续、probe 不 detach)。旧实现无条件 release 会让重建后的页面
     // 永远没有 player、probe 也 detach → /debug/preview 恒 409 "preview probe not attached",
     // 且页面状态仍是 Ready 不会重新 prepare(场景 #45)。
-    val lifecycleOwner = LocalLifecycleOwner.current
     val hostActivity = remember(context) { context.hostActivityOrNull() }
     DisposableEffect(lifecycleOwner) {
         var handled = false
@@ -268,7 +297,10 @@ fun LoopScreen(
             if (viewModel.onHostDestroyed(changingConfigurations) ==
                 PreviewHostDestroyAction.RELEASE_AND_RESUME
             ) {
-                if (!viewModel.savedAndPlayed) musicViewModel.resume()
+                // #107/D11:按「进入结果页前」的记录还原,不能无条件 resume()。
+                // 分析期间直接返回从未接管主播放 → onPageLeft() 为 false,主播放不受影响。
+                val restoreMainPlayback = viewModel.onPageLeft()
+                if (!viewModel.savedAndPlayed && restoreMainPlayback) musicViewModel.resume()
             }
         }
         // Activity 真正结束时组合也可能先被回收;lifecycleOwner 可能是 NavBackStackEntry,

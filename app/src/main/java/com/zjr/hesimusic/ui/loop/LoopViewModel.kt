@@ -254,6 +254,12 @@ class LoopViewModel @Inject constructor(
     /** 本 ViewModel 是否已经被某一任宿主接管过(用于区分"首次进页"与"配置变更重建")。 */
     private var hostEntered = false
 
+    /**
+     * 主播放交接（#107 / D11）：只在**真正进入结果页**时暂停主播放并记录进入前状态，
+     * 离开时按记录还原；分析期间（Loading/Analyzing）绝不碰主播放。
+     */
+    private val mainPlaybackHold = PreviewMainPlaybackHold()
+
     private val effectRunner = LoopPageEffectRunner(object : LoopPageEffectHost {
 
         override fun play(mode: LoopPageMode, startMs: Long, seek: Boolean) {
@@ -1001,11 +1007,11 @@ class LoopViewModel @Inject constructor(
      * 常规路径(播放器还活着)只重新挂探针、**不 seek 不重建** —— 位置连续;
      * 只有播放器在重建中丢过(旧 release 路径/异常)才按页面位置兜底重建。
      *
-     * @return true = 本页面的**首次**进入(调用方据此暂停主播放);
-     *   false = 配置变更重建。这里**不能**再暂停主播放:主播放的 pause 会透传到
-     *   进程级 SOURCE 闸门,把正在播放的预览数据源一起停住(没声)。
+     * 注意:这里**不暂停主播放**(#107 裁决:分析期间不打断播放)。暂停只发生在真正进入
+     * 结果页时(见 [onPageStateChanged]);配置变更重建也不能再 pause —— 主播放的 pause 会
+     * 透传到进程级 SOURCE 闸门,把正在播放的预览数据源一起停住(场景 #45)。
      */
-    fun onHostCreated(): Boolean {
+    fun onHostCreated() {
         val first = !hostEntered
         hostEntered = true
         val ready = _pageState.value as? LoopPageState.Ready
@@ -1028,15 +1034,34 @@ class LoopViewModel @Inject constructor(
                 rebuildPlayer = action == PreviewHostCreateAction.RESTORE_FROM_PAGE_STATE,
             )
         }
-        return first
     }
+
+    /**
+     * 页面状态变化（由 LoopScreen 组合驱动，含配置变更重建后的首帧）。
+     *
+     * @return true = 调用方应暂停主播放。只有**首次进入结果页**且此前未接管过时才返回 true;
+     *   Loading/Analyzing/Failed 恒 false —— 从列表启动分析不打断正在播的歌。
+     */
+    fun onPageStateChanged(state: LoopPageState, mainPlaying: Boolean): Boolean =
+        mainPlaybackHold.onPageStateChanged(state, mainPlaying)
+
+    /**
+     * 真正离开页面（配置变更重建不算）时调用。
+     *
+     * @return true = 进入结果页前主播放正在播,调用方应恢复播放;
+     *   false = 进入前本来就是暂停(保持暂停),或分析期间直接返回(从未接管)。
+     */
+    fun onPageLeft(): Boolean = mainPlaybackHold.onPageLeft()
+
+    /** 当前是否由本页面接管了主播放（诊断/单测可见）。 */
+    val isHoldingMainPlayback: Boolean get() = mainPlaybackHold.isHolding
 
     /**
      * 宿主销毁/组合销毁时调用。
      *
      * 配置变更重建 → [PreviewHostDestroyAction.KEEP_ALIVE]:播放器原样保留,调用方
      * **不要**恢复主播放;真正离开页面 → [PreviewHostDestroyAction.RELEASE_AND_RESUME]:
-     * 释放预览,调用方按原逻辑恢复主播放。
+     * 释放预览,调用方随后按 [onPageLeft] 的记录决定是否恢复主播放。
      */
     fun onHostDestroyed(isChangingConfigurations: Boolean): PreviewHostDestroyAction {
         val preparedBefore = previewPlayer.isPrepared

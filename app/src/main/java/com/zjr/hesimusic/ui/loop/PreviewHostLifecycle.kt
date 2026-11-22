@@ -11,7 +11,12 @@ enum class PreviewHostDestroyAction {
      */
     KEEP_ALIVE,
 
-    /** 真正离开页面(返回/删除/宿主结束):释放预览,调用方恢复主播放。 */
+    /**
+     * 真正离开页面(返回/删除/宿主结束):释放预览。
+     *
+     * 主播放是否恢复由调用方按 [PreviewMainPlaybackHold] 的记录决定(#107):
+     * 进入结果页前在播才 resume,进入前本来暂停则保持暂停。
+     */
     RELEASE_AND_RESUME,
 }
 
@@ -135,7 +140,7 @@ class PreviewHostLifecycle(
             generation += 1
             target.attachProbe()
         } else {
-            // 真正离开:释放预览,调用方随后恢复主播放。
+            // 真正离开:释放预览,调用方随后按主播放交接记录决定是否 resume。
             target.release()
         }
         return action
