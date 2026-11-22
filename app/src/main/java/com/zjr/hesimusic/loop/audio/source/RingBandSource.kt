@@ -80,14 +80,20 @@ object RingBandSource {
         val ring = LoopRing(timeline.sampleRate, timeline.channels, timeline.loopFrames)
         val reader = RingBandReader(ring, timeline.readerStartOffsetFrames())
         val renderer = RingBandRenderer(timeline, decoder, ring, logger)
+        // issue 00029：前奏/尾奏改用**常驻解码会话**，不再每块新建 codec。
+        // 只有真实文件路径 + PcmDecoderRangeProvider 才有常驻能力；content:// 与测试假
+        // provider 继续走旧的逐块路径（decodePrerollUs=250ms）。
+        val preludeResident = residentProvider(provider, timeline, logger)
+        val tailResident = residentProvider(provider, timeline, logger)
         // issue 00028：整曲时间轴时，[0,A) 前奏与 (B,dur] 尾奏按需块解码（不整段进内存）。
         val preludeReader = if (timeline.wholeTimeline && timeline.aFrame > 0L) {
             PcmRangeBlockReader(
-                provider = provider,
+                provider = preludeResident ?: provider,
                 startFrame = 0L,
                 endFrameExclusive = timeline.aFrame,
                 sampleRate = timeline.sampleRate,
                 channels = timeline.channels,
+                decodePrerollUs = if (preludeResident != null) 0L else PcmRangeBlockReader.DECODE_PREROLL_US,
                 logger = logger,
             )
         } else {
@@ -95,13 +101,14 @@ object RingBandSource {
         }
         val tailReader = if (timeline.wholeTimeline && timeline.durationFrames > timeline.bFrame) {
             PcmRangeBlockReader(
-                provider = provider,
+                provider = tailResident ?: provider,
                 startFrame = timeline.bFrame,
                 endFrameExclusive = timeline.durationFrames,
                 sampleRate = timeline.sampleRate,
                 channels = timeline.channels,
                 prefetchBlocks = 4,
                 prefetchOnInit = false,
+                decodePrerollUs = if (tailResident != null) 0L else PcmRangeBlockReader.DECODE_PREROLL_US,
                 logger = logger,
             )
         } else {
@@ -122,11 +129,42 @@ object RingBandSource {
             LoopingPcmDataSource.Factory(),
             extractors,
         )
-        renderer.start()
+        // 00029：**前奏存在时不要 eager start**。环带填充会连续解码几十秒音频，
+        // 与前奏块解码抢 CPU；第一次 requestFillAt（离 A 2s / 进入循环 / seek）
+        // 时才启动渲染线程。没有前奏的窗口（A=0）或 legacy 预览仍立即启动，保持旧语义。
+        if (!timeline.wholeTimeline || timeline.aFrame <= 0L) {
+            renderer.start()
+        }
+        val prewarmToken = RingBandPrewarm.register { timelineUs ->
+            extractor.prewarmTimelineUs(timelineUs)
+        }
         return RingBandMediaSource(
             delegate = factory.createMediaSource(item),
             extractor = extractor,
             ring = ring,
+            prewarmToken = prewarmToken,
+        )
+    }
+
+    /**
+     * 能开常驻会话就开；content:// 走旧的 PcmDecoder（MediaExtractor 需要 Context）。
+     * 失败（设备 decoder 实例受限等）时返回 null，调用方自动回退旧路径，不影响播放。
+     */
+    private fun residentProvider(
+        provider: PcmRangeProvider,
+        timeline: LoopingPcmTimeline,
+        logger: (String) -> Unit,
+    ): PcmRangeProvider? {
+        val real = provider as? PcmDecoderRangeProvider ?: return null
+        if (real.path.startsWith("content:")) {
+            logger("RingBand resident provider skipped reason=content-uri path=" + real.path)
+            return null
+        }
+        return PcmResidentRangeProvider(
+            path = real.path,
+            expectedSampleRate = timeline.sampleRate,
+            expectedChannels = timeline.channels,
+            logger = logger,
         )
     }
 }

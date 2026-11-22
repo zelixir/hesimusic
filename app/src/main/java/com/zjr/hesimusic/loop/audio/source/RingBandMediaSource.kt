@@ -15,6 +15,7 @@ internal class RingBandMediaSource(
     delegate: MediaSource,
     private val extractor: RingBandExtractor,
     ring: LoopRing,
+    private val prewarmToken: RingBandPrewarm.Token? = null,
 ) : WrappingMediaSource(delegate) {
 
     @Volatile
@@ -40,6 +41,7 @@ internal class RingBandMediaSource(
         released = true
         val bytes = ringRef?.let { it.frames * it.bytesPerFrame } ?: 0L
         ringRef = null
+        RingBandPrewarm.unregister(prewarmToken)
         extractor.release()
         RingBandLog.i("RingBand release bandBytes=" + bytes + " released=true")
     }

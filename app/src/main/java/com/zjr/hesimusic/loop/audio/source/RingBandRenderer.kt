@@ -115,6 +115,11 @@ class RingBandRenderer(
      */
     fun requestFillAt(offsetFrames: Long) {
         if (releaseRequested) return
+        // 00029：环带填充改为**按需启动**。整曲时间轴进入前奏时不再一创建源就
+        // 全速填 [A,B)（90s 音频的连续解码会和前奏块解码抢 CPU，真机进前奏后
+        // 2~3s 出现过一次 ~300ms 静音）；等到离 A 还有 2s、或真的进入循环/tail
+        // 时再启动。见 RingBandSource.create 不再 eager start。
+        start()
         val offset = Math.floorMod(offsetFrames, timeline.loopFrames)
         if (ring.isRangeFilled(offset, 1L)) return
         synchronized(lock) {

@@ -80,13 +80,25 @@ class RingBandExtractorSeekTest {
         return out
     }
 
+    /**
+     * 00029：extractor seek 现在会启动渲染线程（按需填充）。测试要验证的是
+     * “read 只等当前 offset 8ms、不等整环”，所以让 decoder 在渲染线程里停住，
+     * 避免它立刻返回 0 帧后 renderer 把缺口按静音补齐（那会让 read 立刻拿到数据）。
+     * 渲染线程是 daemon，测试结束即退出。
+     */
     private fun emptyDecoder(): RingBandStreamDecoder = object : RingBandStreamDecoder {
         override fun stream(
             startUs: Long,
             endUs: Long,
             prerollUs: Long,
             onPcm: (data: ByteArray, size: Int) -> Unit,
-        ) = Unit
+        ) {
+            try {
+                Thread.sleep(2_000L)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
 
         override fun close() = Unit
     }

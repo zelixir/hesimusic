@@ -1,5 +1,6 @@
 package com.zjr.hesimusic.loop.audio.source
 
+import android.os.Process
 import com.zjr.hesimusic.loop.analysis.Pcm16Frames
 import com.zjr.hesimusic.loop.analysis.Pcm16Segment
 import java.util.concurrent.ExecutorService
@@ -32,6 +33,13 @@ class PcmRangeBlockReader(
     private val prefetchBlocks: Int = DEFAULT_PREFETCH_BLOCKS,
     /** false = 创建时不预热，等首次 seek/read 再解码（尾奏 reader 用，避免无事时空转）。 */
     prefetchOnInit: Boolean = true,
+    /**
+     * 块解码前导（裁掉后对齐块首）。
+     *
+     * 00029：常驻会话 provider（[PcmResidentRangeProvider]）自己负责 seek/前导，这里必须传 0，
+     * 让每块只解 1.0s 且与上一块无缝衔接；旧的一次性 provider 仍用 250ms 预卷。
+     */
+    private val decodePrerollUs: Long = DECODE_PREROLL_US,
     private val logger: (String) -> Unit = {},
 ) {
 
@@ -44,6 +52,7 @@ class PcmRangeBlockReader(
 
     private val bytesPerFrame = channels * 2
     private val framesPerBlock = sampleRate
+    private val logId = "PcmRangeBlock[start=" + startFrame + "]"
     private val totalFrames = (endFrameExclusive - startFrame).coerceAtLeast(0L)
     private val blockCount = ((totalFrames + framesPerBlock - 1L) / framesPerBlock).toInt()
 
@@ -82,6 +91,15 @@ class PcmRangeBlockReader(
     @Volatile
     var decodedBlocks: Long = 0L
         private set
+
+    /** 诊断：块边界累计短帧数（期望 30s 内 0；非 0 说明块拼接丢帧）。 */
+    @Volatile
+    var cumulativeShortfallFrames: Long = 0L
+        private set
+
+    /** seek 意图预热的目标块；-1 = 无。只解块，不改播放游标。 */
+    @Volatile
+    private var prewarmBlock: Int = -1
 
     init {
         if (prefetchOnInit && totalFrames > 0L) kick()
@@ -122,10 +140,24 @@ class PcmRangeBlockReader(
         Read(startFrame = frame, frames = frames, data = data)
     }
 
+    /**
+     * seek 意图预热：提前解 [absFrame] 所在块，但**不改 cursor**。
+     * 真正的 seek 落地后 cursor 指到同一块时会直接命中缓存。
+     */
+    fun prewarmFrame(absFrame: Long) {
+        if (released || totalFrames <= 0L) return
+        val target = absFrame.coerceIn(startFrame, (endFrameExclusive - 1L).coerceAtLeast(startFrame))
+        val block = blockIndexForFrame(target)
+        if (cache.state(block) == PcmBlockCache.State.READY) return
+        synchronized(lock) { prewarmBlock = block }
+        kick()
+    }
+
     /** seek 到绝对媒体帧 [absFrame]（钳在 [startFrame,endFrameExclusive)）。 */
     fun seekToFrame(absFrame: Long) {
         synchronized(lock) {
             val target = absFrame.coerceIn(startFrame, (endFrameExclusive - 1L).coerceAtLeast(startFrame))
+            prewarmBlock = -1
             cursor = target
             val block = blockIndexForFrame(target)
             cache.playheadBlock = block
@@ -156,7 +188,14 @@ class PcmRangeBlockReader(
         }
     }
 
-    /** 触发后台解码当前块 + 预取后续块。 */
+    /**
+     * 触发后台顺序解码：当前块 → 后 1..prefetchBlocks 块。
+     *
+     * 00029：这里**按当前游标顺序选块**，不再“缓存里缺哪块就跳去解哪块”。
+     * 旧逻辑在 seek 后加载线程瞬间读完缓存、游标已跳到 12s 时，仍可能根据旧游标
+     * 去解 block 1；常驻会话被这种跳读打断，下一块又被迫 seek，块边界样本对齐
+     * 因此每 1s 漂移一次（爆音根因）。
+     */
     fun kick() {
         if (released) return
         if (!running.compareAndSet(false, true)) return
@@ -164,14 +203,14 @@ class PcmRangeBlockReader(
             executor.execute {
                 try {
                     var guard = 0
-                    while (!released && guard < prefetchBlocks * 2) {
-                        if (!needsDecode()) break
-                        if (!decodeOne()) break
+                    while (!released && guard <= prefetchBlocks + 1) {
+                        val block = takePrewarmBlock() ?: selectBlockAhead() ?: break
+                        if (!decodeBlock(block)) break
                         guard += 1
                     }
                 } finally {
                     running.set(false)
-                    if (!released && needsDecode()) kick()
+                    if (!released && (prewarmBlock >= 0 || hasUnstartedBlockAhead())) kick()
                 }
             }
         } catch (_: Throwable) {
@@ -186,6 +225,8 @@ class PcmRangeBlockReader(
             lock.notifyAll()
         }
         executor.shutdownNow()
+        // 常驻解码会话必须显式关闭；一次性 provider（PcmDecoderRangeProvider）由调用方共享，不能关。
+        (provider as? ReleasablePcmRangeProvider)?.release()
     }
 
     private fun currentBlockReadyLocked(): Boolean {
@@ -193,48 +234,69 @@ class PcmRangeBlockReader(
         return cache.state(blockIndexForFrame(frame)) == PcmBlockCache.State.READY
     }
 
-    private fun needsDecode(): Boolean {
-        if (released) return false
-        synchronized(lock) {
-            val frame = cursor.coerceIn(startFrame, (endFrameExclusive - 1L).coerceAtLeast(startFrame))
-            val current = blockIndexForFrame(frame)
-            if (cache.state(current) != PcmBlockCache.State.READY) return true
-            for (d in 1..prefetchBlocks) {
-                val index = current + d
-                if (index >= blockCount) break
-                val state = cache.state(index)
-                if (state == null || state == PcmBlockCache.State.PENDING) return true
-            }
-            return false
-        }
+    private fun takePrewarmBlock(): Int? = synchronized(lock) {
+        val block = prewarmBlock
+        prewarmBlock = -1
+        if (block < 0 || block >= blockCount) return null
+        if (cache.state(block) == null) block else null
     }
 
-    private fun decodeOne(): Boolean = synchronized(decodeLock) {
-        if (released) return false
-        val block = synchronized(lock) {
-            val frame = cursor.coerceIn(startFrame, (endFrameExclusive - 1L).coerceAtLeast(startFrame))
-            val current = blockIndexForFrame(frame)
-            if (cache.state(current) == PcmBlockCache.State.FAILED) {
-                // 失败块跳过：游标推进到下一块，避免永远卡住。
-                val nextFrame = blockStartFrame(current + 1)
-                cursor = nextFrame.coerceAtMost(endFrameExclusive)
-                lock.notifyAll()
-                return@synchronized null
+    /** 当前游标起、prefetch 窗口内第一个尚未开始解码的块；PENDING 表示等正在跑的任务。 */
+    private fun selectBlockAhead(): Int? = synchronized(lock) {
+        if (released) return null
+        val frame = cursor.coerceIn(startFrame, (endFrameExclusive - 1L).coerceAtLeast(startFrame))
+        val current = blockIndexForFrame(frame)
+        // 当前块失败时跳过（旧行为），避免永远卡在坏块上。
+        if (cache.state(current) == PcmBlockCache.State.FAILED) {
+            cursor = blockStartFrame(current + 1).coerceAtMost(endFrameExclusive)
+            lock.notifyAll()
+            return null
+        }
+        for (d in 0..prefetchBlocks) {
+            val index = current + d
+            if (index >= blockCount) break
+            when (cache.state(index)) {
+                null -> return index
+                PcmBlockCache.State.PENDING -> return null
+                PcmBlockCache.State.FAILED -> Unit
+                PcmBlockCache.State.READY -> Unit
             }
-            if (cache.state(current) == null) current else {
-                (1..prefetchBlocks).firstOrNull { d ->
-                    val index = current + d
-                    index < blockCount && cache.state(index) == null
-                }
-            }
-        } ?: return false
-        if (!cache.markPending(block)) return false
+        }
+        return null
+    }
 
+    private fun hasUnstartedBlockAhead(): Boolean = synchronized(lock) {
+        if (released) return false
+        val frame = cursor.coerceIn(startFrame, (endFrameExclusive - 1L).coerceAtLeast(startFrame))
+        val current = blockIndexForFrame(frame)
+        for (d in 0..prefetchBlocks) {
+            val index = current + d
+            if (index >= blockCount) break
+            if (cache.state(index) == null) return true
+        }
+        false
+    }
+
+    private fun decodeBlock(block: Int): Boolean = synchronized(decodeLock) {
+        if (released) return false
+        if (!cache.markPending(block)) return false
+        // 区外 seek 的感知延迟 = 单块解码耗时。前奏/尾奏解码是用户正在等的音频，
+        // 用 AUDIO 优先级而不是默认 nice，避免被后台线程挤到小核（真机 1s 块 60~150ms）。
+        // JVM 单测里 android.os.Process 是抛 "Stub!" 的桩，必须整体兜住。
+        val tid = try { Process.myTid() } catch (_: Throwable) { -1 }
+        val oldPriority = if (tid >= 0) {
+            try { Process.getThreadPriority(tid) } catch (_: Throwable) { 0 }
+        } else {
+            0
+        }
+        if (tid >= 0) {
+            try { Process.setThreadPriority(tid, Process.THREAD_PRIORITY_AUDIO) } catch (_: Throwable) {}
+        }
         val startFrame = blockStartFrame(block)
         val expectedFrames = blockFrames(block)
         val startUs = frameUs(startFrame)
         val endUs = frameUs(startFrame + expectedFrames)
-        val decodeStartUs = (startUs - DECODE_PREROLL_US).coerceAtLeast(0L)
+        val decodeStartUs = (startUs - decodePrerollUs).coerceAtLeast(0L)
         val dropFrames = Pcm16Frames.frameAtOrAfterUs(startUs - decodeStartUs, sampleRate)
         val startedMs = System.currentTimeMillis()
         var segment: Pcm16Segment? = null
@@ -257,6 +319,48 @@ class PcmRangeBlockReader(
         } catch (t: Throwable) {
             error = "decode block " + block + " [" + startUs + "," + endUs + ") failed: " +
                 (t.message ?: t.javaClass.simpleName)
+        }
+        if (segment == null && error != null && startUs == 0L && decodeStartUs == 0L && !released) {
+            // 文件首个块的真机故障（issue 00029）：MP3 解码器从 0 seek 后首个输出 PTS
+            // ≈40ms（编码器 priming），PcmDecoder 按"解码起点晚于区间起点"抛异常，
+            // 旧逻辑把整块标记 FAILED 并把游标推进到 block 1 —— 进入无缝循环时
+            // 前 1 秒被静默跳过，且首块永远解不出来。
+            // 这里按异常里给出的 anchor 重解一次，把 [0, anchor) 补静音，只丢 priming 段。
+            val anchorUs = ANCHOR_US_REGEX.find(error)?.groupValues?.get(1)?.toLongOrNull()
+            if (anchorUs != null && anchorUs > 0L) {
+                val leadFrames = Pcm16Frames.frameAtOrAfterUs(anchorUs, sampleRate)
+                if (leadFrames in 1..sampleRate) {
+                    try {
+                        val rest = provider.decode(anchorUs, endUs)
+                        if (rest.sampleRate == sampleRate && rest.channels == channels) {
+                            val needFrames = leadFrames + expectedFrames
+                            val needBytes = (needFrames * bytesPerFrame).toInt()
+                            val data = ByteArray(needBytes)
+                            System.arraycopy(
+                                rest.data,
+                                0,
+                                data,
+                                (leadFrames * bytesPerFrame).toInt(),
+                                minOf(rest.data.size, needBytes - (leadFrames * bytesPerFrame).toInt()),
+                            )
+                            segment = Pcm16Segment(
+                                data = data,
+                                sampleRate = sampleRate,
+                                channels = channels,
+                                frames = needFrames,
+                            )
+                            error = null
+                            logger(
+                                "PcmRangeBlock first-block lead silence frames=" + leadFrames +
+                                    " anchorUs=" + anchorUs + " block=" + block,
+                            )
+                        }
+                    } catch (t: Throwable) {
+                        error = "decode block " + block + " lead-retry failed: " +
+                            (t.message ?: t.javaClass.simpleName)
+                    }
+                }
+            }
         }
         if (segment == null && block == blockCount - 1 && !released) {
             // 真实 PcmDecoder 在"请求区间越过最后一个编码样本"时会抛
@@ -293,6 +397,7 @@ class PcmRangeBlockReader(
                 )
             }
         }
+        try {
         synchronized(lock) {
             if (released) {
                 cache.markFailed(block)
@@ -363,13 +468,26 @@ class PcmRangeBlockReader(
                 ),
             )
             decodedBlocks += 1L
+            if (shortfall > 0L) cumulativeShortfallFrames += shortfall
+            if (decodedBlocks % 30L == 0L) {
+                logger(
+                    logId + " frameAccounting blocks=" + decodedBlocks +
+                        " shortfallTotal=" + cumulativeShortfallFrames +
+                        " cursor=" + cursor,
+                )
+            }
             logger(
-                "PcmRangeBlock decode done block=" + block + " frames=" + expectedFrames +
+                logId + " decode done block=" + block + " frames=" + expectedFrames +
                     " ms=" + (System.currentTimeMillis() - startedMs) +
                     " decoded=" + decodedBlocks,
             )
             lock.notifyAll()
             true
+        }
+        } finally {
+            if (tid >= 0) {
+                try { Process.setThreadPriority(tid, oldPriority) } catch (_: Throwable) {}
+            }
         }
     }
 
@@ -396,6 +514,9 @@ class PcmRangeBlockReader(
 
         /** 解码预热，裁掉后避免 MediaCodec priming 污染块首。 */
         const val DECODE_PREROLL_US: Long = 250_000L
+
+        /** PcmDecoder 的"首输出晚于请求起点"异常里带 anchorUs。 */
+        val ANCHOR_US_REGEX: Regex = Regex("anchorUs=(\\d+)")
 
         /**
          * 最后一个块解码"短于请求区间"时的回退终点缩减量。

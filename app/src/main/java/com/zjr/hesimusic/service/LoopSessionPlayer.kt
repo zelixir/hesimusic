@@ -15,6 +15,7 @@ import com.zjr.hesimusic.loop.LoopWindow
 import com.zjr.hesimusic.loop.audio.LoopAudioController
 import com.zjr.hesimusic.loop.audio.source.LoopSourceItemTag
 import com.zjr.hesimusic.loop.audio.source.LoopSourcePauseGate
+import com.zjr.hesimusic.loop.audio.source.RingBandPrewarm
 
 /**
  * 给 MediaSession / UI / 通知用的**位置口径层**（ForwardingPlayer）。
@@ -471,6 +472,10 @@ class LoopSessionPlayer(
                     " fullDurationUs=" + fullDurationUs +
                     " window=" + window,
             )
+            // 00029：extractor 的 seek 回调要等 media3 loading 线程，目标块解码会全部
+            // 落在用户等待里。这里在 super.seekTo 之前先把目标 timeline 广播给活跃循环源，
+            // prelude/tail reader 立刻解目标块（不改游标），seek 落地时直接命中缓存。
+            RingBandPrewarm.prewarmTimelineUs(targetT)
             super.seekTo(mediaItemIndex, targetT / LoopSessionProjection.US_PER_MS)
             // seek 是最强意图信号：>B 的落点必须立刻把 phase hint 设成 TAIL，
             // 不能等下一次 MediaSession 位置事件。自然播放跨 B 的外推仍由 loop hint 兜底。

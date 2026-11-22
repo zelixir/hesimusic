@@ -27,6 +27,15 @@ interface PcmShortRangeProvider : PcmRangeProvider {
     fun decodeAllowShort(startUs: Long, endUs: Long): Pcm16Segment
 }
 
+/**
+ * 持有 native 会话的 provider（issue 00029 的常驻解码器）。
+ *
+ * [PcmRangeBlockReader.release] 必须回调它，否则源重建时会泄漏 MediaCodec/extractor。
+ */
+interface ReleasablePcmRangeProvider : PcmRangeProvider {
+    fun release()
+}
+
 /** 音轨格式（循环数据源只需要采样率与声道数）。 */
 data class PcmTrackFormat(
     val sampleRate: Int,

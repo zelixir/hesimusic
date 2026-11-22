@@ -244,6 +244,122 @@ class PcmRangeBlockReaderTest {
         reader.release()
     }
 
+    /**
+     * 00029 真机复现：MP3 从文件头 seek 后首个输出 PTS≈40ms，PcmDecoder 抛
+     * "解码起点晚于区间起点"，旧逻辑把首块标记 FAILED 并把游标推到 block 1（前 1s 被跳过）。
+     * 修复后首块用 anchor 重解 + 前置静音，0..expected 帧都应可读。
+     */
+    private class AnchorLateProvider(
+        private val sr: Int,
+        private val ch: Int,
+        private val anchorUs: Long,
+    ) : PcmRangeProvider {
+        var anchorRetries = 0
+        override fun decode(startUs: Long, endUs: Long): Pcm16Segment {
+            if (startUs == 0L) {
+                throw IllegalStateException(
+                    "解码起点晚于区间起点: anchorUs=" + anchorUs + " startUs=0",
+                )
+            }
+            if (startUs == anchorUs) anchorRetries += 1
+            val startFrame = Pcm16Frames.frameAtOrAfterUs(startUs, sr)
+            val frames = Pcm16Frames.framesForUsCeil(endUs - startUs, sr)
+            val data = ByteArray((frames * ch * 2).toInt())
+            var offset = 0
+            for (i in 0 until frames.toInt()) {
+                val value = (startFrame + i).toShort()
+                repeat(ch) {
+                    data[offset++] = (value.toInt() and 0xff).toByte()
+                    data[offset++] = ((value.toInt() shr 8) and 0xff).toByte()
+                }
+            }
+            return Pcm16Segment(data, sr, ch, frames)
+        }
+    }
+
+    @Test
+    fun firstBlockWithLateAnchorIsPaddedInsteadOfSkipped() {
+        val provider = AnchorLateProvider(sr, ch, anchorUs = 40_000L)
+        val reader = PcmRangeBlockReader(provider, 0L, 4_000L, sr, ch)
+        val data = readExactly(reader, 4_000)
+        for (i in 0 until 40) assertEquals("priming frame $i", 0, sampleAt(data, i))
+        for (i in 40 until 4_000) assertEquals("frame $i", i, sampleAt(data, i))
+        assertEquals(1, provider.anchorRetries)
+        assertTrue(reader.error() == null)
+        reader.release()
+    }
+
+    /**
+     * 00029 尾奏漂移的整数帧回归：tail 起点 bFrame=7,653,379 不是 1s 整数倍。
+     * 旧怀疑是 us↔帧换算每块丢/多 1~2 帧；这里用绝对帧号做样本值，30s 逐样本断言
+     * 读出的内容就是 [startFrame, startFrame+30s)，块边界累计偏移必须为 0。
+     */
+    @Test
+    fun tailWindowStartingAtNonSecondBoundaryHasZeroFrameDrift() {
+        val tailSr = 44_100
+        val start = 7_653_379L
+        val frames = tailSr * 30
+        val provider = AbsoluteProvider(tailSr, ch)
+        val reader = PcmRangeBlockReader(
+            provider = provider,
+            startFrame = start,
+            endFrameExclusive = start + frames,
+            sampleRate = tailSr,
+            channels = ch,
+            prefetchBlocks = 4,
+            decodePrerollUs = 0L,
+        )
+        val data = readExactly(reader, frames)
+        for (i in 0 until frames) {
+            val expected = ((start + i) and 0xffffL).toInt()
+            assertEquals("frame $i", expected, sampleAt(data, i))
+        }
+        assertEquals(start + frames, reader.currentFrame())
+        reader.release()
+    }
+
+    /** 00029：常驻 provider 的顺序块请求必须从块首开始，不能带 250ms 预卷（否则每块都会 seek）。 */
+    @Test
+    fun residentModeRequestsBlocksWithoutPreroll() {
+        val provider = AbsoluteProvider(sr, ch)
+        val reader = PcmRangeBlockReader(
+            provider = provider,
+            startFrame = 0L,
+            endFrameExclusive = 4_000L,
+            sampleRate = sr,
+            channels = ch,
+            decodePrerollUs = 0L,
+        )
+        val data = readExactly(reader, 2_000)
+        for (i in 0 until 2_000) assertEquals(i, sampleAt(data, i))
+        assertEquals(0L, provider.calls.first().first)
+        for ((callStart, callEnd) in provider.calls) {
+            assertTrue("start must be block-aligned (no 250ms preroll): $callStart", callStart % 1_000L == 0L)
+            assertTrue(callEnd > callStart)
+        }
+        reader.release()
+    }
+
+    private class ReleasableProvider(
+        private val sr: Int,
+        private val ch: Int,
+    ) : ReleasablePcmRangeProvider {
+        var released = false
+        override fun decode(startUs: Long, endUs: Long): Pcm16Segment {
+            val frames = Pcm16Frames.framesForUsCeil(endUs - startUs, sr)
+            return Pcm16Segment(ByteArray((frames * ch * 2).toInt()), sr, ch, frames)
+        }
+        override fun release() { released = true }
+    }
+
+    @Test
+    fun releaseClosesReleasableProvider() {
+        val provider = ReleasableProvider(sr, ch)
+        val reader = PcmRangeBlockReader(provider, 0L, 2_000L, sr, ch)
+        reader.release()
+        assertTrue(provider.released)
+    }
+
     @Test
     fun decodeErrorsDoNotHangAndExposeLastError() {
         // 非最后块的真失败必须暴露；最后块的"越过媒体结尾"才允许静音补齐。

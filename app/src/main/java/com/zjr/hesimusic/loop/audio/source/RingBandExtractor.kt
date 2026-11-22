@@ -343,7 +343,10 @@ class RingBandExtractor(
             return readRing(request)
         }
         val epochBase = timeline.epochStartUs(positionUs)
-        if (prelude.currentFrame() != frame) prelude.seekToFrame(frame)
+        // 00029：帧号换算有 ±1 帧的 floor/ceil 误差。旧代码用严格不等判断，尾奏（B 不对齐
+        // 整帧）每 0.5~1s 就会“看到 currentFrame 比目标早/晚 1 帧”并 seek 回去，常驻解码
+        // 会话因此每块前导 1 帧，30s 累计漂移几十帧（听感是极小的周期性跳变）。差 1 帧内不 seek。
+        if (!frameNear(prelude.currentFrame(), frame)) prelude.seekToFrame(frame)
         if (epochBase + timeline.frameUs(timeline.aFrame) - positionUs <= PRELUDE_TO_LOOP_PREROLL_US) {
             // 交界预取：确保 A 处的环带块已经在内存里，避免 prelude→loop 的可听缝隙。
             renderer.requestFillAt(0L)
@@ -409,7 +412,7 @@ class RingBandExtractor(
             logTailWrap("already-at-end", frozenMs)
             return readPrelude(request)
         }
-        if (tail.currentFrame() != frame) tail.seekToFrame(frame)
+        if (!frameNear(tail.currentFrame(), frame)) tail.seekToFrame(frame)
         val maxFrames = minOf(request.toLong(), timeline.durationFrames - frame).toInt()
         val result = tail.read(maxFrames) ?: run {
             tail.kick()
@@ -450,6 +453,10 @@ class RingBandExtractor(
 
     private fun framesToUs(frames: Long): Long = frames * 1_000_000L / timeline.sampleRate
 
+    /** 数据源时间轴映射出的帧号允许 ±1 帧误差（floor/ceil 方向不同），不要因此回 seek。 */
+    private fun frameNear(current: Long, target: Long): Boolean =
+        current == target || Math.abs(current - target) <= 1L
+
     /** 自上次 read 返回"源没数据"以来的毫秒数（曲末冻结观测）。 */
     private fun freezeMsNow(): Long =
         if (noDataSinceMs < 0L) 0L else (clock() - noDataSinceMs).coerceAtLeast(0L)
@@ -481,6 +488,37 @@ class RingBandExtractor(
         )
     }
 
+    /**
+     * seek 意图预热（issue 00029）：在 media3 真正 seek 之前，把目标 timeline 位置
+     * 对应的 prelude/tail 块先解掉。环带 seek 则提前触发对应的跳填。
+     *
+     * 只读/只填缓存，不改 positionUs/cursor；真正的 seek 仍由 [seek] 完成。
+     */
+    fun prewarmTimelineUs(timelineUs: Long) {
+        if (!timeline.wholeTimeline) {
+            val frame = timeline.frameAtTimeline(timelineUs)
+            val offset = Math.floorMod(frame - timeline.aFrame, timeline.loopFrames)
+            renderer.requestFillAt(offset)
+            return
+        }
+        val local = timeline.localTimelineUs(timelineUs)
+        when {
+            local < timeline.loopStartUs -> {
+                preludeReader?.prewarmFrame(timeline.frameAtTimeline(timelineUs))
+            }
+            local >= com.zjr.hesimusic.loop.audio.source.LoopWholeTimeline.TAIL_BASE_US -> {
+                tailReader?.prewarmFrame(timeline.frameAtTimeline(timelineUs))
+            }
+            else -> {
+                val offset = Math.floorMod(
+                    timeline.frameAtTimeline(timelineUs) - timeline.aFrame,
+                    timeline.loopFrames,
+                )
+                renderer.requestFillAt(offset)
+            }
+        }
+    }
+
     override fun seek(position: Long, timeUs: Long) {
         // 00023 后续的分段计时：请求 → media3 真正调到这里（loading 线程）。
         LoopPreviewDebugBridge.seekStages.noteExtractorSeek()
@@ -507,9 +545,14 @@ class RingBandExtractor(
             when (currentPhase()) {
                 LoopPhase.PRELUDE -> {
                     preludeReader?.seekToFrame(timeline.frameAtTimeline(t))
-                    // 进前奏时把环带指向 A，并提前要求填充（A 处切换不欠载）。
+                    // 进前奏时只把环带读指针指向 A；环带填充等离 A 还有 2s
+                    // （readPrelude）再启动，避免前奏期间环带全速解码抢 CPU。
                     reader.seekToOffset(0L, timeline.loopStartUs)
-                    renderer.requestFillAt(0L)
+                    if (timeline.frameUs(timeline.aFrame) -
+                        timeline.localTimelineUs(t) <= PRELUDE_TO_LOOP_PREROLL_US
+                    ) {
+                        renderer.requestFillAt(0L)
+                    }
                     loopReaderSynced = false
                 }
                 LoopPhase.LOOP -> {
