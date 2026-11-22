@@ -1,5 +1,6 @@
 package com.zjr.hesimusic.service
 
+import android.os.SystemClock
 import android.util.Log
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -92,9 +93,36 @@ class LoopPlaybackCoordinator @Inject constructor(
     /** 当前已应用到播放器/音频层的窗口；值相等即视为形态未变。 */
     private var appliedWindow: LoopWindow? = null
 
+    // ------------------------------------------------------------ 入口快路径缓存(00029)
+    //
+    // 真机实测：入口从 arm 到开始换源之前有 ~150ms 花在 Room 查询上
+    // （song_loop 行 + 整曲时长 + Song 文件路径），而这段时间旧声已经停了，
+    // 全部变成入口静音。行订阅本来就会把当前歌的 song_loop 行推过来，
+    // 时长/路径对同一首歌也不会变 —— 缓存它们，入口 refresh 不再等 DB。
+
+    /** 最近一次行订阅/查询得到的行（按 songId）。 */
+    private var cachedRowSongId: Long? = null
+    private var cachedRow: SongLoop? = null
+
+    /** 最近一次查到的 Song（路径/时长），供换源与时长判断复用。 */
+    private var cachedSongId: Long? = null
+    private var cachedSong: Song? = null
+
+    /** songId -> 整曲时长(us)；文件重扫可能改变时长，但入口静音窗口里不值得再查。 */
+    private val durationCacheUs = HashMap<Long, Long>()
+
     /** 进入 SOURCE 前当前 item 的原件；退出时只恢复这一项，队列不动。 */
     private var sourceOriginalItem: MediaItem? = null
     private var sourceOriginalIndex: Int = -1
+
+    /**
+     * 00029：入口快路径插入新 item 后，旧 item 的延迟删除点（-1 = 无）。
+     *
+     * 删除在 play() 之后 80ms 执行：首声（~60ms）已经出来，队列时间线的 O(N) 维护
+     * 不再挡在首声前面；如果这期间发生退出/换歌，[settlePendingEntryRemoval] 会先
+     * 把它落地，避免带 tag 的项与索引错位。
+     */
+    private var pendingEntryOldIndex: Int = -1
 
     /**
      * #88：SOURCE 已重建但播放器还没 READY 时，先不对外声称"已接管"。
@@ -143,6 +171,12 @@ class LoopPlaybackCoordinator @Inject constructor(
 
     /** 「意图已武装、但当前 item/窗口还没就绪」时的兜底补算任务（2s 内 10 次，幂等）。 */
     private var intentSettleJob: Job? = null
+
+    /**
+     * 00029：入口准备兜底。正常路径由 [syncSourceItem] 在环带源 READY 时起播；
+     * 若一直没装上/没失败，到点退回普通播放，绝不把播放器留在"准备中"。
+     */
+    private var entryTimeoutJob: Job? = null
 
     @Volatile
     private var playerRef: Player? = null
@@ -365,6 +399,16 @@ class LoopPlaybackCoordinator @Inject constructor(
                 ) {
                     forcePreludeStartOnNextInstall = true
                 }
+                // 00029：入口的起播权在协调器（UI 已 pause 等源）。超时兜底。
+                if (loopIntent.isEntryPendingFor(armedBefore.songId)) {
+                    armEntryTimeout(armedBefore.songId, player)
+                    // UI 的 pause 命令与 arm 是同一帧发出的两条路径：先等它真的落到
+                    // 播放器上（最多 60ms），否则我们起播后那条迟到的 pause 会把新循环暂停。
+                    awaitEntryPause(player)
+                    // 让出一帧：UI 需要先把 entryPending（"正在进入无缝循环…"）和乐观 0
+                    // 画出来，再被这里的换源（主线程同步 work）挡住。否则用户先看到旧位置。
+                    delay(ENTRY_UI_SETTLE_MS)
+                }
             }
             // 上一轮的窗口必须在任何 clear 之前读：D13 的 demote 检测靠它判断“刚才是否真在循环”。
             val previousWindow = runtime.window.value
@@ -387,7 +431,7 @@ class LoopPlaybackCoordinator @Inject constructor(
                 )
                 return
             }
-            val row = songId?.takeIf { it > 0L }?.let { songLoopDao.getBySongId(it) }
+            val row = songId?.takeIf { it > 0L }?.let { rowFor(it) }
             // 只有「武装歌 == 当前歌」时才需要整曲时长（D14 的时长上界判据）；其它情况跳过 DB。
             val durationUs = if (armedBefore != null && songId != null && armedBefore.songId == songId) {
                 songDurationUs(songId)
@@ -488,7 +532,7 @@ class LoopPlaybackCoordinator @Inject constructor(
             }
             // SOURCE 路线才需要文件路径；M3′ 路线保持原样（多查一次 DB 没有意义）。
             val sourceSong = if (MainPlayerRouting.current.coordinatorReplacesItem && window != null) {
-                songRepository.getSongsByIds(listOf(window.songId)).firstOrNull()
+                songFor(window.songId)
             } else {
                 null
             }
@@ -804,6 +848,64 @@ class LoopPlaybackCoordinator @Inject constructor(
         }
     }
 
+    // ------------------------------------------------------------------ 00029 入口闸门
+
+    /**
+     * 00029：入口准备兜底。
+     *
+     * 正常路径：UI 先 pause + 归 0 → 环带源重建 READY → [syncSourceItem] 清 entry 并起播。
+     * 异常路径（item/行一直不就绪、窗口算不出来）：到点清 entry 并退回普通播放，
+     * 绝不把播放器永远留在"准备中"（用户会以为卡死）。
+     */
+    /**
+     * 00029：等 UI 入口的 pause 落到播放器（MediaController 命令与本地 arm 是两条路径）。
+     *
+     * 不等待的后果：协调器在源 READY 后 play()，随后迟到的 pause 命令到达，把新循环停在 0。
+     * 正常情况下一到两次 10ms 就能观察到 pwr=false；60ms 兜底（宁可多一点静音，不可旧声/假死）。
+     */
+    private suspend fun awaitEntryPause(player: Player) {
+        repeat(ENTRY_PAUSE_WAIT_STEPS) {
+            if (!player.playWhenReady) return
+            delay(ENTRY_PAUSE_WAIT_STEP_MS)
+        }
+        Log.w(TAG_PERF, "entry pause not observed pwr=true after wait")
+    }
+
+    private fun armEntryTimeout(songId: Long, player: Player) {
+        entryTimeoutJob?.cancel()
+        entryTimeoutJob = scope.launch(eventDispatcher) {
+            delay(ENTRY_FALLBACK_TIMEOUT_MS)
+            if (!loopIntent.isEntryPendingFor(songId)) return@launch
+            Log.w(
+                TAG_PERF,
+                "entry timeout -> normal playback songId=" + songId +
+                    " state=" + player.playbackState + " item=" + describeItem(player.currentMediaItem),
+            )
+            loopIntent.clearEntry(songId)
+            if (player.playbackState == Player.STATE_IDLE) player.prepare()
+            player.play()
+        }
+    }
+
+    /**
+     * 00029：入口失败（源不可用 / 建源失败 / 计划被拒）时的回退。
+     *
+     * 用户点「无缝循环」的意图是**播放这首歌**；环带不可用不能让播放器停在入口的暂停态。
+     * 此时 item 已被还原为普通源、落点 0，直接 prepare + play（普通播放）即可；
+     * UI 会通过 claim 的 fallbackReason 显示"未生效"的原因。
+     */
+    private fun abortEntryPlayback(player: Player, songId: Long, reason: String) {
+        if (!loopIntent.isEntryPendingFor(songId)) return
+        loopIntent.clearEntry(songId)
+        Log.w(
+            TAG_PERF,
+            "entry aborted reason=" + reason + " songId=" + songId +
+                " state=" + player.playbackState + " pos=" + player.currentPosition,
+        )
+        if (player.playbackState == Player.STATE_IDLE) player.prepare()
+        player.play()
+    }
+
     /** 行诊断：A/B(ms) 与 confirmed，只用于日志。 */
     private fun rowDesc(row: SongLoop?): String =
         if (row == null) {
@@ -820,6 +922,8 @@ class LoopPlaybackCoordinator @Inject constructor(
         observedSongId = null
         intentSettleJob?.cancel()
         intentSettleJob = null
+        entryTimeoutJob?.cancel()
+        entryTimeoutJob = null
         transitionExitJob?.cancel()
         transitionExitJob = null
         playerRef = null
@@ -827,6 +931,12 @@ class LoopPlaybackCoordinator @Inject constructor(
         listenedPlayer = null
         engineShuffleWrite = null
         appliedWindow = null
+        cachedRowSongId = null
+        cachedRow = null
+        cachedSongId = null
+        cachedSong = null
+        durationCacheUs.clear()
+        pendingEntryOldIndex = -1
         ringPrefiller.cancel()
         if (audio.window != null) {
             audio.window = null
@@ -856,6 +966,7 @@ class LoopPlaybackCoordinator @Inject constructor(
      * （与 applyIntentMode 同一口径），最后撤掉 SOURCE 接管并清窗口/claim。
      */
     fun exitForNavigation(player: Player) {
+        settlePendingEntryRemoval(player)
         clearPendingSourceInstall()
         val armed = loopIntent.armed.value
         if (armed != null) {
@@ -1013,6 +1124,8 @@ class LoopPlaybackCoordinator @Inject constructor(
         song: Song?,
         reason: String,
     ) {
+        // 上一轮入口的旧 item 如果还没删，先落地：否则后面的 index/tag 判断会错位。
+        settlePendingEntryRemoval(player)
         val index = player.currentMediaItemIndex
         if (index < 0) {
             Log.w(TAG_PERF, "syncSourceItem skip=noIndex route=" +
@@ -1051,8 +1164,11 @@ class LoopPlaybackCoordinator @Inject constructor(
         if (w == null || !MainPlayerRouting.coordinatorReplacesItem(w, unavailable)) {
             clearPendingSourceInstall()
             audio.tapWindow = null
+            // 退出：先把入口留下的延迟旧项删掉，再接"当前项"还原（index 会回到换源前）。
+            settlePendingEntryRemoval(player, force = true)
+            val exitIndex = player.currentMediaItemIndex
             if (tag is LoopSourceItemTag) {
-                restoreSourceItem(player, index, tag, reason)
+                restoreSourceItem(player, exitIndex, tag, reason)
             } else {
                 // 当前项已不是 source item（例如队列被外部重设）：确保接管状态不残留。
                 LoopSourceRuntime.onReleased()
@@ -1066,11 +1182,42 @@ class LoopPlaybackCoordinator @Inject constructor(
             tag.loopEndUs == w.loopEndUs
         ) {
             audio.tapWindow = w
+            // 00029：入口时当前项已经是同一环带源（再次点「无缝循环」/ A-B 未变）：
+            // UI 已 pause + 归 0，这里直接从 0 起播，不走重建（重建会白等 ~300ms）。
+            if (loopIntent.isEntryPendingFor(w.songId)) {
+                player.seekTo(index, LoopWholeTimeline.PRELUDE_START_US / 1_000L)
+                LoopSourceRuntime.onInstalled(
+                    w,
+                    song?.filePath ?: LoopSourceRuntime.installedPath.orEmpty(),
+                )
+                loopIntent.clearEntry(w.songId)
+                LoopClaimStore.invalidate()
+                if (player.playbackState == Player.STATE_IDLE) player.prepare()
+                player.play()
+                Log.i(
+                    TAG_PERF,
+                    "entry on installed source songId=" + w.songId +
+                        " pos=" + player.currentPosition + " reason=" + reason,
+                )
+                return
+            }
             // 只有"没有正在等待 READY 的 pending"时才补发布；否则这里的 row/repeat/transition
             // 重复 refresh 会把 deferred publish 提前，claim 又回到 playing=false 的窗口。
             if (LoopSourceRuntime.installedWindow != w && !LoopSourceRuntime.isInstallPendingFor(w)) {
                 LoopSourceRuntime.onInstalled(w, song?.filePath ?: LoopSourceRuntime.installedPath.orEmpty())
             }
+            return
+        }
+        // 1b) 入口过渡期还没删旧项、而窗口已经变了：先归一化队列，再重新走一次 refresh。
+        // 否则下面会拿到 index=旧项+1、把新窗口挂到错误的 item 上。
+        if (pendingEntryOldIndex >= 0) {
+            Log.i(
+                TAG_PERF,
+                "entry pending old item settled before window change index=" + index +
+                    " window=" + w + " reason=" + reason,
+            )
+            settlePendingEntryRemoval(player, force = true)
+            requestIntentRefresh(REASON_ROW)
             return
         }
         // 2) 预检：格式不支持 / 环过大 / 文件缺失 → 本次不进 SOURCE，回退 M3′ 形态并登记。
@@ -1095,6 +1242,8 @@ class LoopPlaybackCoordinator @Inject constructor(
                 )
                 audio.tapWindow = null
                 if (tag is LoopSourceItemTag) restoreSourceItem(player, index, tag, reason)
+                // 00029：入口目标不可用（格式/预算/文件）→ 从 0 普通播放，不停在准备中。
+                abortEntryPlayback(player, w.songId, "source-unavailable:" + d.reason.logName)
                 return
             }
             is LoopSourceFallback.Decision.UseSource -> d.ringBytes
@@ -1105,6 +1254,7 @@ class LoopPlaybackCoordinator @Inject constructor(
         val path = filePath
         if (path.isNullOrBlank()) {
             LoopSourceRuntime.clearPendingInstall()
+            abortEntryPlayback(player, w.songId, "missing-path")
             return
         }
         // issue 00028：主播放器用整曲时间轴（prelude/loop/tail）。
@@ -1155,6 +1305,7 @@ class LoopPlaybackCoordinator @Inject constructor(
         if (plan == null) {
             Log.w(TAG, "source plan rejected songId=" + w.songId + " window=" + w)
             LoopSourceRuntime.clearPendingInstall()
+            abortEntryPlayback(player, w.songId, "plan-rejected")
             return
         }
         // 真正重建前再标一次 pending（refresh 与这里之间可能被 row/repeat 事件插队）。
@@ -1178,10 +1329,23 @@ class LoopPlaybackCoordinator @Inject constructor(
         // 队列内容不变，index 与进入落点（A 或 A+entryOffset）都由参数决定，不会漂。
         val tagged = LoopSourceMediaItem.tagged(current, plan.tag)
         val loopCountBefore = LoopAwareMediaSourceFactory.loopSourcesCreated()
+        val entryPending = loopIntent.isEntryPendingFor(w.songId)
         Log.i(TAG_PERF, "source rebuild before index=" + plan.index +
             " " + describeItem(current) + " -> " + describeItem(tagged) +
-            " entryTMs=" + plan.seekTimelineMs + " forcedPreludeStart=" + forcePreludeStart)
-        rebuildQueueItem(player, plan.index, tagged, plan.seekTimelineMs)
+            " entryTMs=" + plan.seekTimelineMs + " forcedPreludeStart=" + forcePreludeStart +
+            " entryPending=" + entryPending)
+        // 入口：先把新 item 插到当前项之后并切过去（只建 1 个源），旧项等 play() 之后
+        // 再删 —— 删除的 1714 项队列时间线维护不必挡在首声前面。
+        var pendingOldIndex = -1
+        if (entryPending) {
+            pendingOldIndex = installEntrySourceItem(player, plan.index, tagged, plan.seekTimelineMs)
+            if (pendingOldIndex < 0) {
+                Log.w(TAG_PERF, "entry fast install failed -> full rebuild index=" + plan.index)
+                rebuildQueueItem(player, plan.index, tagged, plan.seekTimelineMs)
+            }
+        } else {
+            rebuildQueueItem(player, plan.index, tagged, plan.seekTimelineMs)
+        }
         forcePreludeStartOnNextInstall = false
         val loopCountAfter = LoopAwareMediaSourceFactory.loopSourcesCreated()
         val builtByFactory = loopCountAfter > loopCountBefore
@@ -1206,13 +1370,18 @@ class LoopPlaybackCoordinator @Inject constructor(
             )
             // 当前 item 是 tagged 但实际为普通文件源（或根本没建源）：立即把 T 折回媒体时间
             // 并恢复原 item，消灭“tag 在、声音普通、UI 仍可能折返”的中间态。
-            restoreSourceItem(
-                player = player,
-                index = plan.index,
-                tag = plan.tag,
-                reason = reason + "-source-not-built",
-                timelineMs = plan.seekTimelineMs,
-            )
+            if (pendingOldIndex >= 0) {
+                rollbackEntrySourceItem(player, pendingOldIndex, plan.seekTimelineMs)
+            } else {
+                restoreSourceItem(
+                    player = player,
+                    index = plan.index,
+                    tag = plan.tag,
+                    reason = reason + "-source-not-built",
+                    timelineMs = plan.seekTimelineMs,
+                )
+            }
+            abortEntryPlayback(player, w.songId, "source-not-built")
             return
         }
         // 整表重建把播放器复位成 IDLE：必须 prepare 才会加载新源；play 只在进入前就要求播放时补
@@ -1226,11 +1395,25 @@ class LoopPlaybackCoordinator @Inject constructor(
             stateAfterRebuild = stateAfterRebuild,
         )
         if (revive.prepare) player.prepare()
-        if (revive.play) player.play()
+        if (entryPending) {
+            // 00029：入口在源 READY 前是暂停的（旧位置绝不出声），这里才是真正的起播点。
+            // 先清 entry，再 play（媒体会话层的入口闸门只拦"源未就绪时的普通 play"）。
+            loopIntent.clearEntry(w.songId)
+            player.play()
+        } else if (revive.play) {
+            player.play()
+        }
+        // play() 已经发出：旧项留到 claim 发布（~READY+350ms）时再删。首声先出来，
+        // 队列时间线的 O(N) 维护不再挡在首声前面（真机：立刻删会让首声多等 ~55ms）。
+        // 期间的 player-state/timeline refresh 会命中"同窗口"幂等分支，不触发删除。
+        if (pendingOldIndex >= 0) {
+            pendingEntryOldIndex = pendingOldIndex
+        }
         Log.i(
             TAG_PERF,
             "source revive stateBefore=" + stateBefore + " stateAfterRebuild=" + stateAfterRebuild +
-                " pwr=" + playWhenReadyBefore + " prepare=" + revive.prepare + " play=" + revive.play,
+                " pwr=" + playWhenReadyBefore + " entryPending=" + entryPending +
+                " prepare=" + revive.prepare + " play=" + (revive.play || entryPending),
         )
         scheduleSourceInstallPublish(player, w, path)
         Log.i(
@@ -1280,7 +1463,16 @@ class LoopPlaybackCoordinator @Inject constructor(
                     "source install publish timeout state=" + player.playbackState +
                         " window=" + window,
                 )
+                // 00029：入口等不到 READY 也要表态 —— 清 entry 并起播，否则用户只看到
+                // "准备中"且没有声音（入口的暂停是我们自己做的，不是用户意图）。
+                val entryPending = loopIntent.isEntryPendingFor(window.songId)
+                if (entryPending) loopIntent.clearEntry(window.songId)
                 publishPendingSourceInstall(force = true)
+                if (entryPending) {
+                    if (player.playbackState == Player.STATE_IDLE) player.prepare()
+                    player.play()
+                    Log.w(TAG_PERF, "entry played on publish timeout songId=" + window.songId)
+                }
             }
         }
         Log.i(
@@ -1292,6 +1484,11 @@ class LoopPlaybackCoordinator @Inject constructor(
 
     private fun maybePublishSourceInstall() {
         val pending = pendingSourceInstall ?: return
+        // 00029：首声已经渲染（isPlaying=true）时再删入口留下的旧项：既不影响首声，
+        // 也把"队列多一项"的过渡窗口压到最短（之后才 claim 发布的 350ms 等待）。
+        if (pending.player.isPlaying) {
+            settlePendingEntryRemoval(pending.player, force = true)
+        }
         if (SourceInstallPublishPolicy.shouldPublish(
                 playbackState = pending.player.playbackState,
                 playWhenReady = pending.player.playWhenReady,
@@ -1341,6 +1538,8 @@ class LoopPlaybackCoordinator @Inject constructor(
         pendingPublishDelay?.cancel()
         pendingPublishDelay = null
         pending.player.removeListener(installReadyListener)
+        // 入口过渡期的第 N+1 项到此为止：claim 可见时队列必须已回到原始长度/索引。
+        settlePendingEntryRemoval(pending.player, force = true)
         publishSourceInstall(pending.window, pending.path, pending.player.playbackState)
     }
 
@@ -1440,6 +1639,104 @@ class LoopPlaybackCoordinator @Inject constructor(
     }
 
     /**
+     * 00029：入口专用的换源（只为当前项建一个 MediaSource）。
+     *
+     * 语义与 `setMediaItems(整表, index, positionMs)` 等价，但不重建队列其它 N-1 项：
+     * 1. 在当前项**之后**插入带 tag 的循环 item（工厂只为这一项 createMediaSource）；
+     * 2. 切到该项（入口落点恒为 0）；
+     * 3. 删掉旧项 —— 此时它不是当前项，不会触发 A-086 的"当前 period 被移除"问题。
+     *
+     * 为什么必须这样做：media3 的 setMediaItems 会为队列每一项同步 createMediaSource；
+     * 真机 1714 首实测 setMediaItems=170ms（建源 92ms），而入口 pause 已经让旧声停止，
+     * 这 170ms 会全部变成静音，超过 #88(120ms)/#94(300ms) 的入口空洞判据。
+     * 本路径只建 1 个环带源（~11ms）+ 一次切项。
+     *
+     * @return true = 完成且当前项确实是带 tag 的循环 item；false = 已回滚，调用方必须走整表重建。
+     */
+    private fun installEntrySourceItem(
+        player: Player,
+        index: Int,
+        item: MediaItem,
+        positionMs: Long,
+    ): Int {
+        val count = player.mediaItemCount
+        if (index < 0 || index >= count) return -1
+        val expected = item.localConfiguration?.tag as? LoopSourceItemTag ?: return -1
+        val startedMs = SystemClock.elapsedRealtime()
+        var injected = false
+        return try {
+            LoopAwareMediaSourceFactory.resetCreateStats()
+            player.addMediaItem(index + 1, item)
+            val addMs = SystemClock.elapsedRealtime() - startedMs
+            injected = true
+            player.seekTo(index + 1, positionMs.coerceAtLeast(0L))
+            val seekMs = SystemClock.elapsedRealtime() - startedMs - addMs
+            val (created, createMs) = LoopAwareMediaSourceFactory.drainCreateStats()
+            val currentIndex = player.currentMediaItemIndex
+            val tag = player.currentMediaItem?.localConfiguration?.tag as? LoopSourceItemTag
+            val ok = currentIndex == index + 1 &&
+                player.mediaItemCount == count + 1 &&
+                tag != null &&
+                tag.songId == expected.songId &&
+                tag.loopStartUs == expected.loopStartUs &&
+                tag.loopEndUs == expected.loopEndUs
+            Log.i(
+                TAG_PERF,
+                "entry fast install insert count=" + count + " index=" + index +
+                    " current=" + currentIndex + " addMs=" + addMs + " seekMs=" + seekMs +
+                    " sourcesCreated=" + created + " createSourcesMs=" + createMs +
+                    " ok=" + ok,
+            )
+            if (ok) index else {
+                rollbackEntrySourceItem(player, index, positionMs)
+                -1
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG_PERF, "entry fast install failed injected=" + injected, t)
+            runCatching {
+                if (injected && player.mediaItemCount == count + 1) {
+                    player.removeMediaItem(index + 1)
+                }
+            }
+            -1
+        }
+    }
+
+    /**
+     * 把入口留下的"多一项"落地。
+     *
+     * - 非 force：当前项仍是入口插入的那一项时**不删**（入口自己的 player-state/timeline
+     *   幂等 refresh 不能把旧项删在首声前面）；
+     * - force：退出/发布 claim 时立即归一化队列（index 回到换源前）。
+     */
+    private fun settlePendingEntryRemoval(player: Player, force: Boolean = false) {
+        val oldIndex = pendingEntryOldIndex
+        if (oldIndex < 0) return
+        if (!force && player.currentMediaItemIndex == oldIndex + 1) return
+        pendingEntryOldIndex = -1
+        runCatching {
+            if (player.mediaItemCount > oldIndex &&
+                player.currentMediaItemIndex == oldIndex + 1
+            ) {
+                player.removeMediaItem(oldIndex)
+                Log.i(TAG_PERF, "pending entry old item removed oldIndex=" + oldIndex)
+            }
+        }
+    }
+
+    /** 入口换源失败：删掉插入的带 tag 项，把当前项还原成原 item / 落点。 */
+    private fun rollbackEntrySourceItem(player: Player, oldIndex: Int, positionMs: Long) {
+        runCatching {
+            if (player.mediaItemCount > oldIndex + 1 &&
+                player.currentMediaItemIndex == oldIndex + 1
+            ) {
+                player.removeMediaItem(oldIndex + 1)
+            }
+            player.seekTo(oldIndex, positionMs.coerceAtLeast(0L))
+        }.onFailure { Log.w(TAG_PERF, "entry rollback failed oldIndex=$oldIndex", it) }
+    }
+
+    /**
      * 原子换源：保持队列内容不变，只把 [index] 换成 [item]，并把落点设成 [positionMs]。
      *
      * **为什么不用 `replaceMediaItem`（A-086 / 场景 12 / issue 00024）**：
@@ -1459,11 +1756,26 @@ class LoopPlaybackCoordinator @Inject constructor(
             Log.w(TAG_PERF, "rebuild skipped index=" + index + " itemCount=" + count)
             return
         }
+        val startedMs = android.os.SystemClock.elapsedRealtime()
         val items = ArrayList<MediaItem>(count)
         for (i in 0 until count) {
             items.add(if (i == index) item else player.getMediaItemAt(i))
         }
+        val listMs = android.os.SystemClock.elapsedRealtime() - startedMs
+        LoopAwareMediaSourceFactory.resetCreateStats()
+        val setStartedMs = android.os.SystemClock.elapsedRealtime()
         player.setMediaItems(items, index, positionMs.coerceAtLeast(0L))
+        val setMs = android.os.SystemClock.elapsedRealtime() - setStartedMs
+        val (created, createMs) = LoopAwareMediaSourceFactory.drainCreateStats()
+        // 00029：入口静音窗口 = setMediaItems 的同步阻塞时间。queue 越大，这里越贵
+        // （media3 会为每一项调一次 createMediaSource）；把两个分量分开记录才能判断
+        // "缩短静音"该优化队列重建还是环带源本身。
+        Log.i(
+            TAG_PERF,
+            "rebuild timing count=" + count + " listMs=" + listMs +
+                " setMediaItemsMs=" + setMs + " sourcesCreated=" + created +
+                " createSourcesMs=" + createMs,
+        )
     }
 
     /** 引擎原始位置（µs）：旧窗口属于当前项且处于重放期时用 sink 位置，否则用播放器位置。 */
@@ -1524,10 +1836,15 @@ class LoopPlaybackCoordinator @Inject constructor(
         if (validSongId == observedSongId && observeJob?.isActive == true) return
         observeJob?.cancel()
         observedSongId = validSongId
+        // 换歌后旧歌的缓存不能当新歌用；新订阅的首次 emission 会立刻把行写回缓存。
+        cachedRowSongId = null
+        cachedRow = null
         observeJob = validSongId?.let { id ->
             scope.launch {
-                songLoopDao.getBySongIdFlow(id).collect { _ ->
-                    // 行内容变化（含删除后的 null）→ 完整重算一次
+                songLoopDao.getBySongIdFlow(id).collect { row ->
+                    // 行内容变化（含删除后的 null）→ 完整重算一次；同时暖入口缓存。
+                    cachedRowSongId = id
+                    cachedRow = row
                     refresh(id, player.repeatMode, player, REASON_ROW)
                 }
             }
@@ -1539,9 +1856,31 @@ class LoopPlaybackCoordinator @Inject constructor(
     private fun currentSongId(player: Player): Long? =
         player.currentMediaItem?.mediaId?.let { mediaIdToSongId(it) }
 
+    /** song_loop 行：行订阅已推过来的当前歌直接命中缓存，入口不再等 Room。 */
+    private suspend fun rowFor(songId: Long): SongLoop? {
+        if (cachedRowSongId == songId) return cachedRow
+        val row = songLoopDao.getBySongId(songId)
+        cachedRowSongId = songId
+        cachedRow = row
+        return row
+    }
+
+    /** Song（路径/时长）：同一首歌复用，避免入口 refresh 里的第二次 Room 查询。 */
+    private suspend fun songFor(songId: Long): Song? {
+        if (cachedSongId == songId) return cachedSong
+        val song = songRepository.getSongsByIds(listOf(songId)).firstOrNull()
+        if (song != null) {
+            cachedSongId = songId
+            cachedSong = song
+            durationCacheUs[songId] = song.duration * LoopSessionProjection.US_PER_MS
+        }
+        return song
+    }
+
     private suspend fun songDurationUs(songId: Long?): Long {
         if (songId == null || songId <= 0L) return 0L
-        val song = songRepository.getSongsByIds(listOf(songId)).firstOrNull() ?: return 0L
+        durationCacheUs[songId]?.let { return it }
+        val song = songFor(songId) ?: return 0L
         return song.duration * LoopSessionProjection.US_PER_MS
     }
 
@@ -1598,6 +1937,20 @@ class LoopPlaybackCoordinator @Inject constructor(
         /** 兜底补算：最多 10 次 × 200ms（覆盖 setMediaItems/restore 的异步就绪窗口）。 */
         private const val INTENT_SETTLE_ATTEMPTS = 10
         private const val INTENT_SETTLE_INTERVAL_MS = 200L
+
+        /**
+         * 00029：入口准备的最长等待（与 claim 发布超时同量级）。
+         * 超过它仍没有可播的环带源 → 清 entry 并退回普通播放。
+         */
+        private const val ENTRY_FALLBACK_TIMEOUT_MS = 2_500L
+
+        /** 00029：等 UI 入口 pause 落地的最多步数/步长（总 60ms）。 */
+        private const val ENTRY_PAUSE_WAIT_STEPS = 6
+        private const val ENTRY_PAUSE_WAIT_STEP_MS = 10L
+
+        /** 00029：入口换源前让出的一帧（给 Compose 画"准备中"+0，避免先显示旧位置）。 */
+        private const val ENTRY_UI_SETTLE_MS = 16L
+
 
         /** 单次 refresh 超过该耗时打 warn（含主线程探针/DB/换源）。 */
         private const val SLOW_REFRESH_WARN_MS = 300L

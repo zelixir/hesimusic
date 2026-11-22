@@ -94,6 +94,63 @@ class LoopIntentTest {
     }
 
     @Test
+    fun `armEntry 标记入口准备中(00029)`() {
+        val intent = LoopIntent()
+        intent.armEntry(42L, Player.REPEAT_MODE_ALL, previousShuffleEnabled = false)
+        assertEquals("armEntry 必须同时武装意图", 42L, intent.armed.value?.songId)
+        assertEquals("armEntry 必须留下入口标记", 42L, intent.entryPendingSongId.value)
+        assertEquals(true, intent.isEntryPendingFor(42L))
+        assertEquals(false, intent.isEntryPendingFor(43L))
+    }
+
+    @Test
+    fun `armEntry 先置入口标记再 emit armed(00029)`() {
+        val intent = LoopIntent()
+        val seenEntry = mutableListOf<Long?>()
+        runBlocking {
+            val job = launch(Dispatchers.Unconfined) {
+                intent.armed.collect { seenEntry.add(intent.entryPendingSongId.value) }
+            }
+            intent.armEntry(42L, Player.REPEAT_MODE_ALL, previousShuffleEnabled = false)
+            yield()
+            job.cancel()
+        }
+        assertEquals(
+            "armed 订阅者重算窗口时入口标记必须已可见，否则第一次 refresh 会走整表重建",
+            listOf(null, 42L),
+            seenEntry,
+        )
+    }
+
+    @Test
+    fun `普通 arm 清掉残留的入口标记(00029)`() {
+        val intent = LoopIntent()
+        intent.armEntry(42L, Player.REPEAT_MODE_ALL, previousShuffleEnabled = false)
+        // debug /loop/enter 等非 UI 入口走普通 arm：不能继承"准备中"语义。
+        intent.arm(43L, Player.REPEAT_MODE_ONE, previousShuffleEnabled = false)
+        assertNull("普通 arm 必须清掉入口标记", intent.entryPendingSongId.value)
+    }
+
+    @Test
+    fun `clearEntry 只清指定歌(00029)`() {
+        val intent = LoopIntent()
+        intent.armEntry(42L, Player.REPEAT_MODE_ALL, previousShuffleEnabled = false)
+        intent.clearEntry(43L)
+        assertEquals("别的歌不能清掉本次入口", 42L, intent.entryPendingSongId.value)
+        intent.clearEntry(42L)
+        assertNull("目标歌清掉后入口结束", intent.entryPendingSongId.value)
+        assertEquals("入口结束不能动意图", 42L, intent.armed.value?.songId)
+    }
+
+    @Test
+    fun `clear 同时清入口(00029)`() {
+        val intent = LoopIntent()
+        intent.armEntry(42L, Player.REPEAT_MODE_ALL, previousShuffleEnabled = false)
+        intent.clear()
+        assertNull("退出循环必须同时结束入口准备", intent.entryPendingSongId.value)
+    }
+
+    @Test
     fun `相同意图重复 arm 不重复 emit`() {
         val intent = LoopIntent()
         val seen = emissions(intent) {

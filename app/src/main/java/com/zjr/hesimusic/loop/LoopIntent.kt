@@ -60,6 +60,20 @@ class LoopIntent @Inject constructor() {
     val armed: StateFlow<Armed?> = _armed.asStateFlow()
 
     /**
+     * 00029：一次「启动无缝循环」的入口正在准备（环带源尚未 READY）。
+     *
+     * 产品语义（用户裁决）：点无缝循环后**立刻**不再播旧位置内容，源就绪后从 0 起播。
+     * 因此 UI 在 [armEntry] 之前就发出 pause、之后立刻 seek 0，这段时间播放器是暂停的；
+     * 协调器在源 READY 时必须知道"这是入口、要自动起播"（不能把它当用户暂停）。
+     *
+     * 非持久化：只在本次进入的几百毫秒内存在，进程重启的 restore 不会带上它。
+     */
+    private val _entryPendingSongId = MutableStateFlow<Long?>(null)
+
+    /** 正在准备的入口目标歌；null = 没有入口在准备。 */
+    val entryPendingSongId: StateFlow<Long?> = _entryPendingSongId.asStateFlow()
+
+    /**
      * Hilt 成员注入：安装 SharedPreferences 后端并读回上次的意图。
      *
      * 由 Hilt 在构造后、首次使用前调用（框架用，业务代码不要调）。
@@ -90,6 +104,28 @@ class LoopIntent @Inject constructor() {
      */
     fun arm(songId: Long, previousRepeatMode: Int, previousShuffleEnabled: Boolean) {
         if (songId <= 0L) return
+        // 非入口 arm（debug /loop/enter 等）没有"准备中"语义：清掉上一次的入口标记。
+        _entryPendingSongId.value = null
+        applyArmed(songId, previousRepeatMode, previousShuffleEnabled)
+    }
+
+    /**
+     * 00029：UI「菜单·无缝循环 / 结果页·确认并保存」的唯一进入点。
+     *
+     * 与 [arm] 的区别只是多一个**非持久化**的入口标记；UI 随后必须立刻 pause + seek 0，
+     * 让旧位置的内容在源重建前就停声。协调器在环带源 READY 后清标记并起播。
+     *
+     * **顺序很重要**：[armed] 的订阅者可能在 [applyArmed] 的同一帧内联重算窗口；
+     * 入口标记必须先落值，否则第一次 refresh 会看到 entry=null 而走整表重建
+     * （真机 1318：整表重建 231ms 把 pause 命令堵在主线程后面，旧位置又播了 ~300ms）。
+     */
+    fun armEntry(songId: Long, previousRepeatMode: Int, previousShuffleEnabled: Boolean) {
+        if (songId <= 0L) return
+        _entryPendingSongId.value = songId
+        applyArmed(songId, previousRepeatMode, previousShuffleEnabled)
+    }
+
+    private fun applyArmed(songId: Long, previousRepeatMode: Int, previousShuffleEnabled: Boolean) {
         val armed = Armed(
             songId = songId,
             previousRepeatMode = previousRepeatMode,
@@ -99,8 +135,20 @@ class LoopIntent @Inject constructor() {
         store.save(armed)
     }
 
+    /** 入口准备结束（源已起播 / 回退 / 失败 / 超时）；songId 非空时只清该歌。 */
+    fun clearEntry(songId: Long? = null) {
+        if (songId == null || _entryPendingSongId.value == songId) {
+            _entryPendingSongId.value = null
+        }
+    }
+
+    /** 该歌的入口是否仍在准备。 */
+    fun isEntryPendingFor(songId: Long?): Boolean =
+        songId != null && songId > 0L && _entryPendingSongId.value == songId
+
     /** 清空意图(切歌退出 / 用户改 repeat 或 shuffle / 测试重置)。幂等。 */
     fun clear() {
+        _entryPendingSongId.value = null
         if (_armed.value == null) return
         _armed.value = null
         store.save(null)

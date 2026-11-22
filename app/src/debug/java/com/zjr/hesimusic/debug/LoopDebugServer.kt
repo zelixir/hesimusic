@@ -10,12 +10,14 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import com.zjr.hesimusic.data.model.Song
 import com.zjr.hesimusic.data.model.SongLoop
+import com.zjr.hesimusic.data.mapper.mediaIdToSongId
 import com.zjr.hesimusic.data.mapper.toMediaItem
 import com.zjr.hesimusic.loop.audio.SeamBufferMode
 import com.zjr.hesimusic.loop.audio.source.LoopEngineInfo
 import com.zjr.hesimusic.loop.audio.source.LoopPreviewDebugBridge
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMainPlayer
 import com.zjr.hesimusic.loop.audio.source.LoopSourceMode
+import com.zjr.hesimusic.loop.LoopIntent
 import com.zjr.hesimusic.loop.LoopPhase
 import com.zjr.hesimusic.loop.audio.source.LoopWholeTimeline
 import com.zjr.hesimusic.loop.audio.source.RingBandSource
@@ -120,6 +122,69 @@ object LoopDebugServer {
 
     @Volatile
     private var analyzingSongId: Long? = null
+
+    // ------------------------------------------------------------ 00029 入口 20ms 采样
+    //
+    // /state 经 HTTP 单次读取约 30ms，无法做 20ms 分辨率取证；这里在进程内主线程
+    // 以 20ms 节奏采样同一组字段（engine/claim/playing/position/outputFrames），
+    // 用于证明"入口请求后不再播旧位置"。采样只在 debug 源集，release 不含。
+
+    private val sampleLock = Any()
+    private var sampleRows: MutableList<Map<String, Any?>> = ArrayList()
+    private var sampleStartedNs = 0L
+    private var sampleIntervalMs = 20L
+    private var sampleDurationMs = 6000L
+    private var sampleNextIndex = 0
+
+    @Volatile
+    private var sampleRunning = false
+
+    @Volatile
+    private var sampleIntent: LoopIntent? = null
+
+    private val sampleTick = object : Runnable {
+        override fun run() {
+            val startedNs = sampleStartedNs
+            if (!sampleRunning || startedNs == 0L) return
+            val tMs = (System.nanoTime() - startedNs) / 1_000_000L
+            val controller = player?.controllerOrNull()
+            val songId = controller?.currentMediaItem?.mediaId?.let { mediaIdToSongId(it) }
+                ?: player?.cachedSongId()
+            val fields = LoopClaimStore.claimFor(songId).debugFields()
+            val probe = PlaybackInvariantMonitor.lastSampleMap()
+            val row = linkedMapOf<String, Any?>(
+                "tMs" to tMs,
+                "songId" to songId,
+                "engine" to if (fields.claimActive) "loop" else "exo",
+                "loopPath" to when {
+                    fields.claimActive && MainPlayerRouting.current.coordinatorReplacesItem -> "source"
+                    fields.claimActive -> "m3"
+                    else -> "none"
+                },
+                "claimed" to fields.claimed,
+                "claimActive" to fields.claimActive,
+                "playing" to (controller?.isPlaying ?: false),
+                "playWhenReady" to (controller?.playWhenReady ?: false),
+                "positionMs" to (controller?.currentPosition ?: 0L),
+                "playbackState" to (controller?.playbackState ?: 0),
+                "queueSize" to controller?.mediaItemCount,
+                "currentIndex" to controller?.currentMediaItemIndex,
+                "entryPending" to sampleIntent?.entryPendingSongId?.value,
+                "outputFrames" to probe?.get("outputFrames"),
+                "writtenFrames" to probe?.get("writtenFrames"),
+            )
+            synchronized(sampleLock) { sampleRows.add(row) }
+            sampleNextIndex += 1
+            val targetMs = sampleNextIndex.toLong() * sampleIntervalMs
+            val delayMs = (targetMs - tMs).coerceAtLeast(0L)
+            if (tMs < sampleDurationMs) {
+                mainHandler.postDelayed(this, delayMs)
+            } else {
+                sampleRunning = false
+                Log.i(TAG, "entry-sample done rows=" + sampleRows.size + " durationMs=" + sampleDurationMs)
+            }
+        }
+    }
 
     @Volatile
     private var analyzeJob: Job? = null
@@ -459,12 +524,50 @@ object LoopDebugServer {
             method == "POST" && segments == listOf("debug", "preview-seek") -> handlePreviewSeek(body)
             method == "GET" && segments == listOf("debug", "preview") -> handlePreviewSnapshot()
             method == "GET" && segments == listOf("debug", "frame-gaps") -> handleFrameGaps(params)
+            method == "POST" && segments == listOf("debug", "entry-sample") -> handleEntrySampleStart(body)
+            method == "GET" && segments == listOf("debug", "entry-sample") -> handleEntrySampleSnapshot()
             method == "POST" && segments == listOf("debug", "invariant") -> handleInvariantFault(body)
             else -> throw HttpError(404, "unknown endpoint: $method ${request.path}")
         }
     }
 
     // ------------------------------------------------------------ /state
+
+    // ------------------------------------------------------------ 00029 entry-sample
+
+    private fun handleEntrySampleStart(body: JSONObject?): Map<String, Any?> {
+        val durationMs = (body?.optLong("durationMs") ?: 6000L).coerceIn(500L, 20_000L)
+        val intervalMs = (body?.optLong("intervalMs") ?: 20L).coerceIn(5L, 200L)
+        val intent = deps().loopIntent()
+        mainHandler.post {
+            sampleRunning = false
+            mainHandler.removeCallbacks(sampleTick)
+            synchronized(sampleLock) { sampleRows = ArrayList() }
+            sampleStartedNs = System.nanoTime()
+            sampleIntervalMs = intervalMs
+            sampleDurationMs = durationMs
+            sampleNextIndex = 0
+            sampleIntent = intent
+            sampleRunning = true
+            mainHandler.post(sampleTick)
+            Log.i(TAG, "entry-sample start durationMs=$durationMs intervalMs=$intervalMs")
+        }
+        return linkedMapOf(
+            "started" to true,
+            "durationMs" to durationMs,
+            "intervalMs" to intervalMs,
+        )
+    }
+
+    private fun handleEntrySampleSnapshot(): Map<String, Any?> {
+        val rows = synchronized(sampleLock) { ArrayList(sampleRows) }
+        return linkedMapOf(
+            "running" to sampleRunning,
+            "intervalMs" to sampleIntervalMs,
+            "durationMs" to sampleDurationMs,
+            "samples" to rows,
+        )
+    }
 
     private fun handleFrameGaps(params: Map<String, String>): Map<String, Any?> {
         val windowMs = params["windowMs"]?.toLongOrNull() ?: 5_000L

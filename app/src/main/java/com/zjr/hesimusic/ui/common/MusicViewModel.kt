@@ -470,6 +470,55 @@ class MusicViewModel @Inject constructor(
     }
 
     /**
+     * 00029：启动无缝循环的**唯一入口**（长按菜单「无缝循环」/ 结果页「确认并保存」）。
+     *
+     * 用户裁决的目标语义：点了之后立刻不再播旧位置的内容，源就绪后从 0 起播；
+     * 宁可 50~150ms 静音，也不允许"先普通播放 ~100ms 再跳回 0"。
+     *
+     * 与 [playKeepPosition] 的关键区别是**不先 play() 普通源**：
+     * 1. 先 [LoopIntent.armEntry]（UI 立刻显示"准备中"，不显示旧位置）；
+     * 2. 立刻 `pause()`：停声命令与 arm 同帧发出。MediaController->播放器的落地实测
+     *    35~55ms（20ms 采样会看到 1~2 个旧位置点），之后旧位置不再出声；
+     * 3. 目标不是当前项时只切 item（服务层保留队列），不 prepare/play 普通源；
+     * 4. 位置立刻归 0：进度条一旦显示就是 0 附近；
+     * 5. 由 [com.zjr.hesimusic.service.LoopPlaybackCoordinator] 在环带源 READY 后
+     *    从 0 起播（entry 标记就是"要自动播放"的唯一依据）。
+     */
+    fun beginSeamlessLoopEntry(song: Song) {
+        val controller = mediaController ?: return
+        val currentMediaId = controller.currentMediaItem?.mediaId
+        val sameQueueHead = currentMediaId != null &&
+            _playQueue.value.firstOrNull()?.mediaId == currentMediaId
+        val keepCurrent = shouldKeepCurrentItem(
+            currentMediaId = currentMediaId,
+            songId = song.id,
+            sameQueueHead = sameQueueHead,
+        )
+        val state = _uiState.value
+        Log.d(
+            TAG,
+            "begin seamless entry songId=" + song.id + " keepCurrent=" + keepCurrent +
+                " posMs=" + controller.currentPosition,
+        )
+        // 先停声：入口请求一旦发生，旧位置的内容不允许再出声（00029 的第一判据）。
+        // 已经暂停时**不要**再发 pause：MediaController 的命令是异步的，迟到的 pause 会在
+        // 协调器 play() 之后落地，把刚起播的循环重新暂停（#88 结果页正是已暂停态）。
+        if (controller.playWhenReady) controller.pause()
+        loopIntent.armEntry(song.id, state.repeatMode, state.shuffleModeEnabled)
+        if (!keepCurrent) {
+            // 让目标歌成为当前项；armed 已置位，LoopSessionPlayer 会保留完整队列。
+            // 这里**不** prepare/play 普通源 —— 环带源重建会负责加载与起播。
+            controller.setMediaItem(song.toMediaItem())
+        }
+        if (controller.playbackState == Player.STATE_ENDED) {
+            controller.seekToDefaultPosition()
+        }
+        // 位置必须在旧位置被看到之前归 0（入口的 UI 语义：显示即 0）。
+        // 走 viewModel.seekTo：它会立即 updateState（乐观 0），UI 不必等 session 位置事件。
+        seekTo(0L)
+    }
+
+    /**
      * 播放 [song],但**当它已经是当前 item 时保持时间轴不动**。
      *
      * 无缝循环入口(菜单「无缝循环」/ 结果页「保存并播放」)专用:对正在播放的同一首歌
@@ -542,6 +591,8 @@ class MusicViewModel @Inject constructor(
     }
 
     fun pause() {
+        // 00029：入口准备期间用户按暂停 = 取消"源就绪后自动起播"。
+        loopIntent.clearEntry()
         mediaController?.pause()
     }
 

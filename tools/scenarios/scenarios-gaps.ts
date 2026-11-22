@@ -1314,6 +1314,8 @@ const g88: Scenario = {
     const baseSamples = await baseSampler0.stop();
     const base = writeStallStats(baseSamples);
     let gapSampler: WrittenFrameSampler | null = null;
+    // 00029: 供 finally 之后的 summary 使用（原实现把 claim 声明在 try 内，return 时越界）。
+    let claimOk = false;
     try {
       await ctx.ensureLoopPage(song.id);
       if (!(await hasText(ctx, "确认并保存"))) {
@@ -1345,6 +1347,7 @@ const g88: Scenario = {
         25000,
         150,
       );
+      claimOk = claimed.ok;
       const st = claimed.value ?? (await ctx.api.state());
       probingEntry = false;
       await probeTask;
@@ -1420,7 +1423,7 @@ const g88: Scenario = {
       await ctx.api.post("/loop/exit").catch(() => null);
       await sleep(400);
     }
-    return { checks, summary: "save -> claim=" + String(claim.ok) + "; audible" };
+    return { checks, summary: "save -> claim=" + String(claimOk) + "; audible" };
   },
 };
 

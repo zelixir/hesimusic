@@ -37,6 +37,10 @@ class LoopAwareMediaSourceFactory(
     }
 
     override fun createMediaSource(mediaItem: MediaItem): MediaSource {
+        // 00029 性能取证：整表 setMediaItems 会为队列每一项调用一次本方法；
+        // 入口静音窗口是否可控，取决于这 1714 次创建里有多少是真正的源构建。
+        val startedNs = System.nanoTime()
+        try {
         val tag = loopTagOf(mediaItem.localConfiguration?.tag, enabled)
         if (tag != null) {
             recordSelect(
@@ -74,6 +78,10 @@ class LoopAwareMediaSourceFactory(
                 " uri=" + mediaItem.localConfiguration?.uri,
         )
         return delegate.createMediaSource(mediaItem)
+        } finally {
+            createCount.incrementAndGet()
+            createNanos.addAndGet(System.nanoTime() - startedNs)
+        }
     }
 
     /**
@@ -108,6 +116,19 @@ class LoopAwareMediaSourceFactory(
     companion object {
         /** 00021 取证/兜底：真正由本工厂创建的循环源数量（进程内单调递增）。 */
         private val loopSourceCount = java.util.concurrent.atomic.AtomicLong(0L)
+
+        /** 00029 性能取证：自上次 reset 起 createMediaSource 的调用次数与总耗时。 */
+        private val createCount = java.util.concurrent.atomic.AtomicLong(0L)
+        private val createNanos = java.util.concurrent.atomic.AtomicLong(0L)
+
+        fun resetCreateStats() {
+            createCount.set(0L)
+            createNanos.set(0L)
+        }
+
+        /** @return (创建次数, 总耗时ms) */
+        fun drainCreateStats(): Pair<Long, Long> =
+            createCount.getAndSet(0L) to createNanos.getAndSet(0L) / 1_000_000L
 
         /** select 种类：循环 PCM 源。 */
         const val SELECT_LOOP: String = "loop"
@@ -167,6 +188,7 @@ class LoopAwareMediaSourceFactory(
             onSeamOutputFrames: ((Long) -> Unit)? = null,
         ): (MediaItem, LoopSourceItemTag) -> MediaSource =
             { item, tag ->
+                val startedNs = System.nanoTime()
                 val format = PcmFileFormatProbe.probe(tag.filePath)
                 val timeline = LoopingPcmTimeline(
                     songId = tag.songId,
@@ -176,7 +198,7 @@ class LoopAwareMediaSourceFactory(
                     entryPositionUs = tag.loopStartUs,
                     fullDurationUs = tag.fullDurationUs,
                 )
-                LoopingPcmExtractorMediaSource.create(
+                val source = LoopingPcmExtractorMediaSource.create(
                     item = item,
                     timeline = timeline,
                     provider = PcmDecoderRangeProvider(pcmDecoder, tag.filePath),
@@ -185,6 +207,13 @@ class LoopAwareMediaSourceFactory(
                     logger = { message -> RingBandLog.i(message) },
                     onSeamOutputFrames = onSeamOutputFrames,
                 )
+                RingBandLog.i(
+                    "source build songId=" + tag.songId +
+                        " ms=" + ((System.nanoTime() - startedNs) / 1_000_000L) +
+                        " wholeTimeline=" + timeline.wholeTimeline +
+                        " bandBytes=" + (timeline.loopFrames * timeline.bytesPerFrame),
+                )
+                source
             }
     }
 }

@@ -77,6 +77,9 @@ fun PlayerScreen(
     val loopNoticeCenter = remember(context) { AppLoopNoticeCenter.get(context) }
     val loopIntent = rememberLoopIntent()
     val armedLoop by loopIntent.armed.collectAsState()
+    // 00029：入口准备中（旧源已停声、环带源还没 READY）。UI 必须显示"准备中"而不是
+    // "未生效"（红色错误），且位置已归 0，不允许先显示旧位置。
+    val entryPendingSongId by loopIntent.entryPendingSongId.collectAsState()
     val seamlessEngaged = LoopSeamlessExitPolicy.shouldShowExitEntry(
         currentSongId = currentSongId,
         armedSongId = armedLoop?.songId,
@@ -314,10 +317,15 @@ fun PlayerScreen(
                 // - 回退态：原因文案（带 code）+ 退出；
                 // - 非无缝但有历史原因：只显示原因行（正常不会出现）。
                 if (seamlessEngaged) {
-                    val statusText = if (loopClaim.claimActive) {
-                        loopStatusText
-                    } else {
-                        loopClaim.fallbackReason?.let { fallbackNoticeMessage(it) }
+                    // 入口：arm 之后、claim 可见之前都算"准备中"。不能只看 entryPending ——
+                    // 协调器在起播时会清它，而 claim 还要等 READY+350ms，中间不能闪"未生效"。
+                    val entryPreparing = (entryPendingSongId != null &&
+                        entryPendingSongId == currentSongId) ||
+                        (!loopClaim.claimActive && loopClaim.fallbackReason == null)
+                    val statusText = when {
+                        loopClaim.claimActive -> loopStatusText
+                        entryPreparing -> "正在进入无缝循环…"
+                        else -> loopClaim.fallbackReason?.let { fallbackNoticeMessage(it) }
                             ?: "无缝循环未生效"
                     }
                     Row(
@@ -328,7 +336,7 @@ fun PlayerScreen(
                         Text(
                             text = statusText,
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (loopClaim.claimActive) {
+                            color = if (loopClaim.claimActive || entryPreparing) {
                                 MaterialTheme.colorScheme.primary
                             } else {
                                 MaterialTheme.colorScheme.error

@@ -376,14 +376,11 @@ class MainActivity : ComponentActivity() {
                                 musicViewModel = sharedMusicViewModel,
                                 onBack = { navController.popBackStack() },
                                 onSavedAndPlay = { song ->
-                                    // 契约 §2.4:确认保存 → **显式武装该歌的无缝意图** → 播放该歌 → 返回。
-                                    // arm 必须在 play 之前:先记下进入前的 repeat + shuffle,
-                                    // 退出无缝时才能恢复。repeat=ONE / shuffle=false 由播放层
-                                    // 在唯一写点(LoopPlaybackCoordinator)统一应用,这里不再散落写。
-                                    val state = sharedMusicViewModel.uiState.value
-                                    loopIntent.arm(song.id, state.repeatMode, state.shuffleModeEnabled)
-                                    // 同一首已在播时保持位置:不要重建队列(否则 flush + 静音)。
-                                    sharedMusicViewModel.playKeepPosition(song)
+                                    // 契约 §2.4：确认保存 → 显式武装该歌的无缝意图 → 返回。
+                                    // 00029：入口必须**先停旧声、位置归 0**，等环带源 READY 由
+                                    // 播放层从 0 起播；不再走 playKeepPosition（那会先播 ~100ms
+                                    // 旧位置再跳回 0，用户肉眼可见）。
+                                    sharedMusicViewModel.beginSeamlessLoopEntry(song)
                                     navController.popBackStack()
                                 },
                             )
@@ -464,13 +461,9 @@ private fun rememberLoopMenuActions(
     return remember(navController, musicViewModel, loopIntent) {
         LoopMenuActions(
             onSeamlessLoop = { song ->
-                // 显式进入:arm 必须在 play 之前(记录进入前的 repeat + shuffle,退出时恢复)。
-                // repeat=ONE / shuffle=false 由播放层在唯一写点统一应用 —— 同时关掉 shuffle
-                // 才能让播放页/底部条显示「单曲循环」而不是「随机播放」。
-                val state = musicViewModel.uiState.value
-                loopIntent.arm(song.id, state.repeatMode, state.shuffleModeEnabled)
-                // 同一首已在播时保持位置:不重建播放队列,避免一次 flush + 0.x 秒静音。
-                musicViewModel.playKeepPosition(song)
+                // 00029：显式进入 = armEntry + 立刻停旧声/位置归 0，源 READY 后由播放层
+                // 从 0 起播（repeat=ONE / shuffle=false 仍由播放层唯一写点应用）。
+                musicViewModel.beginSeamlessLoopEntry(song)
             },
             onSeamlessAnalysis = { song -> navController.navigate("loop/${song.id}") },
         )
