@@ -312,6 +312,36 @@ powershell -NoProfile -File tools/scenarios/run-scenarios.ps1 --non-exclusive
 
 ---
 
+### 3.8 进入循环可听空洞（00029）
+
+tap PCM 不能判入口空洞（tap 开启/换 sink 自身丢 ~1050ms），改用
+`/state.invariantProbe.writtenFrames` 的**停写间隔**：
+
+- **10ms 流水线采样**：`WrittenFrameSampler` 每 tick 补满 4 个并发 GET，用响应里的
+  `invariantProbe.atMs`（设备实时时间戳），不串行等 HTTP；
+- 连续两次成功采样 frames 不增 → 合并为停写段；段起点=最后一次写帧采样，终点=恢复写帧采样；
+- **采样失败是屏障**：失败样本两侧的 flat 对不合并（不把采样丢失算成停写）；
+  `dt > 40ms` 也断开；
+- 单段 >=30ms 才记录；停止/异常时 sampler 仍能 `stop()` 收尾。
+
+判据：
+
+| 场景 | 期望 |
+|---|---|
+| #88 确认并保存 | 停写段=1，单段 <=120ms |
+| #94 播放中进循环 | 停写段=1，单段 <=300ms |
+
+证据字段：`save-write-gaps` / `enter-write-gaps` 含 `samples/failed/gaps`
+（每段 `startMs/endMs/durationMs/open`）。
+
+离线自测（不占设备）：
+
+~~~powershell
+bun run tools/scenarios/check-audio-gap.ts
+~~~
+
+覆盖：连续写帧无段、单段 90ms、两段、失败样本屏障、长采样空洞、末尾 open 段、断言包装。
+
 ## 4. 场景数据与副作用
 
 - 选歌：优先"已确认循环、窗口 15~130s、时长 90~320s"里最短的一首；分析用"已确认循环、≤130s、可解码"的歌；

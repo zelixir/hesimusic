@@ -151,13 +151,15 @@ object LoopSourceRuntime {
     data class Revive(val prepare: Boolean, val play: Boolean)
 
     /**
-     * 换源后不会自动开始加载，必须按需 `prepare()`。
+     * 换源后要做的播放动作（绝不偷播）。
      *
-     * 规则（绝不偷播）：
-     * - `prepare`：[sourcesRebuilt] = true（整表 setMediaItems 会强制把播放器复位成 IDLE，
-     *   无论换源前是什么状态都必须 prepare 才会加载新源）；否则只在换源前是 [Player.STATE_IDLE]
-     *   时 prepare（`/loop/enter` 之类只 setMediaItems 没 prepare）；
-     * - `play`：换源前 `playWhenReady == true`（用户/接口明确要求播放）。
+     * 00029：整表 setMediaItems 在 `playWhenReady=true` 时已经触发了新源的加载
+     * （真机时间线：新 AudioTrack create/start），此时再显式 `prepare()` 会
+     * pause/flush 已配置好的 sink，再 configure 一次 → 单次进入出现 275/305ms 双静音。
+     * 因此**播放路径不再无条件 prepare**：以 rebuild 后的实际状态为准，
+     * 仍 IDLE 时必须 prepare（`play()` 本身不会自动 prepare，否则源停住/假循环）；
+     * 已经 BUFFERING/READY 时跳过 prepare，play() 只置 pwr，不会二次 configure。
+     * 暂停换源同理（IDLE 才 prepare，pwr=false 绝不偷播）。
      *
      * @param sourcesRebuilt 本次换源是否走了整表重建（[LoopPlaybackCoordinator] 的
      *   `rebuildQueueItem`；A-086 之后所有换源都是这条路）
@@ -166,8 +168,15 @@ object LoopSourceRuntime {
         stateBefore: Int,
         playWhenReadyBefore: Boolean,
         sourcesRebuilt: Boolean = false,
+        stateAfterRebuild: Int = Player.STATE_IDLE,
     ): Revive = Revive(
-        prepare = sourcesRebuilt || stateBefore == Player.STATE_IDLE,
+        prepare = when {
+            !sourcesRebuilt -> stateBefore == Player.STATE_IDLE
+            // 00029：整表 setMediaItems 后若播放器已在 BUFFERING/READY，新源已有加载路径
+            // （sink 已 configure），再 prepare() 会 flush 并二次 configure；
+            // 只有仍是 IDLE 才必须 prepare（play() 本身不会自动 prepare）。
+            else -> stateAfterRebuild == Player.STATE_IDLE
+        },
         play = playWhenReadyBefore,
     )
 }

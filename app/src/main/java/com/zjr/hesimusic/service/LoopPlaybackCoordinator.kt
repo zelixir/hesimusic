@@ -1217,9 +1217,21 @@ class LoopPlaybackCoordinator @Inject constructor(
         }
         // 整表重建把播放器复位成 IDLE：必须 prepare 才会加载新源；play 只在进入前就要求播放时补
         // （pwr=false 时绝不偷播）。
-        val revive = LoopSourceRuntime.revivePlan(stateBefore, playWhenReadyBefore, sourcesRebuilt = true)
+        // 00029：以“rebuild 完成后的实际状态”决定是否需要显式 prepare，避免二次 configure。
+        val stateAfterRebuild = player.playbackState
+        val revive = LoopSourceRuntime.revivePlan(
+            stateBefore,
+            playWhenReadyBefore,
+            sourcesRebuilt = true,
+            stateAfterRebuild = stateAfterRebuild,
+        )
         if (revive.prepare) player.prepare()
         if (revive.play) player.play()
+        Log.i(
+            TAG_PERF,
+            "source revive stateBefore=" + stateBefore + " stateAfterRebuild=" + stateAfterRebuild +
+                " pwr=" + playWhenReadyBefore + " prepare=" + revive.prepare + " play=" + revive.play,
+        )
         scheduleSourceInstallPublish(player, w, path)
         Log.i(
             TAG,
@@ -1395,7 +1407,13 @@ class LoopPlaybackCoordinator @Inject constructor(
         val mediaMs = plan?.seekMediaMs ?: player.currentPosition
         rebuildQueueItem(player, index, restored, mediaMs)
         LoopSourceRuntime.onReleased()
-        val revive = LoopSourceRuntime.revivePlan(stateBefore, playWhenReadyBefore, sourcesRebuilt = true)
+        val stateAfterRebuild = player.playbackState
+        val revive = LoopSourceRuntime.revivePlan(
+            stateBefore,
+            playWhenReadyBefore,
+            sourcesRebuilt = true,
+            stateAfterRebuild = stateAfterRebuild,
+        )
         if (revive.prepare) player.prepare()
         if (revive.play) player.play()
         Log.i(

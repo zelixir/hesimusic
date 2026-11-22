@@ -123,6 +123,8 @@ object RingBandSource {
             onSeamOutputFrames = onSeamOutputFrames,
             preludeReader = preludeReader,
             tailReader = tailReader,
+            referenceProvider = (provider as? PcmDecoderRangeProvider)
+                ?.takeIf { !it.path.startsWith("content:") },
         )
         val extractors = ExtractorsFactory { arrayOf<Extractor>(extractor) }
         val factory = ProgressiveMediaSource.Factory(

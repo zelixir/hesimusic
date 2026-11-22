@@ -184,13 +184,17 @@ class MediaCodecRingBandDecoder(
                                         info.presentationTimeUs,
                                         sampleRate,
                                     )
-                                    val skipFrames = (targetStartFrame - bufferStartFrame)
-                                        .coerceAtLeast(0L)
+                                    val skipFrames = RingBandSeamAlignment.skipFrames(
+                                        bufferStartFrame = bufferStartFrame,
+                                        targetStartFrame = targetStartFrame,
+                                    )
                                     val framesInBuffer = (pcm.size / outputBpf).toLong()
-                                    val available = (framesInBuffer - skipFrames)
-                                        .coerceAtLeast(0L)
-                                    val remaining = targetFrames - emittedFrames
-                                    val takeFrames = minOf(available, remaining)
+                                    val takeFrames = RingBandSeamAlignment.takeFrames(
+                                        bufferFrames = framesInBuffer,
+                                        skipFrames = skipFrames,
+                                        targetFrames = targetFrames,
+                                        emittedFrames = emittedFrames,
+                                    )
                                     if (takeFrames > 0L) {
                                         if (cancelled) {
                                             c.releaseOutputBuffer(outIdx, false)

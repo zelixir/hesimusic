@@ -343,3 +343,120 @@ powershell -NoProfile -File tools/loop-ondemand-bench/run.ps1 -Task readcost
 2. JVM 的 GC/分配统计与 ART 不同；本文比较的是"同一 JVM 内池化前后"，斜率比值可信，绝对值只作量级参考。
 3. `-Xmx384m` 复现了真机 402,653,184B 堆，因此 `heap/6` 与 32MiB 缓存上限与 app 完全一致。
 4. 仿真里 `provider.decode` 不分配真实 PCM 数据量（只放在堆上均值），对时序无影响。
+
+## 00029 真机实测补充（2026-11-22）
+
+本轮把前奏/尾奏从“每块新建 codec”改为常驻会话，并用 1307 包在 b1e84dad 上复测。三条与“块路径”容易混淆的现象，结论如下。
+
+### 1. 尾奏 45ppm 不是块解码缺陷（tap 采集时钟效应）
+
+证据（1307，tail 30s tap，A=92.752s / B=173.546s）：
+
+- `PcmRangeBlock frameAccounting blocks=30 shortfallTotal=0 cursor=8982049`
+  —— 30 个 1s 块累计短帧为 0，块边界没有丢帧。
+- `PcmResident ptsDrift frames=12915 buffers=64 next=7938814 pts=7937867 lastDelta=205`
+  之后每 64 个输出 buffer 固定 +13120 帧；`lastDelta=205` **恒定**，是解码器 PTS
+  与“按样本数推进的 nextFrame”的固定偏移，不是逐秒累积漂移。
+- tap 与 ffmpeg 参考：前 ~7s 偏移 0，之后约 1~2 帧/秒线性。两次从**不同媒体位置**
+  （B+5s 30s、B+20s 15s）起抓的 tail tap，都是“tap 开始约 7s 后”才开始漂；
+  两条 tap 的重叠段内容也互相错开 —— 说明漂移与 tap 采集/AudioTrack 时钟起点相关，
+  不是同一媒体时间点上的块拼接。
+
+**结论：45ppm 属于 tap 采集时钟效应，非产品缺陷；不要为它改解码/块逻辑。**
+
+若未来要彻底定死，建议在设备侧用**同一解码器连续解出 30s 参考 PCM**
+（例如新增一个 debug 端点一次返回整段 PCM，或落盘后 pull），再与 tap 做逐样本对齐；
+本次的 `/debug/decode-range` 每次 1s、chunk 之间本身有独立 PTS 对齐，不能作为连续参考。
+
+### 2. A 交界 213 帧偏移：prelude 尾块正确，环带首块 PTS 基准未对齐
+
+- tap 与**设备解码器连续参考**（单 chunk 92.000–93.000s）逐样本对齐：
+  A 前（92.1–92.6s）lag 恒 **1764 帧**（score 1.0）；A 后（92.8–92.9s）lag 恒 **1551 帧**（score 1.0）。
+  跨 A 步进 **213 帧（4.83ms）**。
+- prelude 最后一块：`last block allowShort block=92 frames=33164 expected=33164`，不多少、无静音补齐。
+- 环带首块：
+  `RingBand decode firstPtsUs=92748351 targetStartUs=92752000 bufferStartFrame=4090203 targetStartFrame=4090364 skipFrames=161 framesInBuffer=1152 takeFrames=991`
+  即首 buffer PTS 在 A 前 161 帧，skip=161（与 PTS 自洽）；但内容实测还差 213 帧，
+  说明 **解码器首 buffer 的 PTS 与其实际样本内容基准不一致**，不是 skip 方向/±1 舍入错误，
+  也不是 prelude 尾块少给帧。
+
+**当前不在生产代码里硬编码常量修正**：简单增减 skip 无法补回首 buffer 里不存在的样本；
+正确修法需要“首 buffer PTS→内容基准”的校准，或用 prelude 尾样本与环带首块做重叠对齐。
+下一步建议：在同一设备上再抓同一首歌的 A 交界，确认该偏移是否恒为 205~213 帧（与
+`PtsDrift lastDelta=205` 同数量级）；若恒定，再决定是走“首 buffer 丢弃 + 重叠拼接”
+还是“PTS 校准表”。
+
+### 3. 进入瞬间的 ~300ms 静音：sink 二次 reconfigure，不是块解码
+
+- 1307 entry：`source rebuild before/after` 各 1 次；entry 期间 **没有** `RingBand fill start`
+  （按需填充已生效）；`first-audio afterSeek=23ms`，`firstRead positionUs=371519`（0.371s，首块完整）。
+- tap-entry 仍有两段 ~275ms / ~305ms 静音；logcat 对应两次 AudioTrack 周期：
+  旧 track pause/flush → 新 track create/start（112.694）→ 又 pause/flush（112.907，extractor 才 init/read）
+  → 最终 configure/start（112.941/112.968）。
+- 即 `setMediaItems` 过渡先配置一次 sink，随后 source prepare/revive 再配置一次；
+  静音在 **sink 二次 reconfigure**，不在前奏块解码。建议 service 侧在 `stateBefore=BUFFERING`
+  时跳过第二次 `prepare()`（属 source-install 路径，本轮未改）。
+
+### 4. 区外 seek 分层判据（1307 实测）
+
+- first-audio 中位数：loop **6ms**（4/6/9）、prelude **92ms**（4/4/92/118/202）、tail **117ms**（1/7/117/126/149）。
+- 缓存命中（<=10ms）：loop 3/3、prelude 2/5、tail 2/5，合计 **7/13 ≈ 54%**；命中路径 5~8ms。
+- 冷远跳最大 **202ms**。
+- 按“缓存命中 <=60ms、冷远跳 <=250ms、命中率 >=50%”的分层判据：**PASS**。
+- 未缓存远跳物理下限：预热解码 1s 块约 60~100ms，而 ExoPlayer loading 线程 10~30ms 就到 extractor 首读；
+  只有目标块事先在缓存里才能 <=60ms。若要求未缓存也 <=60ms，需要更短的首块粒度或提前缓存，
+  不能靠“partial block 等满块”（实测会变慢）。
+
+### 5. A 交界自校准（方案 A，代码就绪）
+
+- 纯计算在 `RingBandSeamCalibrator`：用 prelude 尾 50ms 与环带前缀做重叠互相关，
+  返回 `applied/lagFrames/peak/windowFrames/reason`。
+- 护栏：峰值 >= 0.95、\|lag\| <= 1000 帧、实际重叠 >= 20ms；任一不满足 -> `applied=false`，
+  调用方保持现状。
+- 集成在 `RingBandExtractor`：prelude 离 A 约 1s 时在 **daemon 后台线程**启动一次；
+  从 prelude reader 缓存取 A 前 50ms（不推进游标），等环带前缀填充并算 lag。
+  A 交界只应用已算好的 lag；读路径不等待，算不出来就本圈不校准。
+  日志 `RingBand seam calibrate lag=... peak=... window=... applied=...`（失败带 reason）。
+- 单测：`RingBandSeamCalibratorTest`（50ms 窗口 + 213 帧 lag、1000 帧 lag、周期性内容 ambiguous-peak、
+  低峰值拒绝、窗口过小拒绝、超 1000 帧拒绝、无数据拒绝）。
+
+窗口取法：固定 prelude 尾 50ms；候选 lag 的实际重叠 = 窗口 - |lag|，所以 lag=213 时
+重叠约 1992 帧（45ms），满足 >=20ms 护栏，不需要放宽门槛。周期性内容用“次大峰（排除最大峰 ±3 帧）
+必须比最大峰低至少 0.02”防误配，否则 `ambiguous-peak` 放弃校准。
+
+### 6. 已知残差：A 交界约 214 帧（4.85ms，方案 C 默认关闭）
+
+**现象**
+
+- 跨 A（prelude→loop 首次交接）有**一次**约 213~214 帧（4.8~4.85ms）的内容跳变；
+- 只在**进入循环的第一次交接**出现，B→A 的每次折返仍 bit-exact（loop 133s 逐秒 offset 0）；
+- 前奏末块本身完整：`last block allowShort block=92 frames=33164 expected=33164`。
+
+**已试过的方法**
+
+1. 全窗口互相关（prelude 尾 50ms vs 环带前缀 50ms）：
+   - 两段是**相邻**而不是重叠，4.8ms 偏移时 95% 内容不是同一时间；
+   - 实测 `lag=-919 peak=0.6993 window=1286 applied=false reason=low-peak`，原理上测不出。
+2. 跨 A 参考段（独立解码 `[A-25ms,A+25ms]` 与环带前缀互相关）：
+   - 1312 实测 `lag=-187 peak=1.0000 window=1289 applied=true mode=reference`；
+   - lag 与实测 214 差 26 帧；且比 readRing 到 A **晚 172ms** 才完成，offset 来不及应用；
+   - 即使应用也只能把 214 压到约 27 帧，达不到 <=10。
+3. 前缀重叠兜底：4.8ms 小窗口误配风险高，仅保留为研究代码。
+
+**为什么暂不修**
+
+- 这是**一次性** 4.85ms 跳变，不是每几秒的爆音；风险收益不对称；
+- 开启“有时赶上、有时没赶上”会让偏移在 0 / 27 / 214 帧之间不确定，比恒定 214 更难排查；
+- 本轮已交付：循环段 bit-exact、入口 first-audio 38ms、爆音 0。
+
+**开关**
+
+- `RingBandExtractor.SEAM_CALIBRATION_ENABLED = false`（默认）；
+- false：不启动后台校准线程、不应用 offset，完全等同 1307 行为；
+- true：保留 1312 的跨 A 参考段逻辑，供以后研究/设备验证。
+
+**将来怎么修**
+
+- 校准必须在 A 前 **>=2s 完成**（当前独立参考解码 + 环带填充等待会拖到 A 后）；
+- 或者让环带首块解码直接按 **目标帧** 对齐（不依赖 PTS/skip 的 161 帧基准）；
+- 或接受一次性跳变，优先保证折返/爆音/入口。

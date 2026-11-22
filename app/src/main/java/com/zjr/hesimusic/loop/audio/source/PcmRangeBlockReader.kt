@@ -153,6 +153,44 @@ class PcmRangeBlockReader(
         kick()
     }
 
+    /**
+     * 只读缓存，不推进 cursor：后台校准用（00029 A 交界）。
+     * 目标区间必须落在同一个 1s 块内；块尚未 READY 时最多等 [timeoutMs]，期间会 kick 解码。
+     */
+    fun copyCachedRange(startAbsFrame: Long, count: Int, timeoutMs: Long): ByteArray? {
+        if (released || count <= 0) return null
+        val start = startAbsFrame.coerceIn(startFrame, endFrameExclusive)
+        val end = (start + count).coerceAtMost(endFrameExclusive)
+        val frames = (end - start).toInt()
+        if (frames <= 0) return null
+        val blockIndex = blockIndexForFrame(start)
+        val deadline = System.currentTimeMillis() + timeoutMs.coerceAtLeast(0L)
+        synchronized(lock) {
+            while (!released) {
+                val block = cache.get(blockIndex)
+                if (block != null &&
+                    start >= block.startFrame &&
+                    end <= block.startFrame + block.frames
+                ) {
+                    val from = ((start - block.startFrame) * bytesPerFrame).toInt()
+                    val to = from + frames * bytesPerFrame
+                    return block.data.copyOfRange(from, to)
+                }
+                if (cache.state(blockIndex) == PcmBlockCache.State.FAILED) return null
+                kick()
+                val left = deadline - System.currentTimeMillis()
+                if (left <= 0L) return null
+                try {
+                    lock.wait(left.coerceAtMost(10L))
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return null
+                }
+            }
+        }
+        return null
+    }
+
     /** seek 到绝对媒体帧 [absFrame]（钳在 [startFrame,endFrameExclusive)）。 */
     fun seekToFrame(absFrame: Long) {
         synchronized(lock) {

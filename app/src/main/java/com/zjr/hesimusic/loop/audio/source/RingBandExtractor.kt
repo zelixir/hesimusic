@@ -40,6 +40,8 @@ class RingBandExtractor(
     private val sleeper: (Long) -> Unit = { Thread.sleep(it) },
     private val preludeReader: PcmRangeBlockReader? = null,
     private val tailReader: PcmRangeBlockReader? = null,
+    /** A 交界校准用的独立一次性解码源（跨 A 参考段）；null = 不做 reference 校准。 */
+    private val referenceProvider: PcmRangeProvider? = null,
 ) : Extractor {
 
     private var trackOutput: TrackOutput? = null
@@ -108,6 +110,22 @@ class RingBandExtractor(
     @Volatile
     private var released = false
     private val bandBytes = timeline.loopFrames * timeline.bytesPerFrame
+
+    // ---- 00029 prelude→loop 首次交接自校准 ------------------------------------------
+    /** 参与校准的 prelude 尾样本窗口：50ms（A 前最后一段）。 */
+    private val seamTailFrames = (timeline.sampleRate / 20).coerceAtLeast(1)
+    private var seamCalibrationStarted = false
+
+    @Volatile
+    private var seamCalibrationFinished = false
+
+    @Volatile
+    private var seamCalibrationApplied = false
+
+    /** 环带 offset=0 的内容比 A 提前的帧数；0 = 未校准/内容已对齐。 */
+    @Volatile
+    private var seamOffsetFrames = 0
+    private var seamSkipLogged = false
 
     private val format: Format = Format.Builder()
         .setId("ring-band")
@@ -338,6 +356,7 @@ class RingBandExtractor(
         loopReaderSynced = false
         val frame = timeline.frameAtTimeline(positionUs)
         if (frame >= timeline.aFrame || timeline.localTimelineUs(positionUs) >= timeline.loopStartUs) {
+            // 00029：A 校准已在 prelude 阶段后台完成；真正到 A 时只由 readRing 应用已算好的 lag。
             // 用 epoch 内偏移比较，不能用绝对 T（tail 回绕后的 epochBase 远大于 A）。
             positionUs = timeline.epochStartUs(positionUs) + timeline.frameUs(timeline.aFrame)
             return readRing(request)
@@ -362,14 +381,136 @@ class RingBandExtractor(
         val pts = epochBase + timeline.frameUs(result.startFrame)
         positionUs = epochBase + timeline.frameUs(result.startFrame + result.frames)
         emittedFrames += result.frames.toLong()
+        val nextFrame = result.startFrame + result.frames
+        // 00029：离 A 还有 1s 时在后台启动校准；读路径绝不等环带填充。
+        maybeStartSeamCalibration(nextFrame)
         return Next(result.data, result.frames, pts, Long.MIN_VALUE)
+    }
+
+    /**
+     * 在 prelude 离 A 还有约 1s 时**后台**做 A 交界校准。
+     *
+     * - 从 prelude reader 缓存里取 A 前 50ms（不推进播放游标）；
+     * - 等环带前缀填充、算 lag、存 [seamOffsetFrames]；
+     * - 全部在 daemon 线程，读路径不等待；到 A 还没算完就本圈不校准。
+     */
+    private fun maybeStartSeamCalibration(nextFrame: Long) {
+        // 方案 C：默认关闭。1312 实测 lag=-187（期望 -213）且比 readRing 晚 172ms，
+        // 开启后行为会“偶尔生效/偶尔不生效”，比恒定 214 帧更难排查。保留代码供研究。
+        if (!SEAM_CALIBRATION_ENABLED) return
+        if (seamCalibrationStarted || !timeline.wholeTimeline) return
+        val prelude = preludeReader ?: return
+        val remaining = timeline.aFrame - nextFrame
+        // 2s 提前量：后台要等 A 前 50ms 块解码 + 环带前缀填充，留足时间在 A 前算完。
+        if (remaining <= 0L || remaining > timeline.sampleRate.toLong() * 2L) return
+        seamCalibrationStarted = true
+        val tailStart = timeline.aFrame - seamTailFrames
+        val ringFrames = seamTailFrames + SEAM_MAX_LAG_FRAMES
+        val refHalf = (timeline.sampleRate / 40).coerceAtLeast(1) // 25ms
+        val refStartFrame = (timeline.aFrame - refHalf).coerceAtLeast(0L)
+        val refEndFrame = (timeline.aFrame + refHalf)
+            .coerceAtMost(timeline.durationFrames)
+        Thread({
+            try {
+                val tail = prelude.copyCachedRange(
+                    startAbsFrame = tailStart,
+                    count = seamTailFrames,
+                    timeoutMs = 1_500L,
+                )
+                if (tail == null) {
+                    logSeamSkipped("tail-not-ready")
+                } else {
+                    ring.awaitRangeFilled(0L, ringFrames.toLong(), 1_200L)
+                    val filled = ring.contiguousFilledFrames(0L, ringFrames.toLong())
+                    if (filled < ringFrames.toLong()) {
+                        logSeamSkipped("ring-not-ready")
+                    } else {
+                        val prefix = ring.copyFrames(0L, ringFrames)
+                        var best: RingBandSeamCalibrator.Result? = null
+                        val ref = try {
+                            referenceProvider?.decode(
+                                timeline.frameUs(refStartFrame),
+                                timeline.frameUs(refEndFrame),
+                            )
+                        } catch (_: Throwable) {
+                            null
+                        }
+                        if (ref != null && ref.frames > 0L) {
+                            best = RingBandSeamCalibrator.calibrateCrossA(
+                                reference = ref.data,
+                                referenceFrames = ref.frames.toInt(),
+                                ringPrefix = prefix,
+                                ringPrefixFrames = ringFrames,
+                                bytesPerFrame = timeline.bytesPerFrame,
+                                maxLagFrames = SEAM_MAX_LAG_FRAMES,
+                                minPeak = 0.95,
+                                minOverlapFrames = (timeline.sampleRate / 50).coerceAtLeast(1),
+                            )
+                        }
+                        if (best?.applied != true) {
+                            val fallback = RingBandSeamCalibrator.calibratePrefixOnly(
+                                preludeTail = tail,
+                                preludeTailFrames = seamTailFrames,
+                                ringPrefix = prefix,
+                                ringPrefixFrames = ringFrames,
+                                bytesPerFrame = timeline.bytesPerFrame,
+                                maxLagFrames = SEAM_MAX_LAG_FRAMES,
+                            )
+                            if (fallback.applied || best == null) best = fallback
+                        }
+                        val result = best ?: RingBandSeamCalibrator.Result(
+                            false, 0, 0.0, 0, "no-result", "reference",
+                        )
+                        // reference 返回的是 ring 起点相对 A 的 s；读取偏移 = -s。
+                        val offset = if (result.mode == "reference") {
+                            -result.lagFrames
+                        } else {
+                            result.lagFrames
+                        }
+                        if (!released && result.applied) {
+                            seamOffsetFrames = offset
+                            seamCalibrationApplied = true
+                        }
+                        seamCalibrationFinished = true
+                        RingBandLog.i(
+                            "RingBand seam calibrate lag=" + result.lagFrames +
+                                " offset=" + offset +
+                                " peak=" + String.format(java.util.Locale.US, "%.4f", result.peak) +
+                                " window=" + result.windowFrames +
+                                " applied=" + result.applied +
+                                (result.mode?.let { " mode=" + it } ?: "") +
+                                (result.reason?.let { " reason=" + it } ?: ""),
+                        )
+                    }
+                }
+            } catch (t: Throwable) {
+                seamCalibrationFinished = true
+                logSeamSkipped("exception:" + t.javaClass.simpleName)
+            }
+        }, "SeamCalibrate").apply { isDaemon = true }.start()
+    }
+
+    private fun logSeamSkipped(reason: String) {
+        seamCalibrationFinished = true
+        RingBandLog.i("RingBand seam calibration skipped reason=" + reason)
     }
 
     /** 环带：B→A 由 RingBandReader 取模；切进来时按 positionUs 对齐 offset。 */
     private fun readRing(request: Int): Next? {
+        // 00029：A 交界只应用 prelude 阶段后台算好的 lag；算不出来就本圈不校准，
+        // 读路径绝不等待（入口静音优先）。方案 C 默认关闭，关闭时完全等同 1307。
+        if (SEAM_CALIBRATION_ENABLED && !loopReaderSynced && !seamCalibrationFinished && !seamSkipLogged) {
+            seamSkipLogged = true
+            RingBandLog.i("RingBand seam calibration skipped reason=not-ready")
+        }
         if (!loopReaderSynced) {
             val frame = timeline.frameAtTimeline(positionUs)
-            val offset = Math.floorMod(frame - timeline.aFrame, timeline.loopFrames)
+            var offset = Math.floorMod(frame - timeline.aFrame, timeline.loopFrames)
+            // 00029：校准值是“环带 offset=0 比 A 提前的帧数”，跳过这段前缀后从 A 开始。
+            offset = Math.floorMod(
+                offset + seamOffsetForRead(SEAM_CALIBRATION_ENABLED, seamCalibrationApplied, seamOffsetFrames),
+                timeline.loopFrames,
+            )
             reader.seekToOffset(offset, positionUs)
             renderer.requestFillAt(offset)
             loopReaderSynced = true
@@ -617,7 +758,7 @@ class RingBandExtractor(
         )
     }
 
-    private companion object {
+    companion object {
         const val READ_CHUNK_BYTES = 64 * 1024
         const val READ_WAIT_MS = 8L
         const val THROTTLE_SLEEP_MS = 4L
@@ -626,5 +767,20 @@ class RingBandExtractor(
 
         /** 前奏离 A 还有该时长时，提前要求环带跳到 A 填写（交界无缝）。 */
         const val PRELUDE_TO_LOOP_PREROLL_US = 2_000_000L
+
+        /** A 交界自校准允许的最大偏移（~23ms @44.1k）。 */
+        const val SEAM_MAX_LAG_FRAMES = 1_000
+
+        /**
+         * 方案 C：默认关闭 A 交界自校准。
+         *
+         * false = 不启动后台线程、不应用 offset，完全等同 1307；
+         * true  = 保留 1312 的跨 A 参考段逻辑，供以后研究/设备验证。
+         */
+        const val SEAM_CALIBRATION_ENABLED = false
+
+        /** 纯函数：只有开关打开且校准成功时才应用 offset，便于单测开关语义。 */
+        fun seamOffsetForRead(enabled: Boolean, applied: Boolean, offsetFrames: Int): Int =
+            if (enabled && applied) offsetFrames else 0
     }
 }

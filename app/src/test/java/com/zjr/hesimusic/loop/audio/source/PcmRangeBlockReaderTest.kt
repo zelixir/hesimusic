@@ -82,6 +82,22 @@ class PcmRangeBlockReaderTest {
     }
 
     @Test
+    fun copyCachedRangeDoesNotAdvanceCursor() {
+        val provider = AbsoluteProvider(sr, ch)
+        val reader = PcmRangeBlockReader(provider, 1_000L, 5_000L, sr, ch)
+        reader.seekToFrame(3_000L)
+        readExactly(reader, 100)
+        val cursor = reader.currentFrame()
+        val copy = reader.copyCachedRange(3_000L, 100, 500L)
+        assertTrue(copy != null)
+        for (i in 0 until 100) {
+            assertEquals(3_000 + i, sampleAt(copy!!, i))
+        }
+        assertEquals(cursor, reader.currentFrame())
+        reader.release()
+    }
+
+    @Test
     fun seekClampsToRangeAndEmptyRangeIsNoOp() {
         val provider = AbsoluteProvider(sr, ch)
         val reader = PcmRangeBlockReader(provider, 1_000L, 5_000L, sr, ch)

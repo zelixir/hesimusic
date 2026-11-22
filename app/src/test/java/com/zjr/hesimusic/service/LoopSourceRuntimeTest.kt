@@ -196,24 +196,40 @@ class LoopSourceRuntimeTest {
     }
 
     @Test
-    fun `rebuild always prepares even when the player was ready before`() {
-        // A-086:整表 setMediaItems 强制把播放器复位成 IDLE,所以换源前是 READY 也必须 prepare。
-        for (state in listOf(Player.STATE_IDLE, Player.STATE_BUFFERING, Player.STATE_READY, Player.STATE_ENDED)) {
+    fun `rebuild already loading skips the second prepare`() {
+        // 00029：setMediaItems 后播放器已在 BUFFERING/READY → sink 已 configure，
+        // 再 prepare() 会 flush 并二次 configure（275/305ms 双静音）。
+        for (stateAfter in listOf(Player.STATE_BUFFERING, Player.STATE_READY, Player.STATE_ENDED)) {
             val playing = LoopSourceRuntime.revivePlan(
-                state,
+                Player.STATE_READY,
                 playWhenReadyBefore = true,
                 sourcesRebuilt = true,
+                stateAfterRebuild = stateAfter,
             )
-            assertTrue("state=$state must prepare after a queue rebuild", playing.prepare)
-            assertTrue("用户要求播放时要补 play", playing.play)
-
-            val paused = LoopSourceRuntime.revivePlan(
-                state,
-                playWhenReadyBefore = false,
-                sourcesRebuilt = true,
-            )
-            assertTrue(paused.prepare)
-            assertFalse("pwr=false 绝不偷播", paused.play)
+            assertFalse("stateAfter=$stateAfter 换源后禁止再显式 prepare", playing.prepare)
+            assertTrue("仍然要补 play", playing.play)
         }
+    }
+
+    @Test
+    fun `rebuild left idle still prepares`() {
+        // play() 不会自动 prepare：rebuild 后仍 IDLE 时必须显式 prepare，否则源停住。
+        val playing = LoopSourceRuntime.revivePlan(
+            Player.STATE_READY,
+            playWhenReadyBefore = true,
+            sourcesRebuilt = true,
+            stateAfterRebuild = Player.STATE_IDLE,
+        )
+        assertTrue("IDLE 必须 prepare，否则假循环", playing.prepare)
+        assertTrue(playing.play)
+
+        val paused = LoopSourceRuntime.revivePlan(
+            Player.STATE_READY,
+            playWhenReadyBefore = false,
+            sourcesRebuilt = true,
+            stateAfterRebuild = Player.STATE_IDLE,
+        )
+        assertTrue("暂停换源仍必须 prepare", paused.prepare)
+        assertFalse("pwr=false 绝不偷播", paused.play)
     }
 }
