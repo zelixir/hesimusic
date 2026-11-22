@@ -985,7 +985,20 @@ const s10: Scenario = {
     const snap0 = ready.value;
     const a = Number(snap0.aMs);
     const b = Number(snap0.bMs);
-    const seekBefore = Number(snap0.seekRequests ?? 0);
+    // 00029/#10：冷启动首 seek 是环带首块解码 + AudioTrack sink 重启的原生成本
+    // （1313 也 ~261ms）。单独记录为 observation，不计入 5 次稳态判据；随后等 2s
+    // 让环/解码器进入稳态，再测 5 次。
+    const coldTarget = Math.round(a + (b - a) / 6);
+    const cold = await ctx.previewSeek(coldTarget);
+    const coldFirstSeekMs = cold.playoutMs ?? cold.advanceMs ?? null;
+    ctx.evidence.step("cold-first-seek", {
+      target: coldTarget,
+      playoutMs: cold.playoutMs,
+      stages: cold.stages,
+      note: "冷启动首 seek（原生成本：环带首块解码 + sink 重启）；不计入 5 次稳态判据",
+    });
+    await sleep(2000);
+    const seekBefore = Number((await ctx.api.preview()).snapshot?.seekRequests ?? 0);
     const details: string[] = [];
     let maxApply = 0;
     let minFrames = Number.MAX_SAFE_INTEGER;
@@ -1009,21 +1022,15 @@ const s10: Scenario = {
           apply > 100 ? "预览 seek 主线程应用延迟过高(issue 00023 量纲)" : undefined,
         ),
       );
-      // 出声延迟含 media3 seek 的 sink flush + AudioTrack 重启(原生成本)；未落地 jump-fill 前标 PENDING。
-      if (audibleLatency <= 100) {
-        checks.push(check("第 " + i + " 次 seek 出声 ≤100ms", true, "playout=" + audibleLatency + "ms"));
-      } else if (audibleLatency <= 300) {
-        checks.push(
-          pendingCheck(
-            "第 " + i + " 次 seek 出声 ≤100ms",
-            "playout=" + audibleLatency + "ms (AUDIBLE_NATIVE_COST, 依赖 jump-fill/media3 原生成本)",
-            "jump-fill/media3-native-cost",
-            "与场景 18(普通播放 seek 对照)比较;若同级则是原生成本,不是环带额外开销",
-          ),
-        );
-      } else {
-        checks.push(check("第 " + i + " 次 seek 出声 ≤100ms", false, "playout=" + audibleLatency + "ms (>300ms)"));
-      }
+      // 00029/#10：稳态判据按 lead 裁决改为 <=190ms；冷启动首 seek 已在上面单独记录。
+      checks.push(
+        check(
+          "第 " + i + " 次 seek 出声 ≤190ms",
+          audibleLatency <= 190,
+          "playout=" + audibleLatency + "ms",
+          audibleLatency > 190 ? "稳态 seek 出声超过 190ms（冷启动首 seek 另见 cold-first-seek）" : undefined,
+        ),
+      );
       checks.push(check("第 " + i + " 次 seek 位置对", posOk, "target=" + target + " display=" + r.displayAfterMs));
       checks.push(check("第 " + i + " 次 seek 有输出", r.framesDelta > 0, "framesΔ=" + r.framesDelta));
       details.push(i + ":apply" + apply + "/aud" + audibleLatency);
@@ -1039,7 +1046,10 @@ const s10: Scenario = {
       ),
     );
 
-    return { checks, summary: "5x " + details.join(",") + "; maxApply=" + maxApply + "ms" };
+    return {
+      checks,
+      summary: "5x " + details.join(",") + "; maxApply=" + maxApply + "ms; coldFirst=" + coldFirstSeekMs + "ms(原生成本,不计入)",
+    };
   },
 };
 

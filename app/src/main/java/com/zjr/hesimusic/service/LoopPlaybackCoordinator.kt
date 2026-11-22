@@ -1030,7 +1030,7 @@ class LoopPlaybackCoordinator @Inject constructor(
      * - 重放态必须在写窗口**之前**读：写 null 会让音频层状态立刻复位成 PASS_THROUGH；
      * - ring 覆盖度必须在写窗口**之后**读：setWindow 会让 ring 失效（可能由后台预分配重建）。
      */
-    private fun syncShape(
+    private suspend fun syncShape(
         window: LoopWindow?,
         player: Player,
         sourceSong: Song?,
@@ -1118,7 +1118,7 @@ class LoopPlaybackCoordinator @Inject constructor(
      * 失败回退（④ 的入口）：预检不通过（格式不支持 / 环过大 / 文件缺失）或该窗口已被登记
      * 不可用时，**不替换** item、不投影，位置继续是媒体时间，并打一条带原因的日志。
      */
-    private fun syncSourceItem(
+    private suspend fun syncSourceItem(
         window: LoopWindow?,
         player: Player,
         song: Song?,
@@ -1653,7 +1653,7 @@ class LoopPlaybackCoordinator @Inject constructor(
      *
      * @return true = 完成且当前项确实是带 tag 的循环 item；false = 已回滚，调用方必须走整表重建。
      */
-    private fun installEntrySourceItem(
+    private suspend fun installEntrySourceItem(
         player: Player,
         index: Int,
         item: MediaItem,
@@ -1671,9 +1671,26 @@ class LoopPlaybackCoordinator @Inject constructor(
             injected = true
             player.seekTo(index + 1, positionMs.coerceAtLeast(0L))
             val seekMs = SystemClock.elapsedRealtime() - startedMs - addMs
+            // 入口在暂停态（结果页确认）时 add/seek 的 MediaController 命令落地有异步窗口：
+            // 立刻读 currentMediaItemIndex 会看到旧 index，误判失败后走整表重建，首声多 300ms+。
+            // 等当前项真正切到 index+1（最多 250ms）再判定。
+            var currentIndex = player.currentMediaItemIndex
+            var tag = player.currentMediaItem?.localConfiguration?.tag as? LoopSourceItemTag
+            val waitStart = SystemClock.elapsedRealtime()
+            while (SystemClock.elapsedRealtime() - waitStart < 250L) {
+                currentIndex = player.currentMediaItemIndex
+                tag = player.currentMediaItem?.localConfiguration?.tag as? LoopSourceItemTag
+                val ready = currentIndex == index + 1 &&
+                    player.mediaItemCount == count + 1 &&
+                    tag != null &&
+                    tag.songId == expected.songId &&
+                    tag.loopStartUs == expected.loopStartUs &&
+                    tag.loopEndUs == expected.loopEndUs
+                if (ready) break
+                delay(5L)
+            }
+            val waitMs = SystemClock.elapsedRealtime() - waitStart
             val (created, createMs) = LoopAwareMediaSourceFactory.drainCreateStats()
-            val currentIndex = player.currentMediaItemIndex
-            val tag = player.currentMediaItem?.localConfiguration?.tag as? LoopSourceItemTag
             val ok = currentIndex == index + 1 &&
                 player.mediaItemCount == count + 1 &&
                 tag != null &&
@@ -1684,6 +1701,7 @@ class LoopPlaybackCoordinator @Inject constructor(
                 TAG_PERF,
                 "entry fast install insert count=" + count + " index=" + index +
                     " current=" + currentIndex + " addMs=" + addMs + " seekMs=" + seekMs +
+                    " waitMs=" + waitMs +
                     " sourcesCreated=" + created + " createSourcesMs=" + createMs +
                     " ok=" + ok,
             )
